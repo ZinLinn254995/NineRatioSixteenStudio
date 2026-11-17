@@ -1,0 +1,6 @@
+{
+  "name": "9:16 Thai-Burmese Studio",
+  "description": "Create 9:16 Thai phonetic & Burmese educational videos from Creative Commons 3D animations.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

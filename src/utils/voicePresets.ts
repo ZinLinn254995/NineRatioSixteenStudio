@@ -1,0 +1,128 @@
+import type { VoicePresetId, VoiceSettings } from "../types";
+
+export interface VoicePresetOption {
+  id: VoicePresetId;
+  label: string;
+  settings: VoiceSettings;
+}
+
+export const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
+  presetId: "original",
+  pitchSemitones: 0,
+  speed: 1,
+  tone: 0,
+  echo: 0,
+  robot: 0,
+};
+
+const YOUTUBE_SUPPORTED_RATES = [0.75, 1, 1.25, 1.5];
+
+export function getEffectivePlaybackSpeed(
+  sourceType: "youtube" | "local",
+  rawSpeed: number
+): number {
+  const clamped = Math.max(0.75, Math.min(1.4, rawSpeed || 1));
+  if (sourceType === "local") return clamped;
+  let nearest = 1;
+  let bestDiff = Infinity;
+  for (const r of YOUTUBE_SUPPORTED_RATES) {
+    const diff = Math.abs(r - clamped);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      nearest = r;
+    }
+  }
+  return nearest;
+}
+
+export const VOICE_PRESETS: VoicePresetOption[] = [
+  {
+    id: "original",
+    label: "Original",
+    settings: { ...DEFAULT_VOICE_SETTINGS },
+  },
+  {
+    id: "deep",
+    label: "Deep",
+    settings: {
+      presetId: "deep",
+      pitchSemitones: -4.5,
+      speed: 0.96,
+      tone: -5,
+      echo: 8,
+      robot: 0,
+    },
+  },
+  {
+    id: "cute",
+    label: "Cute",
+    settings: {
+      presetId: "cute",
+      pitchSemitones: 4.5,
+      speed: 1.06,
+      tone: 3,
+      echo: 0,
+      robot: 0,
+    },
+  },
+  {
+    id: "cartoon",
+    label: "Cartoon",
+    settings: {
+      presetId: "cartoon",
+      pitchSemitones: 6.5,
+      speed: 1.15,
+      tone: 5,
+      echo: 5,
+      robot: 0,
+    },
+  },
+  {
+    id: "robot",
+    label: "Robot",
+    settings: {
+      presetId: "robot",
+      pitchSemitones: -1.5,
+      speed: 1,
+      tone: 4,
+      echo: 18,
+      robot: 80,
+    },
+  },
+  {
+    id: "echo",
+    label: "Echo Hall",
+    settings: {
+      presetId: "echo",
+      pitchSemitones: 0,
+      speed: 1,
+      tone: -1,
+      echo: 65,
+      robot: 0,
+    },
+  },
+  {
+    id: "radio",
+    label: "Radio",
+    settings: {
+      presetId: "radio",
+      pitchSemitones: -1,
+      speed: 1,
+      tone: 7,
+      echo: 12,
+      robot: 0,
+    },
+  },
+  {
+    id: "calm",
+    label: "Calm",
+    settings: {
+      presetId: "calm",
+      pitchSemitones: -1.5,
+      speed: 0.86,
+      tone: -3,
+      echo: 15,
+      robot: 0,
+    },
+  },
+];
