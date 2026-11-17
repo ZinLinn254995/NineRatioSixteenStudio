@@ -102,6 +102,7 @@ async function readJson(response: Response): Promise<Record<string, any>> {
 export default function App() {
   const [darkMode, setDarkMode] = useState<boolean>(() => localStorage.getItem("theme") === "dark");
   const [project, setProject] = useState<VideoProject | null>(null);
+  const [loadedSubtitles, setLoadedSubtitles] = useState<SubtitleItem[]>([]);
   const [activeTab, setActiveTab] = useState<"subtitles" | "edit" | "voice">("subtitles");
   const [voiceSettings, setVoiceSettings] = useState<VoiceSettings>({ ...DEFAULT_VOICE_SETTINGS });
   const [videoEdit, setVideoEdit] = useState<VideoEditSettings>({ ...DEFAULT_VIDEO_EDIT });
@@ -124,9 +125,10 @@ export default function App() {
 
   const applySubtitles = (subtitles: SubtitleItem[], fileName: string) => {
     setSubtitleFileName(fileName);
+    setLoadedSubtitles(subtitles);
     setProject((current) => current ? { ...current, subtitles } : current);
     setCutTime(0);
-    setProcessError(subtitles.length ? null : "No valid subtitle cues were found in this file.");
+    setProcessError(subtitles.length || !fileName ? null : "No valid subtitle cues were found in this file.");
   };
 
   const uploadVideo = async (file: File) => {
@@ -134,7 +136,6 @@ export default function App() {
     setProcessError(null);
     setEmbeddedTracks([]);
     setSelectedTrack("");
-    setSubtitleFileName("");
     setIsPlaying(false);
     setCutTime(0);
 
@@ -156,7 +157,7 @@ export default function App() {
       sourceDurationSec: durationSec,
       targetDurationSec: durationSec,
       scenes: [{ index: 0, startSec: 0, endSec: durationSec, durationSec, summary: "Full video" }],
-      subtitles: [],
+      subtitles: loadedSubtitles,
       keyframeUrls: [],
     };
 
