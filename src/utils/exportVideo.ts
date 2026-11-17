@@ -1,6 +1,8 @@
 import { Muxer, ArrayBufferTarget } from "mp4-muxer";
 import type { SubtitleItem, VideoEditSettings, VideoProject, VoiceSettings } from "../types";
 import { buildCssFilterString } from "./videoFilters";
+import { uploadBlobInChunks } from "./uploadFile";
+import { getEffectivePlaybackSpeed } from "./voicePresets";
 
 export interface ExportProgress {
   phase: "preparing" | "rendering" | "muxing";
@@ -78,18 +80,18 @@ function measureSubtitleList(
   subtitles: SubtitleItem[],
   width: number
 ): { cards: MeasuredCard[]; totalHeight: number } {
-  const padX = 34;
+  const padX = 40;
   const maxInnerW = width - padX * 2 - 28;
-  let cursorY = 36;
+  let cursorY = 34;
   const cards: MeasuredCard[] = [];
 
   for (const sub of subtitles) {
     const cardTop = cursorY;
-    let y = 26;
+    let y = 28;
 
     ctx.font = "600 28px 'Plus Jakarta Sans', sans-serif";
     let lineX = 0;
-    const rowGap = 54;
+    const rowGap = 56;
     const wordLayouts: MeasuredCard["wordLayouts"] = [];
 
     for (const w of sub.words) {
@@ -101,7 +103,7 @@ function measureSubtitleList(
       wordLayouts.push({
         phonetic: w.phonetic,
         gloss: w.burmeseGloss || "",
-        x: padX + 14 + lineX,
+        x: padX + 18 + lineX,
         y: cardTop + y,
         w: tokenWidth,
         h: 36,
@@ -111,11 +113,11 @@ function measureSubtitleList(
       lineX += tokenWidth + 8;
     }
 
-    y += 56;
+    y += 66;
     ctx.font = "500 22px 'Noto Sans Myanmar', 'Plus Jakarta Sans', sans-serif";
-    const burmeseLines = wrapTextLines(ctx, sub.burmese, maxInnerW);
+    const burmeseLines = wrapTextLines(ctx, sub.burmese, maxInnerW - 34);
     const burmeseStartY = cardTop + y;
-    y += burmeseLines.length * 34 + 20;
+    y += burmeseLines.length * 34 + 22;
 
     cards.push({
       sub,
@@ -180,7 +182,11 @@ export async function exportProjectToMp4(
   const topVideoH = hasSubtitles ? Math.round((height * heightPct) / 100) : height;
   const listH = height - topVideoH;
   const fps = 24;
-  const speed = Math.max(0.75, Math.min(1.4, voiceSettings.speed || 1));
+  const speed = getEffectivePlaybackSpeed(
+    project.sourceType,
+    editSettings.playbackSpeed,
+    voiceSettings.speed
+  );
   const sourceTotalDuration = Math.max(2, project.targetDurationSec || 10);
   const totalDuration = sourceTotalDuration / speed;
   const totalFrames = Math.ceil(totalDuration * fps);
@@ -189,21 +195,8 @@ export async function exportProjectToMp4(
 
   let resolvedUploadId = project.uploadId;
   if (!resolvedUploadId && project.sourceType === "local" && project.localFile) {
-    const upResp = await fetch("/api/upload-raw", {
-      method: "POST",
-      headers: {
-        "Content-Type": project.localFile.type || "application/octet-stream",
-      },
-      body: project.localFile,
-    });
-    if (!upResp.ok) {
-      throw new Error("Failed to prepare uploaded audio for MP4 export.");
-    }
-    const upData = (await upResp.json()) as { uploadId?: string };
-    resolvedUploadId = upData.uploadId;
-    if (resolvedUploadId) {
-      project.uploadId = resolvedUploadId;
-    }
+    resolvedUploadId = await uploadBlobInChunks(project.localFile, project.localFile.name);
+    project.uploadId = resolvedUploadId;
   }
 
   // Ensure fonts are loaded before measuring canvas text
@@ -237,12 +230,18 @@ export async function exportProjectToMp4(
 
   const { cards } = measureSubtitleList(ctx, project.subtitles, width);
 
+  const getActiveCardIndex = (t: number): number => {
+    let idx = -1;
+    for (let i = 0; i < cards.length; i++) {
+      if (t >= cards[i].sub.startTime) idx = i;
+      else break;
+    }
+    return idx;
+  };
+
   // Smoothly compute target scrollY for any time t
   const getScrollYForTime = (t: number): number => {
-    let activeIdx = cards.findIndex((c) => t >= c.sub.startTime && t < c.sub.endTime);
-    if (activeIdx === -1) {
-      activeIdx = t >= sourceTotalDuration ? Math.max(0, cards.length - 1) : 0;
-    }
+    const activeIdx = Math.max(0, getActiveCardIndex(t));
     const active = cards[activeIdx];
     if (!active) return 0;
 
@@ -254,8 +253,8 @@ export async function exportProjectToMp4(
   let currentScrollY = 0;
 
   const renderFrameAtTime = async (t: number) => {
-    // 1. Background
-    ctx.fillStyle = darkMode ? "#0a0a0a" : "#ffffff";
+    // 1. Background (warm study paper in light mode, deep study slate in dark mode)
+    ctx.fillStyle = darkMode ? "#0b1120" : "#f8fafc";
     ctx.fillRect(0, 0, width, height);
 
     // 2. Top 9:16 Video Frame with Transform, Filter & Vignette
@@ -297,7 +296,7 @@ export async function exportProjectToMp4(
 
     if (localVideoEl && localVideoEl.readyState >= 2) {
       const targetSrcTime = mapCutTimeToSourceTime(project, t);
-      if (Math.abs(localVideoEl.currentTime - targetSrcTime) > 0.04) {
+      if (Math.abs(localVideoEl.currentTime - targetSrcTime) > 0.015) {
         localVideoEl.currentTime = targetSrcTime;
         await new Promise<void>((res) => {
           const onSeeked = () => {
@@ -305,7 +304,7 @@ export async function exportProjectToMp4(
             res();
           };
           localVideoEl?.addEventListener("seeked", onSeeked, { once: true });
-          setTimeout(res, 120);
+          setTimeout(res, 350);
         });
       }
       drawEditedSource(
@@ -349,10 +348,10 @@ export async function exportProjectToMp4(
 
     if (hasSubtitles) {
       // Subtle divider below video
-      ctx.fillStyle = darkMode ? "#262626" : "#e5e5e5";
+      ctx.fillStyle = darkMode ? "#1e293b" : "#cbd5e1";
       ctx.fillRect(0, topVideoH, width, 1);
 
-      // 3. Bottom Scrolling List Item Subtitle View
+      // 3. Bottom Scrolling List Item Subtitle View (Educational Study Palette)
       const targetScroll = getScrollYForTime(t);
       currentScrollY += (targetScroll - currentScrollY) * 0.14;
 
@@ -362,74 +361,134 @@ export async function exportProjectToMp4(
       ctx.clip();
       ctx.translate(0, topVideoH - currentScrollY);
 
-      for (const card of cards) {
+      const activeCardIdx = getActiveCardIndex(t);
+
+      for (let ci = 0; ci < cards.length; ci++) {
+        const card = cards[ci];
         const screenTop = card.topY - currentScrollY;
         if (screenTop + card.height < -60 || screenTop > listH + 60) continue;
 
-        const isActive = t >= card.sub.startTime && t < card.sub.endTime;
+        const isActive = ci === activeCardIdx;
 
-        // Active row highlight surface (monochrome crisp contrast)
-        if (isActive) {
-          ctx.fillStyle = darkMode ? "#171717" : "#f4f4f5";
-          drawRoundedRect(ctx, 20, card.topY, width - 40, card.height, 18);
-          ctx.fill();
-          ctx.strokeStyle = darkMode ? "#2e2e2e" : "#e4e4e7";
-          ctx.lineWidth = 1.5;
-          ctx.stroke();
-        }
+        // Educational card container surface
+        ctx.fillStyle = isActive
+          ? darkMode
+            ? "#131c31"
+            : "#ffffff"
+          : darkMode
+            ? "rgba(15, 23, 42, 0.55)"
+            : "rgba(255, 255, 255, 0.72)";
+        drawRoundedRect(ctx, 22, card.topY, width - 44, card.height, 18);
+        ctx.fill();
+        ctx.strokeStyle = isActive
+          ? darkMode
+            ? "rgba(99, 102, 241, 0.45)"
+            : "#c7d2fe"
+          : darkMode
+            ? "#1e293b"
+            : "#e2e8f0";
+        ctx.lineWidth = isActive ? 1.75 : 1;
+        ctx.stroke();
 
-        // Line 1: Word-by-word English phonetic Thai with animated active highlight
-        for (const wl of card.wordLayouts) {
-          const isSpoken = isActive && t >= wl.startTime && t <= wl.endTime;
-          const wasSpoken = isActive && t > wl.endTime;
+        // Educational left accent bar
+        ctx.fillStyle = isActive
+          ? darkMode
+            ? "#818cf8"
+            : "#4f46e5"
+          : darkMode
+            ? "#1e293b"
+            : "#e2e8f0";
+        drawRoundedRect(ctx, 32, card.topY + 18, 5, Math.max(24, card.height - 36), 3);
+        ctx.fill();
+
+        // Line 1: Word-by-word English phonetic Thai with warm Amber study-highlighter
+        for (let wi = 0; wi < card.wordLayouts.length; wi++) {
+          const wl = card.wordLayouts[wi];
+          const isLastWord = wi === card.wordLayouts.length - 1;
+          const isSpoken =
+            isActive &&
+            t >= wl.startTime &&
+            (isLastWord ? t <= wl.endTime : t < wl.endTime);
+          const wasSpoken = isActive && (isLastWord ? t > wl.endTime : t >= wl.endTime);
 
           if (isSpoken) {
-            ctx.fillStyle = darkMode ? "#ffffff" : "#0a0a0a";
+            ctx.fillStyle = darkMode ? "#fbbf24" : "#fde047";
             drawRoundedRect(ctx, wl.x - 4, wl.y - 26, wl.w + 2, 38, 9);
             ctx.fill();
+            if (!darkMode) {
+              ctx.strokeStyle = "#facc15";
+              ctx.lineWidth = 1;
+              ctx.stroke();
+            }
           }
 
           ctx.font = "600 28px 'Plus Jakarta Sans', sans-serif";
           if (isSpoken) {
-            ctx.fillStyle = darkMode ? "#0a0a0a" : "#ffffff";
+            ctx.fillStyle = "#0f172a";
           } else if (isActive) {
             ctx.fillStyle = darkMode
               ? wasSpoken
-                ? "#fafafa"
-                : "#a3a3a3"
+                ? "#a5b4fc"
+                : "#cbd5e1"
               : wasSpoken
-                ? "#0a0a0a"
-                : "#525252";
+                ? "#4338ca"
+                : "#334155";
           } else {
-            ctx.fillStyle = darkMode ? "#737373" : "#737373";
+            ctx.fillStyle = darkMode ? "#64748b" : "#64748b";
           }
           ctx.fillText(wl.phonetic, wl.x + 5, wl.y);
 
-          // Optional Burmese word gloss below key words (like reference screenshot)
+          // Word gloss below key words (Amber when active spoken, Teal for study gloss)
           if (wl.gloss) {
             ctx.font = "500 13px 'Noto Sans Myanmar', sans-serif";
-            ctx.fillStyle = isActive
+            ctx.fillStyle = isSpoken
               ? darkMode
-                ? "#a3a3a3"
-                : "#525252"
-              : darkMode
-                ? "#525252"
-                : "#a3a3a3";
+                ? "#fcd34d"
+                : "#b45309"
+              : isActive
+                ? darkMode
+                  ? "#5eead4"
+                  : "#0f766e"
+                : darkMode
+                  ? "#475569"
+                  : "#94a3b8";
             ctx.fillText(wl.gloss, wl.x + 5, wl.y + 22);
           }
         }
 
-        // Line 2: Burmese translation line
+        // Subtle divider between Phonetics & Burmese Translation
+        const dividerY = card.burmeseStartY - 30;
+        ctx.fillStyle = isActive
+          ? darkMode
+            ? "rgba(99, 102, 241, 0.22)"
+            : "#e0e7ff"
+          : darkMode
+            ? "#1e293b"
+            : "#f1f5f9";
+        ctx.fillRect(54, dividerY, width - 96, 1);
+
+        // Lesson cue index number
+        ctx.font = "600 15px 'JetBrains Mono', monospace";
+        ctx.fillStyle = isActive
+          ? darkMode
+            ? "#818cf8"
+            : "#6366f1"
+          : darkMode
+            ? "#475569"
+            : "#94a3b8";
+        ctx.fillText(String(ci + 1).padStart(2, "0"), 54, card.burmeseStartY - 1);
+
+        // Line 2: Burmese translation line (rich Teal for active study reading)
         ctx.font = "500 22px 'Noto Sans Myanmar', 'Plus Jakarta Sans', sans-serif";
         ctx.fillStyle = isActive
           ? darkMode
-            ? "#e5e5e5"
-            : "#171717"
+            ? "#99f6e4"
+            : "#115e59"
           : darkMode
-            ? "#737373"
-            : "#737373";
+            ? "#64748b"
+            : "#64748b";
         card.burmeseLines.forEach((line, li) => {
-          ctx.fillText(line, 48, card.burmeseStartY + li * 34);
+          ctx.fillText(line, 86, card.burmeseStartY + li * 34);
         });
       }
 
@@ -556,15 +615,27 @@ export async function exportProjectToMp4(
 
   onProgress({ phase: "muxing", percent: 90 });
 
+  let renderedVideoUploadId: string | undefined;
+  let videoBase64: string | undefined;
+  if (videoBytes.byteLength > 8 * 1024 * 1024) {
+    const renderedBlob = new Blob([videoBytes.buffer as ArrayBuffer], {
+      type: "application/octet-stream",
+    });
+    renderedVideoUploadId = await uploadBlobInChunks(renderedBlob, `rendered.${videoFormat}`);
+  } else {
+    videoBase64 = uint8ToBase64(videoBytes);
+  }
+
   const resp = await fetch("/api/mux-mp4", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      videoBase64: uint8ToBase64(videoBytes),
+      videoBase64,
+      renderedVideoUploadId,
       videoFormat,
       uploadId: resolvedUploadId,
       scenes: project.scenes,
-      voiceSettings,
+      voiceSettings: { ...voiceSettings, speed },
     }),
   });
 

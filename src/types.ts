@@ -1,3 +1,5 @@
+export type YouTubeLicenseFilter = "all" | "creative_commons" | "standard";
+
 export interface YouTubeVideo {
   videoId: string;
   title: string;
@@ -7,6 +9,7 @@ export interface YouTubeVideo {
   thumbnail: string;
   viewCountText: string;
   publishedTimeText: string;
+  license?: "creative_commons" | "standard";
 }
 
 export interface SceneSelection {
@@ -50,6 +53,7 @@ export interface ActiveMediaSource {
   videoId?: string;
   localUrl?: string;
   localFile?: File;
+  uploadId?: string;
   title: string;
   channel: string;
   durationSec: number;
@@ -102,6 +106,7 @@ export type VideoFilterPresetId =
 
 export interface VideoEditSettings {
   filterPreset: VideoFilterPresetId | "custom";
+  playbackSpeed: number;
   zoom: number;
   panX: number;
   panY: number;
@@ -119,4 +124,28 @@ export interface VideoEditSettings {
   blurPx: number;
   vignette: number;
 }
+
+export interface SavedProjectRecord {
+  id: string;
+  title: string;
+  sourceType: "youtube" | "local";
+  videoId?: string;
+  channel: string;
+  thumbnail?: string;
+  sourceDurationSec: number;
+  targetDurationSec: number;
+  selectedScenes: SceneSelection[];
+  scenes: SpeakingScene[];
+  subtitles: SubtitleItem[];
+  keyframeUrls: string[];
+  voiceSettings: VoiceSettings;
+  editSettings: VideoEditSettings;
+  hasLocalVideoBlob: boolean;
+  localFileName?: string;
+  localFileType?: string;
+  localFileSize?: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
 

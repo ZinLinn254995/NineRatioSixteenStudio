@@ -15,13 +15,15 @@ export const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
   robot: 0,
 };
 
-const YOUTUBE_SUPPORTED_RATES = [0.75, 1, 1.25, 1.5];
+const YOUTUBE_SUPPORTED_RATES = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
 
 export function getEffectivePlaybackSpeed(
   sourceType: "youtube" | "local",
-  rawSpeed: number
+  rawSpeed: number,
+  extraSpeed = 1
 ): number {
-  const clamped = Math.max(0.75, Math.min(1.4, rawSpeed || 1));
+  const combined = (rawSpeed || 1) * (extraSpeed || 1);
+  const clamped = Math.max(0.25, Math.min(2.5, combined));
   if (sourceType === "local") return clamped;
   let nearest = 1;
   let bestDiff = Infinity;

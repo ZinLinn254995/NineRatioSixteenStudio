@@ -1,6 +1,7 @@
 import {
   FlipHorizontal2,
   FlipVertical2,
+  Gauge,
   Maximize2,
   Minimize2,
   RotateCcw,
@@ -10,13 +11,35 @@ import {
 } from "lucide-react";
 import type { VideoEditSettings } from "../types";
 import { DEFAULT_VIDEO_EDIT, VIDEO_FILTER_PRESETS } from "../utils/videoFilters";
+import { getEffectivePlaybackSpeed } from "../utils/voicePresets";
 
 interface VideoEditPanelProps {
   settings: VideoEditSettings;
+  sourceType?: "youtube" | "local";
+  sourceDurationSec?: number;
+  voiceSpeed?: number;
   onChange: (next: VideoEditSettings) => void;
 }
 
-export function VideoEditPanel({ settings, onChange }: VideoEditPanelProps) {
+const SPEED_PRESETS = [0.5, 0.75, 1, 1.25, 1.5, 2];
+
+function formatSpeedDuration(sec: number): string {
+  const s = Math.max(0, sec);
+  const mins = Math.floor(s / 60);
+  const rem = s - mins * 60;
+  if (mins > 0) {
+    return `${mins}m ${rem.toFixed(1)}s`;
+  }
+  return `${s.toFixed(1)}s`;
+}
+
+export function VideoEditPanel({
+  settings,
+  sourceType = "local",
+  sourceDurationSec,
+  voiceSpeed = 1,
+  onChange,
+}: VideoEditPanelProps) {
   const updateField = <K extends keyof VideoEditSettings>(
     key: K,
     value: VideoEditSettings[K],
@@ -30,13 +53,21 @@ export function VideoEditPanel({ settings, onChange }: VideoEditPanelProps) {
   };
 
   const isModified = JSON.stringify(settings) !== JSON.stringify(DEFAULT_VIDEO_EDIT);
+  const isYoutube = sourceType === "youtube";
+  const effectiveSpeed = getEffectivePlaybackSpeed(
+    sourceType,
+    settings.playbackSpeed,
+    voiceSpeed
+  );
+  const scaledDurationSec =
+    sourceDurationSec && sourceDurationSec > 0 ? sourceDurationSec / effectiveSpeed : null;
 
   return (
     <div className="space-y-4 pb-6">
       {/* Header + Reset */}
       <div className="flex items-center justify-between">
         <span className="text-xs font-medium text-neutral-500 dark:text-neutral-400">
-          Transform & Framing
+          Video Speed & Framing
         </span>
         {isModified && (
           <button
@@ -48,6 +79,61 @@ export function VideoEditPanel({ settings, onChange }: VideoEditPanelProps) {
             <span>Reset All</span>
           </button>
         )}
+      </div>
+
+      {/* Global Video Speed Control */}
+      <div className="p-4 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-900 space-y-3.5">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-1.5 text-xs font-medium text-neutral-900 dark:text-neutral-100">
+            <Gauge className="w-3.5 h-3.5 text-neutral-500 dark:text-neutral-400" />
+            <span>Playback Speed</span>
+          </div>
+          <div className="flex items-center gap-2 text-xs font-mono-tabular">
+            <span className="text-neutral-950 dark:text-white font-semibold">
+              {isYoutube ? `${effectiveSpeed}x` : `${settings.playbackSpeed.toFixed(2)}x`}
+            </span>
+            {scaledDurationSec !== null && sourceDurationSec && (
+              <span className="text-neutral-500 dark:text-neutral-400">
+                ({formatSpeedDuration(sourceDurationSec)} →{" "}
+                <span className="text-neutral-900 dark:text-neutral-100 font-medium">
+                  {formatSpeedDuration(scaledDurationSec)}
+                </span>
+                )
+              </span>
+            )}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5">
+          {SPEED_PRESETS.map((presetSpeed) => {
+            const active = Math.abs(settings.playbackSpeed - presetSpeed) < 0.01;
+            return (
+              <button
+                key={presetSpeed}
+                type="button"
+                onClick={() => updateField("playbackSpeed", presetSpeed)}
+                className={`h-8 px-2 rounded-lg text-xs font-mono-tabular font-medium border transition-colors cursor-pointer ${
+                  active
+                    ? "bg-neutral-950 text-white border-neutral-950 dark:bg-white dark:text-neutral-950 dark:border-white"
+                    : "bg-white dark:bg-neutral-950 text-neutral-700 dark:text-neutral-300 border-neutral-200 dark:border-neutral-700 hover:border-neutral-400 dark:hover:border-neutral-500"
+                }`}
+              >
+                {presetSpeed}x
+              </button>
+            );
+          })}
+        </div>
+
+        <input
+          type="range"
+          min={0.5}
+          max={2}
+          step={isYoutube ? 0.25 : 0.05}
+          value={settings.playbackSpeed}
+          onChange={(e) => updateField("playbackSpeed", parseFloat(e.target.value))}
+          aria-label="Global video playback speed"
+          className="w-full h-1.5 rounded-full appearance-none bg-neutral-200 dark:bg-neutral-800 accent-neutral-950 dark:accent-white cursor-pointer"
+        />
       </div>
 
       {/* Transform Controls: Zoom, Rotate, Flip, Fit, Pan */}

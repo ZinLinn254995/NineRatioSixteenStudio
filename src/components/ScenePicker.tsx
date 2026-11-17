@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, Copy, Loader2, Plus, Trash2 } from "lucide-react";
 import type { ActiveMediaSource, SceneSelection, VideoEditSettings, VoiceSettings } from "../types";
-import { applyVoiceEffectsToVideoElement, resumeAllVoiceContexts } from "../utils/webAudioVoice";
 import { buildCssFilterString, buildCssTransformString } from "../utils/videoFilters";
+import { getEffectivePlaybackSpeed } from "../utils/voicePresets";
+import { LocalVideoTimelineEditor } from "./LocalVideoTimelineEditor";
 
 interface YTPreviewPlayer {
   seekTo: (seconds: number, allowSeekAhead: boolean) => void;
@@ -60,6 +61,7 @@ interface ScenePickerProps {
   onAddScene: (startSec: number, endSec: number) => void;
   onUpdateScene: (id: string, startSec: number, endSec: number) => void;
   onRemoveScene: (id: string) => void;
+  onReplaceScenes?: (scenes: SceneSelection[]) => void;
   onGenerate: () => void;
   onDetectedDuration?: (dur: number) => void;
 }
@@ -73,12 +75,12 @@ export function ScenePicker({
   onAddScene,
   onUpdateScene,
   onRemoveScene,
+  onReplaceScenes,
   onGenerate,
   onDetectedDuration,
 }: ScenePickerProps) {
   const ytHostRef = useRef<HTMLDivElement | null>(null);
   const ytPlayerRef = useRef<YTPreviewPlayer | null>(null);
-  const localVideoRef = useRef<HTMLVideoElement | null>(null);
 
   const [currentSec, setCurrentSec] = useState(0);
   const [startInput, setStartInput] = useState("0");
@@ -167,31 +169,22 @@ export function ScenePicker({
   }, [media.sourceType, media.videoId]);
 
   useEffect(() => {
-    const vid = localVideoRef.current;
-    if (media.sourceType === "local" && vid) {
-      vid.preservesPitch = true;
-      (vid as unknown as { webkitPreservesPitch?: boolean }).webkitPreservesPitch = true;
-      vid.playbackRate = voiceSettings.speed;
-      applyVoiceEffectsToVideoElement(vid, voiceSettings, !vid.paused);
-    } else if (media.sourceType === "youtube" && ytPlayerRef.current) {
+    const effectiveSpeed = getEffectivePlaybackSpeed(
+      media.sourceType,
+      editSettings.playbackSpeed,
+      voiceSettings.speed
+    );
+    if (media.sourceType === "youtube" && ytPlayerRef.current) {
       try {
-        const clamped = Math.max(0.75, Math.min(1.4, voiceSettings.speed || 1));
-        const rates = [0.75, 1, 1.25, 1.5];
-        const nearest = rates.reduce((a, b) =>
-          Math.abs(b - clamped) < Math.abs(a - clamped) ? b : a
-        );
-        ytPlayerRef.current.setPlaybackRate?.(nearest);
+        ytPlayerRef.current.setPlaybackRate?.(effectiveSpeed);
       } catch {
         // ignore
       }
     }
-  }, [media.sourceType, voiceSettings]);
+  }, [media.sourceType, voiceSettings.speed, editSettings.playbackSpeed]);
 
   const seekSourceTo = (sec: number) => {
-    if (media.sourceType === "local" && localVideoRef.current) {
-      localVideoRef.current.currentTime = sec;
-      localVideoRef.current.play().catch(() => {});
-    } else if (ytPlayerRef.current) {
+    if (ytPlayerRef.current) {
       try {
         ytPlayerRef.current.seekTo(sec, true);
       } catch {
@@ -235,53 +228,41 @@ export function ScenePicker({
 
   return (
     <div className="flex flex-col gap-4 pb-6">
-      {/* Interactive Video Preview Player */}
-      <div className="relative w-full aspect-video rounded-xl overflow-hidden bg-neutral-950 border border-neutral-200 dark:border-neutral-800">
-        {media.sourceType === "local" && media.localUrl ? (
-          <video
-            ref={localVideoRef}
-            src={media.localUrl}
-            controls
-            playsInline
-            onPlay={(e) => {
-              resumeAllVoiceContexts();
-              e.currentTarget.preservesPitch = true;
-              e.currentTarget.playbackRate = voiceSettings.speed;
-              applyVoiceEffectsToVideoElement(e.currentTarget, voiceSettings, true);
-            }}
-            onTimeUpdate={(e) => setCurrentSec(Math.floor(e.currentTarget.currentTime))}
-            onLoadedMetadata={(e) => {
-              const d = e.currentTarget.duration;
-              if (d && Number.isFinite(d)) onDetectedDuration?.(Math.round(d));
-            }}
-            style={{
-              transform: buildCssTransformString(editSettings),
-              filter: buildCssFilterString(editSettings),
-            }}
-            className="w-full h-full object-contain bg-black origin-center transition-transform duration-75"
-          />
-        ) : (
-          <div
-            ref={ytHostRef}
-            className="w-full h-full origin-center transition-transform duration-75"
-            style={{
-              transform: buildCssTransformString(editSettings),
-              filter: buildCssFilterString(editSettings),
-            }}
-          />
-        )}
-        {editSettings.vignette > 0 && (
-          <div
-            aria-hidden="true"
-            className="absolute inset-0 pointer-events-none"
-            style={{
-              background: `radial-gradient(circle, transparent 42%, rgba(0,0,0,${(
-                (editSettings.vignette / 100) * 0.85
-              ).toFixed(2)}) 100%)`,
-            }}
-          />
-        )}
-      </div>
+      {media.sourceType === "local" ? (
+        <LocalVideoTimelineEditor
+          media={media}
+          scenes={scenes}
+          voiceSettings={voiceSettings}
+          editSettings={editSettings}
+          onUpdateScene={onUpdateScene}
+          onRemoveScene={onRemoveScene}
+          onReplaceScenes={onReplaceScenes}
+          onDetectedDuration={onDetectedDuration}
+        />
+      ) : (
+        <>
+          {/* Interactive YouTube Video Preview Player */}
+          <div className="relative w-full aspect-video rounded-xl overflow-hidden bg-neutral-950 border border-neutral-200 dark:border-neutral-800">
+            <div
+              ref={ytHostRef}
+              className="w-full h-full origin-center transition-transform duration-75"
+              style={{
+                transform: buildCssTransformString(editSettings),
+                filter: buildCssFilterString(editSettings),
+              }}
+            />
+            {editSettings.vignette > 0 && (
+              <div
+                aria-hidden="true"
+                className="absolute inset-0 pointer-events-none"
+                style={{
+                  background: `radial-gradient(circle, transparent 42%, rgba(0,0,0,${(
+                    (editSettings.vignette / 100) * 0.85
+                  ).toFixed(2)}) 100%)`,
+                }}
+              />
+            )}
+          </div>
 
       {/* YouTube Title & Copy Link Bar */}
       {youtubeUrl && (
@@ -438,11 +419,25 @@ export function ScenePicker({
           </div>
         )}
       </div>
+        </>
+      )}
 
       {/* Generate Subtitles Action Bar */}
       <div className="flex items-center justify-between gap-4 pt-1">
         <span className="text-xs font-mono-tabular text-neutral-500 dark:text-neutral-400">
-          {scenes.length} {scenes.length === 1 ? "scene" : "scenes"} · {Math.round(totalSelectedSec)}s
+          {scenes.length} {scenes.length === 1 ? "scene" : "scenes"} ·{" "}
+          {(() => {
+            const spd = getEffectivePlaybackSpeed(
+              media.sourceType,
+              editSettings.playbackSpeed,
+              voiceSettings.speed
+            );
+            const scaled = Math.round((totalSelectedSec / spd) * 10) / 10;
+            const rawRounded = Math.round(totalSelectedSec * 10) / 10;
+            return Math.abs(spd - 1) > 0.01
+              ? `${rawRounded}s → ${scaled}s (${spd.toFixed(2).replace(/\.00$/, "")}x)`
+              : `${rawRounded}s`;
+          })()}
         </span>
 
         <button

@@ -3,16 +3,20 @@ import { motion } from "motion/react";
 import { Pause, Play, Volume2, VolumeX } from "lucide-react";
 import type { SubtitleItem, VideoEditSettings, VideoProject, VoiceSettings } from "../types";
 import { YouTubeScenePlayer } from "./YouTubeScenePlayer";
+import { getEffectivePlaybackSpeed } from "../utils/voicePresets";
 
 interface Stage9x16Props {
   project: VideoProject | null;
   cutTime: number;
+  seekNonce: number;
   isPlaying: boolean;
   muted: boolean;
   voiceSettings: VoiceSettings;
   editSettings: VideoEditSettings;
   onTogglePlay: () => void;
   onSeek: (timeSec: number) => void;
+  onTimeUpdate: (newCutTime: number) => void;
+  onEnded: () => void;
   onToggleMute: () => void;
 }
 
@@ -26,26 +30,32 @@ function formatSec(sec: number): string {
 export function Stage9x16({
   project,
   cutTime,
+  seekNonce,
   isPlaying,
   muted,
   voiceSettings,
   editSettings,
   onTogglePlay,
   onSeek,
+  onTimeUpdate,
+  onEnded,
   onToggleMute,
 }: Stage9x16Props) {
   const listContainerRef = useRef<HTMLDivElement | null>(null);
   const itemRefs = useRef<Record<string, HTMLButtonElement | null>>({});
 
-  const activeSub: SubtitleItem | undefined =
-    project?.subtitles.find((s) => cutTime >= s.startTime && cutTime < s.endTime) ??
-    project?.subtitles[project?.subtitles.length - 1];
+  // Keep the current subtitle selected across silent gaps until the next subtitle starts
+  const activeSub: SubtitleItem | undefined = project?.subtitles.reduce<
+    SubtitleItem | undefined
+  >((acc, s) => (cutTime >= s.startTime ? s : acc), undefined);
+
+  const scrollTargetSub: SubtitleItem | undefined = activeSub ?? project?.subtitles[0];
 
   // Auto-scroll the active list item smoothly inside the 9:16 list view
   useEffect(() => {
-    if (!activeSub || !listContainerRef.current) return;
+    if (!scrollTargetSub || !listContainerRef.current) return;
     const container = listContainerRef.current;
-    const el = itemRefs.current[activeSub.id];
+    const el = itemRefs.current[scrollTargetSub.id];
     if (!el) return;
 
     const containerHeight = container.clientHeight;
@@ -54,9 +64,18 @@ export function Stage9x16({
       top: Math.max(0, targetTop),
       behavior: "smooth",
     });
-  }, [activeSub?.id]);
+  }, [scrollTargetSub?.id]);
 
   const totalDuration = project?.targetDurationSec || 90;
+  const effectiveSpeed = project
+    ? getEffectivePlaybackSpeed(
+        project.sourceType,
+        editSettings.playbackSpeed,
+        voiceSettings.speed
+      )
+    : 1;
+  const displayCutTime = cutTime / effectiveSpeed;
+  const displayTotalDuration = totalDuration / effectiveSpeed;
   const progressPct = totalDuration > 0 ? Math.min(100, (cutTime / totalDuration) * 100) : 0;
 
   return (
@@ -98,11 +117,14 @@ export function Stage9x16({
                 localUrl={project.localUrl}
                 scenes={project.scenes}
                 cutTime={cutTime}
+                seekNonce={seekNonce}
                 isPlaying={isPlaying}
                 muted={muted}
                 voiceSettings={voiceSettings}
                 editSettings={editSettings}
                 fallbackThumbnail={project.keyframeUrls[0]}
+                onTimeUpdate={onTimeUpdate}
+                onEnded={onEnded}
               />
             </div>
 
@@ -110,9 +132,9 @@ export function Stage9x16({
             {project.subtitles.length > 0 && (
               <div
                 ref={listContainerRef}
-                className="relative flex-1 overflow-y-auto no-scrollbar px-3.5 py-4 space-y-2.5 bg-white dark:bg-neutral-950"
+                className="relative flex-1 overflow-y-auto no-scrollbar px-3.5 py-4 space-y-2.5 bg-slate-50 dark:bg-[#0b1120]"
               >
-                {project.subtitles.map((sub) => {
+                {project.subtitles.map((sub, subIdx) => {
                   const isActive = activeSub?.id === sub.id;
                   const localElapsed = Math.max(0, cutTime - sub.startTime);
 
@@ -124,20 +146,37 @@ export function Stage9x16({
                       }}
                       type="button"
                       onClick={() => onSeek(sub.startTime)}
-                      className={`w-full text-left rounded-xl px-3.5 py-3 transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900 dark:focus-visible:ring-white ${
+                      className={`relative w-full text-left rounded-xl pl-4 pr-3.5 py-3 transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 dark:focus-visible:ring-indigo-400 ${
                         isActive
-                          ? "bg-neutral-100 dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700"
-                          : "bg-transparent border border-transparent hover:bg-neutral-50 dark:hover:bg-neutral-900/50 opacity-60 hover:opacity-90"
+                          ? "bg-white dark:bg-[#131c31] border border-indigo-200/90 dark:border-indigo-500/40 shadow-sm shadow-indigo-950/5"
+                          : "bg-white/65 dark:bg-slate-900/45 border border-slate-200/70 dark:border-slate-800/70 opacity-70 hover:opacity-95 hover:border-indigo-200/60 dark:hover:border-indigo-500/30"
                       }`}
                     >
-                      {/* Line 1: Thai in English phonetics with animated word-by-word highlights */}
+                      {/* Educational Left Accent Bar */}
+                      <span
+                        aria-hidden="true"
+                        className={`absolute left-1.5 top-3 bottom-3 w-1 rounded-full transition-colors ${
+                          isActive
+                            ? "bg-indigo-600 dark:bg-indigo-400"
+                            : "bg-slate-200 dark:bg-slate-800"
+                        }`}
+                      />
+
+                      {/* Line 1: Thai in English phonetics with warm Amber study-highlighter word sync */}
                       <div className="flex flex-wrap items-start gap-x-1.5 gap-y-2 leading-snug">
                         {sub.words.map((word, wi) => {
+                          const isLastWord = wi === sub.words.length - 1;
                           const isWordSpoken =
                             isActive &&
                             localElapsed >= word.startOffsetSec &&
-                            localElapsed <= word.endOffsetSec;
-                          const wasWordSpoken = isActive && localElapsed > word.endOffsetSec;
+                            (isLastWord
+                              ? localElapsed <= word.endOffsetSec
+                              : localElapsed < word.endOffsetSec);
+                          const wasWordSpoken =
+                            isActive &&
+                            (isLastWord
+                              ? localElapsed > word.endOffsetSec
+                              : localElapsed >= word.endOffsetSec);
 
                           return (
                             <span
@@ -153,12 +192,12 @@ export function Stage9x16({
                                 transition={{ duration: 0.14, ease: [0.16, 1, 0.3, 1] }}
                                 className={`px-1.5 py-0.5 rounded-md text-[15px] font-semibold tracking-tight transition-colors duration-150 ${
                                   isWordSpoken
-                                    ? "bg-neutral-950 text-white dark:bg-white dark:text-neutral-950"
+                                    ? "bg-amber-300 text-slate-950 ring-1 ring-amber-400/80 dark:bg-amber-400 dark:text-slate-950 dark:ring-amber-300/70 shadow-xs"
                                     : isActive
                                       ? wasWordSpoken
-                                        ? "text-neutral-950 dark:text-neutral-50"
-                                        : "text-neutral-600 dark:text-neutral-400"
-                                      : "text-neutral-700 dark:text-neutral-300"
+                                        ? "text-indigo-700 dark:text-indigo-300"
+                                        : "text-slate-700 dark:text-slate-300"
+                                      : "text-slate-500 dark:text-slate-400"
                                 }`}
                               >
                                 {word.phonetic}
@@ -167,8 +206,10 @@ export function Stage9x16({
                                 <span
                                   className={`font-myanmar text-[10px] leading-tight mt-0.5 ${
                                     isWordSpoken
-                                      ? "text-neutral-900 dark:text-neutral-100 font-medium"
-                                      : "text-neutral-500 dark:text-neutral-400"
+                                      ? "text-amber-700 dark:text-amber-300 font-semibold"
+                                      : isActive
+                                        ? "text-teal-700 dark:text-teal-300 font-medium"
+                                        : "text-slate-400 dark:text-slate-500"
                                   }`}
                                 >
                                   {word.burmeseGloss}
@@ -180,15 +221,32 @@ export function Stage9x16({
                       </div>
 
                       {/* Line 2: Burmese translation */}
-                      <p
-                        className={`font-myanmar text-[13.5px] leading-relaxed mt-2 ${
+                      <div
+                        className={`mt-2 pt-2 border-t flex items-baseline gap-2 ${
                           isActive
-                            ? "text-neutral-950 dark:text-neutral-100 font-medium"
-                            : "text-neutral-600 dark:text-neutral-400"
+                            ? "border-indigo-100 dark:border-indigo-500/20"
+                            : "border-slate-100 dark:border-slate-800/70"
                         }`}
                       >
-                        {sub.burmese}
-                      </p>
+                        <span
+                          className={`text-[10px] font-mono-tabular font-semibold shrink-0 ${
+                            isActive
+                              ? "text-indigo-500 dark:text-indigo-400"
+                              : "text-slate-400 dark:text-slate-500"
+                          }`}
+                        >
+                          {String(subIdx + 1).padStart(2, "0")}
+                        </span>
+                        <p
+                          className={`font-myanmar text-[13.5px] leading-relaxed ${
+                            isActive
+                              ? "text-teal-800 dark:text-teal-200 font-medium"
+                              : "text-slate-500 dark:text-slate-400"
+                          }`}
+                        >
+                          {sub.burmese}
+                        </p>
+                      </div>
                     </button>
                   );
                 })}
@@ -224,7 +282,8 @@ export function Stage9x16({
             />
             <div className="flex items-center justify-between text-[11px] text-neutral-500 dark:text-neutral-400 font-mono-tabular">
               <span>
-                {formatSec(cutTime)} / {formatSec(totalDuration)}
+                {formatSec(displayCutTime)} / {formatSec(displayTotalDuration)}
+                {Math.abs(effectiveSpeed - 1) > 0.01 ? ` (${effectiveSpeed.toFixed(2).replace(/\.00$/, "")}x)` : ""}
               </span>
               <span>{Math.round(progressPct)}%</span>
             </div>

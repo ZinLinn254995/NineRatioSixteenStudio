@@ -2,6 +2,7 @@ import type { VideoEditSettings, VideoFilterPresetId } from "../types";
 
 export const DEFAULT_VIDEO_EDIT: VideoEditSettings = {
   filterPreset: "normal",
+  playbackSpeed: 1,
   zoom: 1,
   panX: 0,
   panY: 0,
