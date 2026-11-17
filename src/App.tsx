@@ -1025,6 +1025,7 @@ export default function App() {
               voiceSettings={voiceSettings}
               editSettings={videoEdit}
               onTogglePlay={handleTogglePlay}
+              onPlayingChange={setIsPlaying}
               onSeek={handleSeek}
               onTimeUpdate={handlePlayerTimeUpdate}
               onEnded={handlePlaybackEnded}

@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import { motion } from "motion/react";
 import { Pause, Play, Volume2, VolumeX } from "lucide-react";
 import type { SubtitleItem, VideoEditSettings, VideoProject, VoiceSettings } from "../types";
-import { YouTubeScenePlayer } from "./YouTubeScenePlayer";
+import { YouTubeScenePlayer, type YouTubeScenePlayerHandle } from "./YouTubeScenePlayer";
 import { getEffectivePlaybackSpeed } from "../utils/voicePresets";
 
 interface Stage9x16Props {
@@ -14,6 +14,7 @@ interface Stage9x16Props {
   voiceSettings: VoiceSettings;
   editSettings: VideoEditSettings;
   onTogglePlay: () => void;
+  onPlayingChange: (playing: boolean) => void;
   onSeek: (timeSec: number) => void;
   onTimeUpdate: (newCutTime: number) => void;
   onEnded: () => void;
@@ -36,11 +37,13 @@ export function Stage9x16({
   voiceSettings,
   editSettings,
   onTogglePlay,
+  onPlayingChange,
   onSeek,
   onTimeUpdate,
   onEnded,
   onToggleMute,
 }: Stage9x16Props) {
+  const playerRef = useRef<YouTubeScenePlayerHandle | null>(null);
   const listContainerRef = useRef<HTMLDivElement | null>(null);
   const itemRefs = useRef<Record<string, HTMLButtonElement | null>>({});
 
@@ -82,7 +85,7 @@ export function Stage9x16({
     <div className="flex flex-col items-center justify-center w-full gap-3">
       {/* Strictly 9:16 Vertical Video Frame */}
       <div
-        className="relative h-[min(calc(100vh-175px),675px)] min-h-[460px] max-w-full aspect-[9/16] rounded-2xl overflow-hidden border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 flex flex-col shadow-sm"
+        className="relative h-[min(calc(100dvh-180px),675px)] min-h-[300px] max-w-full aspect-[9/16] rounded-2xl overflow-hidden border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 flex flex-col shadow-sm"
       >
         {!project ? (
           <div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
@@ -112,6 +115,7 @@ export function Stage9x16({
               }`}
             >
               <YouTubeScenePlayer
+                ref={playerRef}
                 sourceType={project.sourceType}
                 videoId={project.videoId}
                 localUrl={project.localUrl}
@@ -124,6 +128,7 @@ export function Stage9x16({
                 editSettings={editSettings}
                 fallbackThumbnail={project.keyframeUrls[0]}
                 onTimeUpdate={onTimeUpdate}
+                onPlayingChange={onPlayingChange}
                 onEnded={onEnded}
               />
             </div>
@@ -262,7 +267,13 @@ export function Stage9x16({
         <div className="w-full max-w-[380px] flex items-center gap-3">
           <button
             type="button"
-            onClick={onTogglePlay}
+            onClick={() => {
+              if (playerRef.current) {
+                playerRef.current.togglePlay();
+              } else {
+                onTogglePlay();
+              }
+            }}
             aria-label={isPlaying ? "Pause" : "Play"}
             className="w-10 h-10 rounded-lg bg-neutral-950 text-white dark:bg-white dark:text-neutral-950 flex items-center justify-center shrink-0 hover:opacity-90 transition-opacity cursor-pointer"
           >
