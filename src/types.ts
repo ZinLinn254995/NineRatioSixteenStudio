@@ -19,6 +19,7 @@ export interface SceneSelection {
 }
 
 export interface SpeakingScene {
+  id?: string;
   index: number;
   startSec: number;
   endSec: number;

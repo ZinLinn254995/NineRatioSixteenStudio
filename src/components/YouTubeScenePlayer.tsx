@@ -779,14 +779,18 @@ export const YouTubeScenePlayer = forwardRef<
       applyVoiceEffectsToVideoElement(vid, voiceSettings, isPlaying);
     }
 
-    if (!isPlaying) {
+    if (isPlaying) {
+      if (vid.paused) {
+        startLocalPlayback();
+      }
+    } else {
       autoMutedFallbackRef.current = false;
       setAutoMutedFallback(false);
       if (!vid.paused) {
         vid.pause();
       }
     }
-  }, [sourceType, isPlaying, muted, voiceSettings, editSettings.playbackSpeed, hasVoiceEffects]);
+  }, [sourceType, isPlaying, muted, voiceSettings, editSettings.playbackSpeed, hasVoiceEffects, startLocalPlayback]);
 
   // Master player-driven 60fps clock for Local <video> (directly tracks vid.currentTime)
   useEffect(() => {
@@ -874,15 +878,19 @@ export const YouTubeScenePlayer = forwardRef<
         className="relative w-full h-full overflow-hidden bg-neutral-950 cursor-pointer group"
       >
         <video
+          key={localUrl}
           ref={localVideoRef}
           src={localUrl}
           preload="auto"
           playsInline
           muted={muted || autoMutedFallback}
+          onLoadedData={() => setLocalPlayError(null)}
           onLoadedMetadata={(e) => {
+            setLocalPlayError(null);
             applyPendingLocalSeek(e.currentTarget);
           }}
           onCanPlay={(e) => {
+            setLocalPlayError(null);
             applyPendingLocalSeek(e.currentTarget);
           }}
           onPlay={(e) => {

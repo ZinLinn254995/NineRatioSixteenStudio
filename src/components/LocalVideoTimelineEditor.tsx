@@ -300,14 +300,16 @@ export function LocalVideoTimelineEditor({
     };
 
     captureFrames().finally(() => {
+      hiddenVid.onloadeddata = null;
+      hiddenVid.onerror = null;
       hiddenVid.removeAttribute("src");
-      hiddenVid.load();
     });
 
     return () => {
       cancelled = true;
+      hiddenVid.onloadeddata = null;
+      hiddenVid.onerror = null;
       hiddenVid.removeAttribute("src");
-      hiddenVid.load();
     };
   }, [media.localUrl, sourceDuration]);
 
@@ -951,11 +953,14 @@ export function LocalVideoTimelineEditor({
             const filterCss = buildCssFilterString(editSettings);
             return (
               <video
+                key={media.localUrl}
                 ref={videoRef}
                 src={media.localUrl}
                 preload="auto"
                 playsInline
+                onLoadedData={() => setPlayError(null)}
                 onLoadedMetadata={(e) => {
+                  setPlayError(null);
                   const vidEl = e.currentTarget;
                   const d = vidEl.duration;
                   if (Number.isFinite(d) && d > 0) {
@@ -981,6 +986,7 @@ export function LocalVideoTimelineEditor({
                   }
                 }}
                 onCanPlay={(e) => {
+                  setPlayError(null);
                   const vidEl = e.currentTarget;
                   if (pendingSeekSecRef.current !== null) {
                     const d = vidEl.duration;

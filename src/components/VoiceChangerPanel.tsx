@@ -1,5 +1,4 @@
-import { useRef } from "react";
-import { Download, Loader2, RotateCcw, Upload } from "lucide-react";
+import { RotateCcw } from "lucide-react";
 import type { VoiceSettings } from "../types";
 import {
   DEFAULT_VOICE_SETTINGS,
@@ -10,26 +9,15 @@ import { resumeAllVoiceContexts } from "../utils/webAudioVoice";
 
 interface VoiceChangerPanelProps {
   sourceType: "youtube" | "local";
-  localVideoTitle?: string;
   settings: VoiceSettings;
-  canDownload: boolean;
-  isExporting: boolean;
   onChange: (next: VoiceSettings) => void;
-  onUploadVoiceVideo: (file: File) => void;
-  onDownloadMp4: () => void;
 }
 
 export function VoiceChangerPanel({
   sourceType,
-  localVideoTitle,
   settings,
-  canDownload,
-  isExporting,
   onChange,
-  onUploadVoiceVideo,
-  onDownloadMp4,
 }: VoiceChangerPanelProps) {
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const isYoutube = sourceType === "youtube";
 
   const updateField = <K extends keyof VoiceSettings>(key: K, value: VoiceSettings[K]) => {
@@ -41,61 +29,23 @@ export function VoiceChangerPanel({
     });
   };
 
+  const isVoiceModified =
+    settings.presetId !== DEFAULT_VOICE_SETTINGS.presetId ||
+    Math.abs(settings.pitchSemitones - DEFAULT_VOICE_SETTINGS.pitchSemitones) > 0.01 ||
+    Math.abs(settings.speed - DEFAULT_VOICE_SETTINGS.speed) > 0.01 ||
+    settings.tone !== DEFAULT_VOICE_SETTINGS.tone ||
+    settings.echo !== DEFAULT_VOICE_SETTINGS.echo ||
+    settings.robot !== DEFAULT_VOICE_SETTINGS.robot;
+
   return (
-    <div className="space-y-4 pb-6">
-      {/* Direct Video Upload & Download Strip */}
-      <div className="p-3 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-900 flex items-center justify-between gap-2.5">
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="video/*"
-          className="hidden"
-          onChange={(e) => {
-            const file = e.target.files?.[0];
-            if (file) onUploadVoiceVideo(file);
-            e.target.value = "";
-          }}
-        />
-
-        <span className="text-xs font-medium text-neutral-700 dark:text-neutral-300 truncate">
-          {localVideoTitle ? localVideoTitle : "No video uploaded"}
-        </span>
-
-        <div className="flex items-center gap-2 shrink-0">
-          <button
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-            className="h-8 px-3 rounded-lg border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 hover:bg-neutral-100 dark:hover:bg-neutral-800 text-xs font-medium flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors"
-          >
-            <Upload className="w-3.5 h-3.5" />
-            <span>{localVideoTitle ? "Change Video" : "Upload Video"}</span>
-          </button>
-
-          {localVideoTitle && canDownload && (
-            <button
-              type="button"
-              onClick={onDownloadMp4}
-              disabled={isExporting}
-              className="h-8 px-3 rounded-lg bg-neutral-950 text-white dark:bg-white dark:text-neutral-950 text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap disabled:opacity-40 cursor-pointer hover:opacity-90 transition-opacity"
-            >
-              {isExporting ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              ) : (
-                <Download className="w-3.5 h-3.5" />
-              )}
-              <span>Download</span>
-            </button>
-          )}
-        </div>
-      </div>
-
+    <div className="space-y-4">
       {/* Voice Style Presets */}
       <div>
         <div className="flex items-center justify-between mb-2.5">
           <span className="text-xs font-medium text-neutral-500 dark:text-neutral-400">
             Voice Style
           </span>
-          {settings.presetId !== "original" && (
+          {isVoiceModified && (
             <button
               type="button"
               onClick={() => {
@@ -105,7 +55,7 @@ export function VoiceChangerPanel({
               className="text-xs text-neutral-600 dark:text-neutral-300 hover:text-neutral-950 dark:hover:text-white flex items-center gap-1 cursor-pointer"
             >
               <RotateCcw className="w-3 h-3" />
-              <span>Reset</span>
+              <span>Reset Voice</span>
             </button>
           )}
         </div>
@@ -150,7 +100,7 @@ export function VoiceChangerPanel({
         {/* Speed */}
         <div className="space-y-1.5">
           <div className="flex items-center justify-between text-xs">
-            <span className="text-neutral-600 dark:text-neutral-300">Speed</span>
+            <span className="text-neutral-600 dark:text-neutral-300">Voice Speed</span>
             <span className="font-mono-tabular text-neutral-950 dark:text-white">
               {isYoutube
                 ? `${getEffectivePlaybackSpeed("youtube", settings.speed)}x`

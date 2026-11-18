@@ -4,9 +4,11 @@ import {
   FlipVertical2,
   Gauge,
   Maximize2,
+  Mic,
   Minimize2,
   RotateCcw,
   RotateCw,
+  Scissors,
   Shield,
   SlidersHorizontal,
   Sparkles,
@@ -14,19 +16,41 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import type { VideoEditSettings } from "../types";
+import type {
+  SpeakingScene,
+  SubtitleItem,
+  VideoEditSettings,
+  VideoProject,
+  VoiceSettings,
+} from "../types";
 import { DEFAULT_VIDEO_EDIT, VIDEO_FILTER_PRESETS } from "../utils/videoFilters";
-import { getEffectivePlaybackSpeed } from "../utils/voicePresets";
+import { DEFAULT_VOICE_SETTINGS, getEffectivePlaybackSpeed } from "../utils/voicePresets";
+import { VoiceChangerPanel } from "./VoiceChangerPanel";
+import { ProjectTimelineEditor } from "./ProjectTimelineEditor";
 
 interface VideoEditPanelProps {
   settings: VideoEditSettings;
+  voiceSettings: VoiceSettings;
   sourceType?: "youtube" | "local";
   sourceDurationSec?: number;
-  voiceSpeed?: number;
+  project: VideoProject | null;
+  cutTime: number;
+  isPlaying: boolean;
+  isTabActive?: boolean;
+  timelineDirty?: boolean;
   onChange: (next: VideoEditSettings) => void;
+  onChangeVoiceSettings: (next: VoiceSettings) => void;
+  onTogglePlay: () => void;
+  onPause: () => void;
+  onSeek: (sec: number) => void;
+  onPlayFromTime: (sec: number) => void;
+  onUpdateProjectScenes: (nextScenes: SpeakingScene[]) => void;
+  onRestoreProjectSnapshot: (scenes: SpeakingScene[], subtitles?: SubtitleItem[]) => void;
+  onResetTimeline: () => void;
+  onGoToScenes?: () => void;
 }
 
-type EditSectionId = "speed" | "framing" | "filters" | "color" | "noise";
+type EditSectionId = "timeline" | "framing" | "speed" | "filters" | "color" | "voice" | "noise";
 
 const SPEED_PRESETS = [0.5, 0.75, 1, 1.25, 1.5, 2];
 
@@ -42,12 +66,26 @@ function formatSpeedDuration(sec: number): string {
 
 export function VideoEditPanel({
   settings,
+  voiceSettings,
   sourceType = "local",
   sourceDurationSec,
-  voiceSpeed = 1,
+  project,
+  cutTime,
+  isPlaying,
+  isTabActive = true,
+  timelineDirty = false,
   onChange,
+  onChangeVoiceSettings,
+  onTogglePlay,
+  onPause,
+  onSeek,
+  onPlayFromTime,
+  onUpdateProjectScenes,
+  onRestoreProjectSnapshot,
+  onResetTimeline,
+  onGoToScenes,
 }: VideoEditPanelProps) {
-  const [section, setSection] = useState<EditSectionId>("framing");
+  const [section, setSection] = useState<EditSectionId>("timeline");
 
   const updateField = <K extends keyof VideoEditSettings>(
     key: K,
@@ -61,12 +99,21 @@ export function VideoEditPanel({
     });
   };
 
-  const isModified = JSON.stringify(settings) !== JSON.stringify(DEFAULT_VIDEO_EDIT);
+  const voiceDirty =
+    voiceSettings.presetId !== DEFAULT_VOICE_SETTINGS.presetId ||
+    Math.abs(voiceSettings.pitchSemitones - DEFAULT_VOICE_SETTINGS.pitchSemitones) > 0.01 ||
+    Math.abs(voiceSettings.speed - DEFAULT_VOICE_SETTINGS.speed) > 0.01 ||
+    voiceSettings.tone !== DEFAULT_VOICE_SETTINGS.tone ||
+    voiceSettings.echo !== DEFAULT_VOICE_SETTINGS.echo ||
+    voiceSettings.robot !== DEFAULT_VOICE_SETTINGS.robot;
+
+  const isModified =
+    JSON.stringify(settings) !== JSON.stringify(DEFAULT_VIDEO_EDIT) || voiceDirty;
   const isYoutube = sourceType === "youtube";
   const effectiveSpeed = getEffectivePlaybackSpeed(
     sourceType,
     settings.playbackSpeed,
-    voiceSpeed
+    voiceSettings.speed
   );
   const scaledDurationSec =
     sourceDurationSec && sourceDurationSec > 0 ? sourceDurationSec / effectiveSpeed : null;
@@ -97,10 +144,12 @@ export function VideoEditPanel({
     dirty: boolean;
     icon: typeof Gauge;
   }[] = [
+    { id: "timeline", label: "Timeline", dirty: timelineDirty, icon: Scissors },
     { id: "framing", label: "Framing", dirty: framingDirty, icon: Crop },
     { id: "speed", label: "Speed", dirty: speedDirty, icon: Gauge },
     { id: "filters", label: "Filters", dirty: filtersDirty, icon: Sparkles },
     { id: "color", label: "Color", dirty: colorDirty, icon: SlidersHorizontal },
+    { id: "voice", label: "Voice", dirty: voiceDirty, icon: Mic },
     { id: "noise", label: "Noise", dirty: noiseDirty, icon: Shield },
   ];
 
@@ -145,7 +194,10 @@ export function VideoEditPanel({
         {isModified && (
           <button
             type="button"
-            onClick={() => onChange({ ...DEFAULT_VIDEO_EDIT })}
+            onClick={() => {
+              onChange({ ...DEFAULT_VIDEO_EDIT });
+              onChangeVoiceSettings({ ...DEFAULT_VOICE_SETTINGS });
+            }}
             className="text-xs text-neutral-600 dark:text-neutral-300 hover:text-neutral-950 dark:hover:text-white flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer"
           >
             <RotateCcw className="w-3 h-3" />
@@ -153,6 +205,24 @@ export function VideoEditPanel({
           </button>
         )}
       </div>
+
+      {/* Section: 9:16 Video Timeline Editor */}
+      {section === "timeline" && (
+        <ProjectTimelineEditor
+          project={project}
+          cutTime={cutTime}
+          isPlaying={isPlaying}
+          isActive={isTabActive && section === "timeline"}
+          onTogglePlay={onTogglePlay}
+          onPause={onPause}
+          onSeek={onSeek}
+          onPlayFromTime={onPlayFromTime}
+          onUpdateScenes={onUpdateProjectScenes}
+          onRestoreSnapshot={onRestoreProjectSnapshot}
+          onResetTimeline={onResetTimeline}
+          onGoToScenes={onGoToScenes}
+        />
+      )}
 
       {/* Section: Speed */}
       {section === "speed" && (
@@ -585,6 +655,15 @@ export function VideoEditPanel({
             </div>
           </div>
         </div>
+      )}
+
+      {/* Section: Voice Changer */}
+      {section === "voice" && (
+        <VoiceChangerPanel
+          sourceType={sourceType}
+          settings={voiceSettings}
+          onChange={onChangeVoiceSettings}
+        />
       )}
 
       {/* Section: Adversarial Noise / Pixel Perturbations */}

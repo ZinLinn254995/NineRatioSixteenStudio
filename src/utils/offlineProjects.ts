@@ -58,6 +58,60 @@ function txDone(tx: IDBTransaction): Promise<void> {
   });
 }
 
+export function inferVideoMimeType(fileName?: string, explicitType?: string): string {
+  const cleanType = (explicitType || "").trim().toLowerCase();
+  if (cleanType.startsWith("video/")) return cleanType;
+
+  const lower = (fileName || "").toLowerCase();
+  if (lower.endsWith(".mp4")) return "video/mp4";
+  if (lower.endsWith(".m4v")) return "video/x-m4v";
+  if (lower.endsWith(".webm")) return "video/webm";
+  if (lower.endsWith(".mov")) return "video/quicktime";
+  if (lower.endsWith(".mkv")) return "video/x-matroska";
+  if (lower.endsWith(".avi")) return "video/x-msvideo";
+  if (lower.endsWith(".3gp")) return "video/3gpp";
+  if (lower.endsWith(".ogv")) return "video/ogg";
+  return "";
+}
+
+export async function materializeReadableBlob(source: Blob, mimeType: string): Promise<Blob> {
+  if (!source || source.size <= 0) {
+    throw new Error("Video file is empty or unreadable.");
+  }
+  const chunkSize = 8 * 1024 * 1024;
+  const parts: ArrayBuffer[] = [];
+  for (let offset = 0; offset < source.size; offset += chunkSize) {
+    const end = Math.min(source.size, offset + chunkSize);
+    const buf = await source.slice(offset, end).arrayBuffer();
+    if (buf.byteLength === 0 && end > offset) {
+      throw new Error("Could not read video bytes from file.");
+    }
+    parts.push(buf);
+  }
+  const blob = new Blob(parts, mimeType ? { type: mimeType } : undefined);
+  if (blob.size !== source.size) {
+    throw new Error("Video bytes were truncated while reading.");
+  }
+  return blob;
+}
+
+async function verifyStoredBlob(blob?: Blob | null): Promise<boolean> {
+  if (!blob || blob.size <= 0) return false;
+  try {
+    const headLen = Math.min(64, blob.size);
+    const head = await blob.slice(0, headLen).arrayBuffer();
+    if (head.byteLength !== headLen) return false;
+    if (blob.size > headLen) {
+      const tailStart = Math.max(headLen, blob.size - 64);
+      const tail = await blob.slice(tailStart, blob.size).arrayBuffer();
+      if (tail.byteLength !== blob.size - tailStart) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function captureLocalVideoThumbnail(localUrl: string): Promise<string | undefined> {
   if (typeof document === "undefined" || !localUrl) return undefined;
   return new Promise((resolve) => {
@@ -71,8 +125,15 @@ export async function captureLocalVideoThumbnail(localUrl: string): Promise<stri
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      video.removeAttribute("src");
-      video.load();
+      video.onloadeddata = null;
+      video.onseeked = null;
+      video.onerror = null;
+      try {
+        video.pause();
+        video.removeAttribute("src");
+      } catch {
+        // ignore
+      }
       resolve(result);
     };
 
@@ -149,10 +210,31 @@ export async function getSavedProjectBlob(
     const entry = await reqToPromise<MediaBlobEntry | undefined>(store.get(id));
     await txDone(tx);
     if (!entry?.blob) return null;
+
+    const readable = await verifyStoredBlob(entry.blob);
+    if (!readable) {
+      // Clean up corrupted/unreadable blob entry and update metadata flag
+      try {
+        const fixTx = db.transaction([STORE_BLOBS, STORE_PROJECTS], "readwrite");
+        fixTx.objectStore(STORE_BLOBS).delete(id);
+        const projStore = fixTx.objectStore(STORE_PROJECTS);
+        const proj = await reqToPromise<SavedProjectRecord | undefined>(projStore.get(id));
+        if (proj && proj.hasLocalVideoBlob) {
+          projStore.put({ ...proj, hasLocalVideoBlob: false });
+        }
+        await txDone(fixTx);
+      } catch {
+        // ignore cleanup error
+      }
+      return null;
+    }
+
+    const fileName = entry.fileName || "video.mp4";
+    const fileType = inferVideoMimeType(fileName, entry.fileType || entry.blob.type);
     return {
       blob: entry.blob,
-      fileName: entry.fileName || "video.mp4",
-      fileType: entry.fileType || entry.blob.type || "video/mp4",
+      fileName,
+      fileType,
     };
   } finally {
     db.close();
@@ -202,11 +284,20 @@ export async function saveOfflineProject(
     if (!thumbnail && project.sourceType === "youtube" && project.videoId) {
       thumbnail = `https://i.ytimg.com/vi/${project.videoId}/hqdefault.jpg`;
     }
-    if (!thumbnail && project.sourceType === "local" && project.localUrl) {
-      thumbnail = await captureLocalVideoThumbnail(project.localUrl);
+    const localFile = project.localFile ?? activeMedia?.localFile;
+    if (!thumbnail && project.sourceType === "local") {
+      if (localFile) {
+        const tempThumbUrl = URL.createObjectURL(localFile);
+        try {
+          thumbnail = await captureLocalVideoThumbnail(tempThumbUrl);
+        } finally {
+          URL.revokeObjectURL(tempThumbUrl);
+        }
+      } else if (project.localUrl) {
+        thumbnail = await captureLocalVideoThumbnail(project.localUrl);
+      }
     }
 
-    const localFile = project.localFile ?? activeMedia?.localFile;
     const normalizedScenes: SceneSelection[] =
       selectedScenes.length > 0
         ? selectedScenes
@@ -215,6 +306,15 @@ export async function saveOfflineProject(
             startSec: sc.startSec,
             endSec: sc.endSec,
           }));
+
+    const resolvedMimeType = localFile
+      ? inferVideoMimeType(localFile.name, localFile.type)
+      : existingRecord?.localFileType;
+
+    const existingBlobValid =
+      project.sourceType === "local" && existingBlobEntry?.blob
+        ? await verifyStoredBlob(existingBlobEntry.blob)
+        : false;
 
     const baseRecord: SavedProjectRecord = {
       id,
@@ -234,9 +334,9 @@ export async function saveOfflineProject(
       keyframeUrls: [...project.keyframeUrls],
       voiceSettings: { ...DEFAULT_VOICE_SETTINGS, ...voiceSettings },
       editSettings: { ...DEFAULT_VIDEO_EDIT, ...editSettings },
-      hasLocalVideoBlob: Boolean(localFile || existingBlobEntry?.blob),
+      hasLocalVideoBlob: Boolean((project.sourceType === "local" && localFile) || existingBlobValid),
       localFileName: localFile?.name || existingRecord?.localFileName,
-      localFileType: localFile?.type || existingRecord?.localFileType,
+      localFileType: resolvedMimeType,
       localFileSize: localFile?.size ?? existingRecord?.localFileSize,
       createdAt: existingRecord?.createdAt ?? now,
       updatedAt: now,
@@ -244,28 +344,52 @@ export async function saveOfflineProject(
 
     let blobSaved = true;
 
-    // Save local video blob if we have a File/Blob and either no blob was saved yet or file changed
+    // Save materialized byte-backed Blob if missing, unreadable, or file changed
     if (project.sourceType === "local" && localFile) {
       const shouldWriteBlob =
+        !existingBlobValid ||
         !existingBlobEntry ||
         existingBlobEntry.fileName !== localFile.name ||
         existingBlobEntry.blob.size !== localFile.size;
 
       if (shouldWriteBlob) {
         try {
+          const byteBackedBlob = await materializeReadableBlob(
+            localFile,
+            resolvedMimeType || ""
+          );
           const blobTx = db.transaction(STORE_BLOBS, "readwrite");
           blobTx.objectStore(STORE_BLOBS).put({
             id,
-            blob: localFile,
+            blob: byteBackedBlob,
             fileName: localFile.name,
-            fileType: localFile.type || "video/mp4",
+            fileType: resolvedMimeType || "",
             updatedAt: now,
           } satisfies MediaBlobEntry);
           await txDone(blobTx);
+
+          // Confirm the persisted IDB entry can actually be read back
+          const checkTx = db.transaction(STORE_BLOBS, "readonly");
+          const stored = await reqToPromise<MediaBlobEntry | undefined>(
+            checkTx.objectStore(STORE_BLOBS).get(id)
+          );
+          await txDone(checkTx);
+          const ok = await verifyStoredBlob(stored?.blob);
+          if (!ok) {
+            throw new Error("Persisted video blob failed verification.");
+          }
         } catch {
-          // Storage quota exceeded on massive local file; keep metadata/subtitles saved
           blobSaved = false;
-          baseRecord.hasLocalVideoBlob = Boolean(existingBlobEntry?.blob);
+          baseRecord.hasLocalVideoBlob = existingBlobValid;
+          if (!existingBlobValid) {
+            try {
+              const delTx = db.transaction(STORE_BLOBS, "readwrite");
+              delTx.objectStore(STORE_BLOBS).delete(id);
+              await txDone(delTx);
+            } catch {
+              // ignore cleanup error
+            }
+          }
         }
       }
     }
@@ -322,6 +446,7 @@ export async function attachLocalVideoToSavedProject(
     await txDone(readTx);
     if (!existing) return { record: null, blobSaved: false };
 
+    const resolvedMime = inferVideoMimeType(file.name, file.type);
     const tempUrl = URL.createObjectURL(file);
     let thumbnail = existing.thumbnail;
     try {
@@ -334,12 +459,13 @@ export async function attachLocalVideoToSavedProject(
 
     let blobSaved = true;
     try {
+      const byteBackedBlob = await materializeReadableBlob(file, resolvedMime);
       const blobTx = db.transaction(STORE_BLOBS, "readwrite");
       blobTx.objectStore(STORE_BLOBS).put({
         id,
-        blob: file,
+        blob: byteBackedBlob,
         fileName: file.name,
-        fileType: file.type || "video/mp4",
+        fileType: resolvedMime,
         updatedAt: Date.now(),
       } satisfies MediaBlobEntry);
       await txDone(blobTx);
@@ -352,7 +478,7 @@ export async function attachLocalVideoToSavedProject(
       thumbnail,
       hasLocalVideoBlob: blobSaved,
       localFileName: file.name,
-      localFileType: file.type || "video/mp4",
+      localFileType: resolvedMime,
       localFileSize: file.size,
       updatedAt: Date.now(),
     };

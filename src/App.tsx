@@ -4,7 +4,9 @@ import type {
   ActiveMediaSource,
   SavedProjectRecord,
   SceneSelection,
+  SpeakingScene,
   SubtitleItem,
+  SubtitleWord,
   VideoEditSettings,
   VideoProject,
   VoiceSettings,
@@ -12,6 +14,7 @@ import type {
   YouTubeVideo,
 } from "./types";
 import { Stage9x16 } from "./components/Stage9x16";
+import { mapCutTimeToSource } from "./components/YouTubeScenePlayer";
 import { WorkspaceSidebar, type WorkspaceTab } from "./components/WorkspaceSidebar";
 import { exportProjectToMp4, type ExportProgress } from "./utils/exportVideo";
 import { DEFAULT_VOICE_SETTINGS } from "./utils/voicePresets";
@@ -19,12 +22,19 @@ import { DEFAULT_VIDEO_EDIT } from "./utils/videoFilters";
 import { resumeAllVoiceContexts } from "./utils/webAudioVoice";
 import { safeReadJson, uploadBlobInChunks } from "./utils/uploadFile";
 import {
+  ensureSceneIds,
+  remapSubtitlesToScenes,
+  roundTenth,
+} from "./utils/projectTimeline";
+import {
   attachLocalVideoToSavedProject,
   deleteSavedProject,
   exportProjectAsJson,
   getSavedProjectBlob,
   importProjectFromJsonText,
+  inferVideoMimeType,
   listSavedProjects,
+  materializeReadableBlob,
   renameSavedProject,
   saveOfflineProject,
 } from "./utils/offlineProjects";
@@ -82,6 +92,27 @@ export default function App() {
   const searchSeqRef = useRef(0);
   const createdUrlsRef = useRef<string[]>([]);
   const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const timelineBaselineRef = useRef<{
+    scenes: SpeakingScene[];
+    subtitles: SubtitleItem[];
+  } | null>(null);
+  const [timelineDirty, setTimelineDirty] = useState(false);
+
+  const setBaselineFromProject = useCallback((proj: VideoProject | null) => {
+    if (!proj) {
+      timelineBaselineRef.current = null;
+      setTimelineDirty(false);
+      return;
+    }
+    timelineBaselineRef.current = {
+      scenes: ensureSceneIds(proj.scenes).map((s) => ({ ...s })),
+      subtitles: proj.subtitles.map((sub) => ({
+        ...sub,
+        words: sub.words.map((w) => ({ ...w })),
+      })),
+    };
+    setTimelineDirty(false);
+  }, []);
 
   useEffect(() => {
     const mql = window.matchMedia("(min-width: 1024px)");
@@ -243,7 +274,11 @@ export default function App() {
     setYtSeekRequest(null);
     setProcessError(null);
     setSaveNotice(null);
-    setProject((prev) => (prev?.sourceType === "local" ? prev : null));
+    setProject((prev) => {
+      if (prev?.sourceType === "local") return prev;
+      setBaselineFromProject(null);
+      return null;
+    });
     setYoutubeMedia({
       sourceType: "youtube",
       videoId: video.videoId,
@@ -256,15 +291,33 @@ export default function App() {
   };
 
   // Uploading a local video opens it in Watch & Scenes first without auto-generating
-  const handleUploadLocalVideo = async (file: File) => {
-    activeRunIdRef.current++;
+  const handleUploadLocalVideo = async (rawFile: File) => {
+    const uploadRunId = ++activeRunIdRef.current;
     setIsPlaying(false);
     setCutTime(0);
     setProcessError(null);
     setSaveNotice(null);
     setActiveSavedId(null);
     setProject(null);
+    setBaselineFromProject(null);
     setSelectedScenes([]);
+
+    const resolvedMime = inferVideoMimeType(rawFile.name, rawFile.type);
+    let file: File = rawFile;
+    if (rawFile.size > 0 && rawFile.size <= 120 * 1024 * 1024) {
+      try {
+        const byteBlob = await materializeReadableBlob(rawFile, resolvedMime);
+        if (activeRunIdRef.current !== uploadRunId) return;
+        file = new File(
+          [byteBlob],
+          rawFile.name,
+          resolvedMime ? { type: resolvedMime } : undefined
+        );
+      } catch {
+        file = rawFile;
+      }
+    }
+    if (activeRunIdRef.current !== uploadRunId) return;
 
     const localUrl = registerBlobUrl(file);
     const durationSec = await new Promise<number>((resolve) => {
@@ -275,8 +328,9 @@ export default function App() {
         if (done) return;
         done = true;
         clearTimeout(timer);
+        v.onloadedmetadata = null;
+        v.onerror = null;
         v.removeAttribute("src");
-        v.load();
         resolve(dur);
       };
       const timer = setTimeout(() => finish(120), 4000);
@@ -287,6 +341,11 @@ export default function App() {
       v.onerror = () => finish(120);
       v.src = localUrl;
     });
+    if (activeRunIdRef.current !== uploadRunId) {
+      URL.revokeObjectURL(localUrl);
+      createdUrlsRef.current = createdUrlsRef.current.filter((u) => u !== localUrl);
+      return;
+    }
 
     setLocalMedia({
       sourceType: "local",
@@ -306,76 +365,6 @@ export default function App() {
     setActiveTab("scenes");
   };
 
-  // Uploading inside Voice Changer skips Watch & Scenes and puts video straight onto the 9:16 Stage Preview
-  const handleUploadVoiceVideo = async (file: File) => {
-    activeRunIdRef.current++;
-    setIsPlaying(false);
-    setCutTime(0);
-    setProcessError(null);
-    setSaveNotice(null);
-    setActiveSavedId(null);
-
-    const localUrl = registerBlobUrl(file);
-    const durationSec = await new Promise<number>((resolve) => {
-      const v = document.createElement("video");
-      v.preload = "metadata";
-      let done = false;
-      const finish = (dur: number) => {
-        if (done) return;
-        done = true;
-        clearTimeout(timer);
-        v.removeAttribute("src");
-        v.load();
-        resolve(dur);
-      };
-      const timer = setTimeout(() => finish(30), 4000);
-      v.onloadedmetadata = () => {
-        const raw = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : 30;
-        finish(Math.max(1, Math.round(raw)));
-      };
-      v.onerror = () => finish(30);
-      v.src = localUrl;
-    });
-
-    const cleanTitle = file.name.replace(/\.[^.]+$/, "");
-    setLocalMedia({
-      sourceType: "local",
-      localUrl,
-      localFile: file,
-      title: cleanTitle,
-      channel: "Local Video",
-      durationSec,
-    });
-    setSelectedScenes([
-      {
-        id: `sc-${Date.now()}`,
-        startSec: 0,
-        endSec: durationSec,
-      },
-    ]);
-    setProject({
-      sourceType: "local",
-      localUrl,
-      localFile: file,
-      title: cleanTitle,
-      channel: "Local Video",
-      sourceDurationSec: durationSec,
-      targetDurationSec: durationSec,
-      scenes: [
-        {
-          index: 0,
-          startSec: 0,
-          endSec: durationSec,
-          durationSec,
-          summary: "Full video",
-        },
-      ],
-      subtitles: [],
-      keyframeUrls: [],
-    });
-    setActiveTab("voice");
-  };
-
   const handleClearLocalVideo = () => {
     activeRunIdRef.current++;
     if (localMedia?.localUrl?.startsWith("blob:")) {
@@ -390,7 +379,13 @@ export default function App() {
     setActiveSavedId(null);
     setSelectedScenes([]);
     setLocalMedia(null);
-    setProject((prev) => (prev?.sourceType === "local" ? null : prev));
+    setProject((prev) => {
+      if (prev?.sourceType === "local") {
+        setBaselineFromProject(null);
+        return null;
+      }
+      return prev;
+    });
     setActiveTab("scenes");
   };
 
@@ -467,12 +462,15 @@ export default function App() {
         if (!resp.ok) throw new Error(data.error || "Processing failed");
         if (activeRunIdRef.current !== runId) return;
 
-        setProject({
+        const nextProj: VideoProject = {
           ...data,
+          scenes: ensureSceneIds(data.scenes),
           sourceType: "local",
           localUrl: targetMedia.localUrl,
           localFile: targetMedia.localFile,
-        });
+        };
+        setProject(nextProj);
+        setBaselineFromProject(nextProj);
         setActiveTab("script");
       } else if (targetMedia.sourceType === "youtube" && targetMedia.videoId) {
         const resp = await fetch("/api/process-video", {
@@ -490,7 +488,12 @@ export default function App() {
         if (!resp.ok) throw new Error(data.error || "Processing failed");
         if (activeRunIdRef.current !== runId) return;
 
-        setProject(data);
+        const nextProj: VideoProject = {
+          ...data,
+          scenes: ensureSceneIds(data.scenes),
+        };
+        setProject(nextProj);
+        setBaselineFromProject(nextProj);
         setActiveTab("script");
       }
     } catch (err) {
@@ -520,9 +523,144 @@ export default function App() {
   }, []);
 
   const handleTogglePlay = () => {
-    if (!project) return;
+    if (!project || project.scenes.length === 0) return;
     resumeAllVoiceContexts();
     setIsPlaying((p) => !p);
+  };
+
+  const handlePause = useCallback(() => {
+    setIsPlaying(false);
+  }, []);
+
+  const handlePlayFromTime = useCallback(
+    (sec: number) => {
+      if (!project || project.scenes.length === 0) return;
+      resumeAllVoiceContexts();
+      setCutTime(sec);
+      setSeekNonce((n) => n + 1);
+      setIsPlaying(true);
+    },
+    [project]
+  );
+
+  const checkTimelineDirty = useCallback((nextScenes: SpeakingScene[]) => {
+    const base = timelineBaselineRef.current?.scenes;
+    if (!base) {
+      setTimelineDirty(false);
+      return;
+    }
+    const dirty =
+      base.length !== nextScenes.length ||
+      base.some(
+        (b, idx) =>
+          Math.abs(b.startSec - nextScenes[idx].startSec) > 0.05 ||
+          Math.abs(b.endSec - nextScenes[idx].endSec) > 0.05
+      );
+    setTimelineDirty(dirty);
+  }, []);
+
+  const handleUpdateProjectScenes = useCallback(
+    (nextScenesRaw: SpeakingScene[]) => {
+      const nextScenes = ensureSceneIds(nextScenesRaw);
+      const nextDuration = roundTenth(
+        nextScenes.reduce((acc, sc) => acc + Math.max(0.1, sc.endSec - sc.startSec), 0)
+      );
+      checkTimelineDirty(nextScenes);
+
+      setProject((prev) => {
+        if (!prev) return prev;
+        const baselineSubs = timelineBaselineRef.current?.subtitles ?? prev.subtitles;
+        const nextSubtitles = remapSubtitlesToScenes(baselineSubs, nextScenes);
+        return {
+          ...prev,
+          scenes: nextScenes,
+          targetDurationSec: nextDuration,
+          subtitles: nextSubtitles,
+        };
+      });
+    },
+    [checkTimelineDirty]
+  );
+
+  const handleRestoreProjectSnapshot = useCallback(
+    (scenesRaw: SpeakingScene[], subtitlesOverride?: SubtitleItem[]) => {
+      const nextScenes = ensureSceneIds(scenesRaw);
+      const nextDuration = roundTenth(
+        nextScenes.reduce((acc, sc) => acc + Math.max(0.1, sc.endSec - sc.startSec), 0)
+      );
+      checkTimelineDirty(nextScenes);
+
+      setProject((prev) => {
+        if (!prev) return prev;
+        const nextSubtitles = subtitlesOverride
+          ? subtitlesOverride.map((sub) => ({
+              ...sub,
+              words: sub.words.map((w) => ({ ...w })),
+            }))
+          : remapSubtitlesToScenes(
+              timelineBaselineRef.current?.subtitles ?? prev.subtitles,
+              nextScenes
+            );
+        return {
+          ...prev,
+          scenes: nextScenes,
+          targetDurationSec: nextDuration,
+          subtitles: nextSubtitles,
+        };
+      });
+    },
+    [checkTimelineDirty]
+  );
+
+  const handleResetTimeline = useCallback(() => {
+    const base = timelineBaselineRef.current;
+    if (!base) return;
+    const nextScenes = ensureSceneIds(base.scenes).map((s) => ({ ...s }));
+    const nextDuration = roundTenth(
+      nextScenes.reduce((acc, sc) => acc + Math.max(0.1, sc.endSec - sc.startSec), 0)
+    );
+    setTimelineDirty(false);
+    setProject((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        scenes: nextScenes,
+        targetDurationSec: nextDuration,
+        subtitles: base.subtitles.map((sub) => ({
+          ...sub,
+          words: sub.words.map((w) => ({ ...w })),
+        })),
+      };
+    });
+  }, []);
+
+  const buildWordsFromPhonetic = (
+    phonetic: string,
+    spanStart: number,
+    spanEnd: number,
+    existingWords: SubtitleWord[] = []
+  ): SubtitleWord[] => {
+    const tokens = phonetic.trim().split(/\s+/).filter(Boolean);
+    if (tokens.length === 0) return [];
+    const spanDur = Math.max(0.2, spanEnd - spanStart);
+    const totalWeight = tokens.reduce((acc, t) => acc + Math.max(2, t.length), 0) || 1;
+    let cursor = spanStart;
+    return tokens.map((tok, wi) => {
+      const existing = existingWords[wi];
+      const wDur = (Math.max(2, tok.length) / totalWeight) * spanDur;
+      const startOffsetSec = Number(cursor.toFixed(2));
+      const endOffsetSec = Number(
+        (wi === tokens.length - 1 ? spanEnd : cursor + wDur).toFixed(2)
+      );
+      cursor = endOffsetSec;
+      return {
+        phonetic: tok,
+        thai: existing?.thai || tok,
+        burmeseGloss: existing?.burmeseGloss || "",
+        startOffsetSec,
+        endOffsetSec,
+      };
+    });
   };
 
   const handleUpdateSubtitle = (
@@ -530,53 +668,148 @@ export default function App() {
     field: "thaiPhonetic" | "burmese",
     value: string
   ) => {
+    const applyEdit = (list: SubtitleItem[]): SubtitleItem[] =>
+      list.map((sub: SubtitleItem) => {
+        if (sub.id !== id) return sub;
+        if (field === "burmese") return { ...sub, burmese: value };
+
+        const tokens = value.split(/\s+/).filter(Boolean);
+        if (tokens.length === sub.words.length && sub.words.length > 0) {
+          const words = tokens.map((tok, wi) => ({
+            ...sub.words[wi],
+            phonetic: tok,
+          }));
+          return { ...sub, thaiPhonetic: value, words };
+        }
+
+        const spanStart = sub.words[0]?.startOffsetSec ?? 0;
+        const spanEnd = sub.words[sub.words.length - 1]?.endOffsetSec ?? (sub.endTime - sub.startTime);
+        const words = buildWordsFromPhonetic(value, spanStart, spanEnd, sub.words);
+        return { ...sub, thaiPhonetic: value, words };
+      });
+
+    if (timelineBaselineRef.current) {
+      timelineBaselineRef.current.subtitles = applyEdit(timelineBaselineRef.current.subtitles);
+    }
+
     setProject((prev) => {
       if (!prev) return prev;
       return {
         ...prev,
-        subtitles: prev.subtitles.map((sub: SubtitleItem) => {
-          if (sub.id !== id) return sub;
-          if (field === "burmese") return { ...sub, burmese: value };
-
-          const tokens = value.split(/\s+/).filter(Boolean);
-          // Preserve exact aligned word timings when the word count matches
-          if (tokens.length === sub.words.length && sub.words.length > 0) {
-            const words = tokens.map((tok, wi) => ({
-              ...sub.words[wi],
-              phonetic: tok,
-            }));
-            return { ...sub, thaiPhonetic: value, words };
-          }
-
-          const spanStart = sub.words[0]?.startOffsetSec ?? 0;
-          const spanEnd = sub.words[sub.words.length - 1]?.endOffsetSec ?? (sub.endTime - sub.startTime);
-          const spanDur = Math.max(0.2, spanEnd - spanStart);
-          const totalWeight = tokens.reduce((acc, t) => acc + Math.max(2, t.length), 0) || 1;
-          let cursor = spanStart;
-          const words = tokens.map((tok, wi) => {
-            const existing = sub.words[wi];
-            const wDur = (Math.max(2, tok.length) / totalWeight) * spanDur;
-            const startOffsetSec = Number(cursor.toFixed(2));
-            const endOffsetSec = Number(
-              (wi === tokens.length - 1 ? spanEnd : cursor + wDur).toFixed(2)
-            );
-            cursor = endOffsetSec;
-            return {
-              phonetic: tok,
-              thai: existing?.thai || tok,
-              burmeseGloss: existing?.burmeseGloss || "",
-              startOffsetSec,
-              endOffsetSec,
-            };
-          });
-          return { ...sub, thaiPhonetic: value, words };
-        }),
+        subtitles: applyEdit(prev.subtitles),
       };
     });
   };
 
+  const handleAddSubtitle = (input: {
+    startTime: number;
+    endTime: number;
+    thaiPhonetic: string;
+    burmese: string;
+    originalSpokenText?: string;
+  }) => {
+    if (!project) return;
+    const maxDur = Math.max(0.5, project.targetDurationSec || 10);
+    const startTime = Number(Math.max(0, Math.min(maxDur - 0.2, input.startTime)).toFixed(2));
+    const endTime = Number(Math.max(startTime + 0.2, Math.min(maxDur, input.endTime)).toFixed(2));
+    const duration = Math.max(0.2, endTime - startTime);
+    const thaiPhonetic = input.thaiPhonetic.trim();
+    const burmese = input.burmese.trim();
+    const mappedStart = mapCutTimeToSource(project.scenes, startTime);
+    const mappedEnd = mapCutTimeToSource(project.scenes, endTime);
+
+    const newItem: SubtitleItem = {
+      id: `sub-custom-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      sceneIndex: mappedStart.sceneIndex,
+      startTime,
+      endTime,
+      sourceStartSec: Number(mappedStart.sourceSec.toFixed(2)),
+      sourceEndSec: Number(mappedEnd.sourceSec.toFixed(2)),
+      originalSpokenText: input.originalSpokenText?.trim() || "Custom subtitle",
+      thaiPhonetic,
+      thaiScript: thaiPhonetic,
+      burmese,
+      words: buildWordsFromPhonetic(thaiPhonetic, 0, duration),
+    };
+
+    if (timelineBaselineRef.current) {
+      timelineBaselineRef.current.subtitles = [
+        ...timelineBaselineRef.current.subtitles,
+        { ...newItem, words: newItem.words.map((w) => ({ ...w })) },
+      ].sort((a, b) => a.startTime - b.startTime);
+    }
+
+    setProject((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        subtitles: [...prev.subtitles, newItem].sort((a, b) => a.startTime - b.startTime),
+      };
+    });
+    handleSeek(startTime);
+  };
+
+  const handleDeleteSubtitle = (id: string) => {
+    if (timelineBaselineRef.current) {
+      timelineBaselineRef.current.subtitles = timelineBaselineRef.current.subtitles.filter(
+        (sub) => sub.id !== id
+      );
+    }
+    setProject((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        subtitles: prev.subtitles.filter((sub) => sub.id !== id),
+      };
+    });
+  };
+
+  const handleUpdateSubtitleTiming = (id: string, nextStart: number, nextEnd: number) => {
+    setProject((prev) => {
+      if (!prev) return prev;
+      const maxDur = Math.max(0.5, prev.targetDurationSec || 10);
+      const startTime = Number(Math.max(0, Math.min(maxDur - 0.2, nextStart)).toFixed(2));
+      const endTime = Number(Math.max(startTime + 0.2, Math.min(maxDur, nextEnd)).toFixed(2));
+      const newDur = Math.max(0.2, endTime - startTime);
+      const mappedStart = mapCutTimeToSource(prev.scenes, startTime);
+      const mappedEnd = mapCutTimeToSource(prev.scenes, endTime);
+
+      const updateList = (list: SubtitleItem[]) =>
+        list
+          .map((sub) => {
+            if (sub.id !== id) return sub;
+            const oldDur = Math.max(0.2, sub.endTime - sub.startTime);
+            const scale = newDur / oldDur;
+            const words =
+              sub.words.length > 0
+                ? sub.words.map((w) => ({
+                    ...w,
+                    startOffsetSec: Number((w.startOffsetSec * scale).toFixed(2)),
+                    endOffsetSec: Number(Math.min(newDur, w.endOffsetSec * scale).toFixed(2)),
+                  }))
+                : buildWordsFromPhonetic(sub.thaiPhonetic, 0, newDur);
+            return {
+              ...sub,
+              sceneIndex: mappedStart.sceneIndex,
+              startTime,
+              endTime,
+              sourceStartSec: Number(mappedStart.sourceSec.toFixed(2)),
+              sourceEndSec: Number(mappedEnd.sourceSec.toFixed(2)),
+              words,
+            };
+          })
+          .sort((a, b) => a.startTime - b.startTime);
+
+      if (timelineBaselineRef.current) {
+        timelineBaselineRef.current.subtitles = updateList(timelineBaselineRef.current.subtitles);
+      }
+
+      return { ...prev, subtitles: updateList(prev.subtitles) };
+    });
+  };
+
   const handleDownloadMp4 = async () => {
-    if (!project || exportProgress) return;
+    if (!project || project.scenes.length === 0 || exportProgress) return;
     setIsPlaying(false);
     setProcessError(null);
 
@@ -724,11 +957,20 @@ export default function App() {
       try {
         const blobEntry = await getSavedProjectBlob(record.id);
         if (blobEntry) {
-          localFile = new File([blobEntry.blob], blobEntry.fileName, {
-            type: blobEntry.fileType,
-          });
+          localFile = new File(
+            [blobEntry.blob],
+            blobEntry.fileName,
+            blobEntry.fileType ? { type: blobEntry.fileType } : undefined
+          );
           localUrl = registerBlobUrl(localFile);
         } else {
+          setSavedProjects((prev) =>
+            prev.map((item) =>
+              item.id === record.id && item.hasLocalVideoBlob
+                ? { ...item, hasLocalVideoBlob: false }
+                : item
+            )
+          );
           setSaveNotice(
             "Subtitles and settings restored. Link the original local video file in the Saved tab to preview or export video."
           );
@@ -758,7 +1000,7 @@ export default function App() {
       setLocalMedia(null);
       setYoutubeMedia(openedMedia);
     }
-    setProject({
+    const openedProj: VideoProject = {
       sourceType: record.sourceType,
       videoId: record.videoId,
       localUrl,
@@ -767,13 +1009,15 @@ export default function App() {
       channel: record.channel,
       sourceDurationSec: record.sourceDurationSec,
       targetDurationSec: record.targetDurationSec,
-      scenes: record.scenes.map((s) => ({ ...s })),
+      scenes: ensureSceneIds(record.scenes.map((s) => ({ ...s }))),
       subtitles: record.subtitles.map((sub) => ({
         ...sub,
         words: sub.words.map((w) => ({ ...w })),
       })),
       keyframeUrls: [...record.keyframeUrls],
-    });
+    };
+    setProject(openedProj);
+    setBaselineFromProject(openedProj);
 
     if (record.subtitles.length > 0) {
       setActiveTab("script");
@@ -850,10 +1094,25 @@ export default function App() {
     }
   };
 
-  const handleRelinkLocalVideo = async (id: string, file: File) => {
+  const handleRelinkLocalVideo = async (id: string, rawFile: File) => {
     setProcessError(null);
     setSaveNotice(null);
     try {
+      const resolvedMime = inferVideoMimeType(rawFile.name, rawFile.type);
+      let file: File = rawFile;
+      if (rawFile.size > 0 && rawFile.size <= 120 * 1024 * 1024) {
+        try {
+          const byteBlob = await materializeReadableBlob(rawFile, resolvedMime);
+          file = new File(
+            [byteBlob],
+            rawFile.name,
+            resolvedMime ? { type: resolvedMime } : undefined
+          );
+        } catch {
+          file = rawFile;
+        }
+      }
+
       const { record, blobSaved } = await attachLocalVideoToSavedProject(id, file);
       if (!record) return;
       setSavedProjects((prev) =>
@@ -987,7 +1246,7 @@ export default function App() {
           <button
             type="button"
             onClick={handleDownloadMp4}
-            disabled={!project || isProcessing || Boolean(exportProgress)}
+            disabled={!project || project.scenes.length === 0 || isProcessing || Boolean(exportProgress)}
             className="h-9 px-4 rounded-lg bg-neutral-950 text-white dark:bg-white dark:text-neutral-950 text-xs font-semibold flex items-center gap-2 whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-90 transition-opacity cursor-pointer"
           >
             {exportProgress ? (
@@ -1087,7 +1346,8 @@ export default function App() {
             editSettings={videoEdit}
             isSearching={isSearching}
             isProcessing={isProcessing}
-            isExporting={Boolean(exportProgress)}
+            isPlaying={isPlaying}
+            timelineDirty={timelineDirty}
             searchError={searchError}
             project={project}
             cutTime={cutTime}
@@ -1114,10 +1374,17 @@ export default function App() {
             onChangeEditSettings={setVideoEdit}
             onUploadLocalVideo={handleUploadLocalVideo}
             onClearLocalVideo={handleClearLocalVideo}
-            onUploadVoiceVideo={handleUploadVoiceVideo}
-            onDownloadMp4={handleDownloadMp4}
             onSeek={handleSeek}
+            onTogglePlay={handleTogglePlay}
+            onPause={handlePause}
+            onPlayFromTime={handlePlayFromTime}
+            onUpdateProjectScenes={handleUpdateProjectScenes}
+            onRestoreProjectSnapshot={handleRestoreProjectSnapshot}
+            onResetTimeline={handleResetTimeline}
             onUpdateSubtitle={handleUpdateSubtitle}
+            onAddSubtitle={handleAddSubtitle}
+            onDeleteSubtitle={handleDeleteSubtitle}
+            onUpdateSubtitleTiming={handleUpdateSubtitleTiming}
             onSaveProject={handleSaveProject}
             onOpenSavedProject={handleOpenSavedProject}
             onRenameSavedProject={handleRenameSavedProject}

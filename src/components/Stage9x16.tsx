@@ -140,6 +140,22 @@ export function Stage9x16({
               Watch a video, pick scenes, and generate subtitles
             </p>
           </div>
+        ) : project.scenes.length === 0 ? (
+          <div
+            className={`flex-1 flex flex-col items-center justify-center text-center ${
+              compactMobile ? "p-4 lg:p-8" : "p-8"
+            }`}
+          >
+            <div className="w-10 h-10 lg:w-12 lg:h-12 rounded-xl border border-neutral-200 dark:border-neutral-800 flex items-center justify-center mb-2.5 lg:mb-3 text-neutral-400">
+              <Play className="w-4 h-4 lg:w-5 lg:h-5" />
+            </div>
+            <p className="text-xs lg:text-sm font-medium text-neutral-900 dark:text-neutral-100">
+              No clips kept
+            </p>
+            <p className="text-[11px] lg:text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+              Click Undo or Reset in the Edit timeline to restore clips
+            </p>
+          </div>
         ) : (
           <>
             {/* Top Video Window (Full 9:16 if no subtitles, otherwise dynamic height split) */}
@@ -373,7 +389,7 @@ export function Stage9x16({
       </div>
 
       {/* Minimal Transport Controls below 9:16 Stage */}
-      {project && (
+      {project && project.scenes.length > 0 && (
         <div
           className={`w-full max-w-[380px] flex items-center ${
             compactMobile ? "gap-2 lg:gap-3" : "gap-3"

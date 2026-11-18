@@ -1,9 +1,10 @@
-import { useEffect, useRef, type ReactNode } from "react";
-import { Film, Loader2 } from "lucide-react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { Check, Clock, Film, Loader2, Plus, Trash2, X } from "lucide-react";
 import type {
   ActiveMediaSource,
   SavedProjectRecord,
   SceneSelection,
+  SpeakingScene,
   SubtitleItem,
   VideoEditSettings,
   VideoProject,
@@ -13,7 +14,6 @@ import type {
 } from "../types";
 import { ScenePicker } from "./ScenePicker";
 import { YouTubePreviewPanel } from "./YouTubePreviewPanel";
-import { VoiceChangerPanel } from "./VoiceChangerPanel";
 import { VideoEditPanel } from "./VideoEditPanel";
 import { SavedProjectsPanel } from "./SavedProjectsPanel";
 import { getEffectivePlaybackSpeed } from "../utils/voicePresets";
@@ -24,7 +24,6 @@ export type WorkspaceTab =
   | "scenes"
   | "edit"
   | "script"
-  | "voice"
   | "projects";
 
 interface WorkspaceSidebarProps {
@@ -43,7 +42,8 @@ interface WorkspaceSidebarProps {
   editSettings: VideoEditSettings;
   isSearching: boolean;
   isProcessing: boolean;
-  isExporting: boolean;
+  isPlaying: boolean;
+  timelineDirty: boolean;
   searchError: string | null;
   project: VideoProject | null;
   cutTime: number;
@@ -66,10 +66,23 @@ interface WorkspaceSidebarProps {
   onChangeEditSettings: (next: VideoEditSettings) => void;
   onUploadLocalVideo: (file: File) => void;
   onClearLocalVideo: () => void;
-  onUploadVoiceVideo: (file: File) => void;
-  onDownloadMp4: () => void;
   onSeek: (sec: number) => void;
+  onTogglePlay: () => void;
+  onPause: () => void;
+  onPlayFromTime: (sec: number) => void;
+  onUpdateProjectScenes: (nextScenes: SpeakingScene[]) => void;
+  onRestoreProjectSnapshot: (scenes: SpeakingScene[], subtitles?: SubtitleItem[]) => void;
+  onResetTimeline: () => void;
   onUpdateSubtitle: (id: string, field: "thaiPhonetic" | "burmese", value: string) => void;
+  onAddSubtitle: (input: {
+    startTime: number;
+    endTime: number;
+    thaiPhonetic: string;
+    burmese: string;
+    originalSpokenText?: string;
+  }) => void;
+  onDeleteSubtitle: (id: string) => void;
+  onUpdateSubtitleTiming: (id: string, startTime: number, endTime: number) => void;
   onSaveProject: (asNew?: boolean) => void;
   onOpenSavedProject: (record: SavedProjectRecord) => void;
   onRenameSavedProject: (id: string, title: string) => void;
@@ -106,7 +119,8 @@ export function WorkspaceSidebar({
   editSettings,
   isSearching,
   isProcessing,
-  isExporting,
+  isPlaying,
+  timelineDirty,
   searchError,
   project,
   cutTime,
@@ -129,10 +143,17 @@ export function WorkspaceSidebar({
   onChangeEditSettings,
   onUploadLocalVideo,
   onClearLocalVideo,
-  onUploadVoiceVideo,
-  onDownloadMp4,
   onSeek,
+  onTogglePlay,
+  onPause,
+  onPlayFromTime,
+  onUpdateProjectScenes,
+  onRestoreProjectSnapshot,
+  onResetTimeline,
   onUpdateSubtitle,
+  onAddSubtitle,
+  onDeleteSubtitle,
+  onUpdateSubtitleTiming,
   onSaveProject,
   onOpenSavedProject,
   onRenameSavedProject,
@@ -147,6 +168,33 @@ export function WorkspaceSidebar({
 }: WorkspaceSidebarProps) {
   const scrollRootRef = useRef<HTMLDivElement | null>(null);
   const loadMoreSentinelRef = useRef<HTMLDivElement | null>(null);
+  const [showAddSub, setShowAddSub] = useState(false);
+  const [newSubStart, setNewSubStart] = useState("0.0");
+  const [newSubEnd, setNewSubEnd] = useState("2.5");
+  const [newSubPhonetic, setNewSubPhonetic] = useState("");
+  const [newSubBurmese, setNewSubBurmese] = useState("");
+  const [editingTimeId, setEditingTimeId] = useState<string | null>(null);
+  const [editStartVal, setEditStartVal] = useState("");
+  const [editEndVal, setEditEndVal] = useState("");
+
+  const openAddSubtitleForm = () => {
+    if (!project) return;
+    const maxDur = Math.max(0.5, project.targetDurationSec || 10);
+    const lastEnd =
+      project.subtitles.length > 0
+        ? project.subtitles[project.subtitles.length - 1].endTime
+        : 0;
+    const defaultStart =
+      cutTime > 0.05
+        ? Math.min(maxDur - 0.5, cutTime)
+        : Math.min(maxDur - 0.5, lastEnd);
+    const defaultEnd = Math.min(maxDur, Math.max(defaultStart + 0.5, defaultStart + 2.5));
+    setNewSubStart(defaultStart.toFixed(1));
+    setNewSubEnd(defaultEnd.toFixed(1));
+    setNewSubPhonetic("");
+    setNewSubBurmese("");
+    setShowAddSub(true);
+  };
 
   useEffect(() => {
     if (activeTab !== "videos" || !hasMoreVideos || isSearching || isLoadingMore) return;
@@ -224,17 +272,6 @@ export function WorkspaceSidebar({
             }`}
           >
             Subtitles
-          </button>
-          <button
-            type="button"
-            onClick={() => onTabChange("voice")}
-            className={`px-3 py-1.5 text-xs font-medium rounded-md whitespace-nowrap transition-colors cursor-pointer ${
-              activeTab === "voice"
-                ? "bg-white dark:bg-neutral-800 text-neutral-950 dark:text-white shadow-xs"
-                : "text-neutral-500 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-200"
-            }`}
-          >
-            Voice
           </button>
           <button
             type="button"
@@ -518,6 +555,7 @@ export function WorkspaceSidebar({
         {activeTab === "edit" && (
           <VideoEditPanel
             settings={editSettings}
+            voiceSettings={voiceSettings}
             sourceType={
               project?.sourceType ?? localMedia?.sourceType ?? youtubeMedia?.sourceType ?? "local"
             }
@@ -530,120 +568,327 @@ export function WorkspaceSidebar({
                   )
                 : localMedia?.durationSec ?? youtubeMedia?.durationSec)
             }
-            voiceSpeed={voiceSettings.speed}
+            project={project}
+            cutTime={cutTime}
+            isPlaying={isPlaying}
+            isTabActive={activeTab === "edit"}
+            timelineDirty={timelineDirty}
             onChange={onChangeEditSettings}
+            onChangeVoiceSettings={onChangeVoiceSettings}
+            onTogglePlay={onTogglePlay}
+            onPause={onPause}
+            onSeek={onSeek}
+            onPlayFromTime={onPlayFromTime}
+            onUpdateProjectScenes={onUpdateProjectScenes}
+            onRestoreProjectSnapshot={onRestoreProjectSnapshot}
+            onResetTimeline={onResetTimeline}
+            onGoToScenes={() => onTabChange("scenes")}
           />
         )}
 
         {activeTab === "script" && project && (
-          <div className="space-y-5 pb-6">
-            {/* Extracted Scenes Strip */}
-            <div className="flex flex-wrap gap-1.5">
-              {project.scenes.map((sc, idx) => {
-                let sceneCutStart = 0;
-                for (let i = 0; i < idx; i++) {
-                  sceneCutStart += project.scenes[i].durationSec;
-                }
-                const isSceneActive =
-                  cutTime >= sceneCutStart && cutTime < sceneCutStart + sc.durationSec;
+          <div className="space-y-4 pb-6">
+            {/* Extracted Scenes Strip & Add Subtitle Action */}
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap gap-1.5">
+                {project.scenes.map((sc, idx) => {
+                  let sceneCutStart = 0;
+                  for (let i = 0; i < idx; i++) {
+                    sceneCutStart += project.scenes[i].durationSec;
+                  }
+                  const isSceneActive =
+                    cutTime >= sceneCutStart && cutTime < sceneCutStart + sc.durationSec;
 
-                return (
-                  <button
-                    key={sc.index}
-                    type="button"
-                    onClick={() => onSeek(sceneCutStart)}
-                    className={`px-2.5 py-1.5 rounded-lg text-xs font-mono-tabular border transition-colors cursor-pointer whitespace-nowrap ${
-                      isSceneActive
-                        ? "bg-neutral-950 text-white border-neutral-950 dark:bg-white dark:text-neutral-950 dark:border-white"
-                        : "bg-white dark:bg-neutral-950 text-neutral-700 dark:text-neutral-300 border-neutral-200 dark:border-neutral-800 hover:border-neutral-400 dark:hover:border-neutral-600"
-                    }`}
-                  >
-                    {idx + 1}. {formatRangeSec(sc.startSec)}–{formatRangeSec(sc.endSec)}
-                  </button>
-                );
-              })}
+                  return (
+                    <button
+                      key={sc.index}
+                      type="button"
+                      onClick={() => onSeek(sceneCutStart)}
+                      className={`px-2.5 py-1.5 rounded-lg text-xs font-mono-tabular border transition-colors cursor-pointer whitespace-nowrap ${
+                        isSceneActive
+                          ? "bg-neutral-950 text-white border-neutral-950 dark:bg-white dark:text-neutral-950 dark:border-white"
+                          : "bg-white dark:bg-neutral-950 text-neutral-700 dark:text-neutral-300 border-neutral-200 dark:border-neutral-800 hover:border-neutral-400 dark:hover:border-neutral-600"
+                      }`}
+                    >
+                      {idx + 1}. {formatRangeSec(sc.startSec)}–{formatRangeSec(sc.endSec)}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => (showAddSub ? setShowAddSub(false) : openAddSubtitleForm())}
+                className="h-8 px-3 rounded-lg bg-neutral-950 text-white dark:bg-white dark:text-neutral-950 text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0 hover:opacity-90 transition-opacity cursor-pointer"
+              >
+                {showAddSub ? <X className="w-3.5 h-3.5" /> : <Plus className="w-3.5 h-3.5" />}
+                <span>{showAddSub ? "Close" : "Add Subtitle"}</span>
+              </button>
             </div>
+
+            {/* Inline Add Subtitle Form */}
+            {showAddSub && (
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (!newSubPhonetic.trim() && !newSubBurmese.trim()) return;
+                  const s = parseFloat(newSubStart);
+                  const en = parseFloat(newSubEnd);
+                  onAddSubtitle({
+                    startTime: Number.isFinite(s) ? s : cutTime,
+                    endTime: Number.isFinite(en) ? en : (Number.isFinite(s) ? s : cutTime) + 2.5,
+                    thaiPhonetic: newSubPhonetic,
+                    burmese: newSubBurmese,
+                  });
+                  setShowAddSub(false);
+                  setNewSubPhonetic("");
+                  setNewSubBurmese("");
+                }}
+                className="p-3.5 rounded-xl border border-neutral-300 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-900 space-y-2.5"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-xs font-semibold text-neutral-900 dark:text-neutral-100">
+                    New Subtitle
+                  </span>
+                  <div className="flex items-center gap-1.5 text-xs">
+                    <label className="flex items-center gap-1 text-neutral-500 dark:text-neutral-400">
+                      <span>Start</span>
+                      <input
+                        type="number"
+                        step="0.1"
+                        min={0}
+                        max={project.targetDurationSec}
+                        value={newSubStart}
+                        onChange={(e) => setNewSubStart(e.target.value)}
+                        className="w-16 h-7 px-2 rounded-md border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-950 text-neutral-950 dark:text-white font-mono-tabular text-xs"
+                      />
+                    </label>
+                    <label className="flex items-center gap-1 text-neutral-500 dark:text-neutral-400">
+                      <span>End</span>
+                      <input
+                        type="number"
+                        step="0.1"
+                        min={0.2}
+                        max={project.targetDurationSec}
+                        value={newSubEnd}
+                        onChange={(e) => setNewSubEnd(e.target.value)}
+                        className="w-16 h-7 px-2 rounded-md border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-950 text-neutral-950 dark:text-white font-mono-tabular text-xs"
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const maxDur = Math.max(0.5, project.targetDurationSec || 10);
+                        const s = Math.min(maxDur - 0.5, Math.max(0, cutTime));
+                        setNewSubStart(s.toFixed(1));
+                        setNewSubEnd(Math.min(maxDur, s + 2.5).toFixed(1));
+                      }}
+                      className="h-7 px-2 rounded-md border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-950 text-[11px] font-medium hover:bg-neutral-100 dark:hover:bg-neutral-800 cursor-pointer whitespace-nowrap"
+                    >
+                      Use playhead
+                    </button>
+                  </div>
+                </div>
+
+                <input
+                  type="text"
+                  value={newSubPhonetic}
+                  onChange={(e) => setNewSubPhonetic(e.target.value)}
+                  placeholder="Thai phonetic (e.g. Sa-wat-dee khrap)"
+                  aria-label="New Thai phonetic subtitle"
+                  className="w-full h-9 px-3 rounded-lg border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-950 text-sm font-medium text-neutral-950 dark:text-neutral-50 placeholder:text-neutral-400 focus:outline-none focus:border-neutral-950 dark:focus:border-white"
+                />
+
+                <input
+                  type="text"
+                  value={newSubBurmese}
+                  onChange={(e) => setNewSubBurmese(e.target.value)}
+                  placeholder="မြန်မာဘာသာပြန်..."
+                  aria-label="New Burmese translation subtitle"
+                  className="w-full h-9 px-3 rounded-lg border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-950 font-myanmar text-[13px] text-neutral-800 dark:text-neutral-200 placeholder:text-neutral-400 focus:outline-none focus:border-neutral-950 dark:focus:border-white"
+                />
+
+                <div className="flex items-center justify-end gap-2 pt-0.5">
+                  <button
+                    type="button"
+                    onClick={() => setShowAddSub(false)}
+                    className="h-8 px-3 rounded-lg border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-950 text-xs font-medium hover:bg-neutral-100 dark:hover:bg-neutral-800 cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={!newSubPhonetic.trim() && !newSubBurmese.trim()}
+                    className="h-8 px-3.5 rounded-lg bg-neutral-950 text-white dark:bg-white dark:text-neutral-950 text-xs font-semibold disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-90 cursor-pointer"
+                  >
+                    Add
+                  </button>
+                </div>
+              </form>
+            )}
 
             {/* Editable Subtitles */}
-            <div className="divide-y divide-neutral-200 dark:divide-neutral-800 border border-neutral-200 dark:border-neutral-800 rounded-xl overflow-hidden">
-              {(() => {
-                const activeSubId = project.subtitles.reduce<string | undefined>(
-                  (acc, s) => (cutTime >= s.startTime ? s.id : acc),
-                  undefined
-                );
-                return project.subtitles.map((sub: SubtitleItem) => {
-                  const isCurrent = sub.id === activeSubId;
-                  return (
-                  <div
-                    key={sub.id}
-                    className={`p-3.5 transition-colors ${
-                      isCurrent
-                        ? "bg-neutral-100 dark:bg-neutral-900"
-                        : "bg-white dark:bg-neutral-950"
-                    }`}
-                  >
-                    <div className="flex items-center justify-between gap-2 mb-1.5">
-                      <button
-                        type="button"
-                        onClick={() => onSeek(sub.startTime)}
-                        className="text-[11px] font-mono-tabular text-neutral-500 dark:text-neutral-400 hover:text-neutral-950 dark:hover:text-white cursor-pointer shrink-0"
-                      >
-                        {(() => {
-                          const spd = getEffectivePlaybackSpeed(
-                            project.sourceType,
-                            editSettings.playbackSpeed,
-                            voiceSettings.speed
-                          );
-                          return `${formatRangeSec(sub.startTime / spd)} – ${formatRangeSec(
-                            sub.endTime / spd
-                          )}`;
-                        })()}
-                      </button>
-                      <span className="text-[11px] text-neutral-400 dark:text-neutral-500 truncate">
-                        {sub.originalSpokenText}
-                      </span>
-                    </div>
-
-                    <input
-                      type="text"
-                      value={sub.thaiPhonetic}
-                      onChange={(e) => onUpdateSubtitle(sub.id, "thaiPhonetic", e.target.value)}
-                      aria-label="Thai in English phonetics"
-                      className="w-full text-sm font-semibold text-neutral-950 dark:text-neutral-50 bg-transparent border-b border-transparent focus:border-neutral-400 dark:focus:border-neutral-600 focus:outline-none py-0.5"
-                    />
-
-                    <input
-                      type="text"
-                      value={sub.burmese}
-                      onChange={(e) => onUpdateSubtitle(sub.id, "burmese", e.target.value)}
-                      aria-label="Burmese translation"
-                      className="w-full font-myanmar text-[13px] text-neutral-700 dark:text-neutral-300 bg-transparent border-b border-transparent focus:border-neutral-400 dark:focus:border-neutral-600 focus:outline-none py-0.5 mt-1"
-                    />
-                  </div>
+            {project.subtitles.length === 0 ? (
+              <div className="p-6 rounded-xl border border-dashed border-neutral-300 dark:border-neutral-700 text-center space-y-2.5">
+                <p className="text-xs text-neutral-500 dark:text-neutral-400">
+                  No subtitles in this video yet.
+                </p>
+                <button
+                  type="button"
+                  onClick={openAddSubtitleForm}
+                  className="h-8 px-3.5 rounded-lg bg-neutral-950 text-white dark:bg-white dark:text-neutral-950 text-xs font-semibold inline-flex items-center gap-1.5 hover:opacity-90 cursor-pointer"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Add Subtitle</span>
+                </button>
+              </div>
+            ) : (
+              <div className="divide-y divide-neutral-200 dark:divide-neutral-800 border border-neutral-200 dark:border-neutral-800 rounded-xl overflow-hidden">
+                {(() => {
+                  const activeSubId = project.subtitles.reduce<string | undefined>(
+                    (acc, s) => (cutTime >= s.startTime ? s.id : acc),
+                    undefined
                   );
-                });
-              })()}
-            </div>
-          </div>
-        )}
+                  return project.subtitles.map((sub: SubtitleItem) => {
+                    const isCurrent = sub.id === activeSubId;
+                    const isEditingTime = editingTimeId === sub.id;
+                    return (
+                      <div
+                        key={sub.id}
+                        className={`p-3.5 transition-colors ${
+                          isCurrent
+                            ? "bg-neutral-100 dark:bg-neutral-900"
+                            : "bg-white dark:bg-neutral-950"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2 mb-1.5">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <button
+                              type="button"
+                              onClick={() => onSeek(sub.startTime)}
+                              className="text-[11px] font-mono-tabular text-neutral-500 dark:text-neutral-400 hover:text-neutral-950 dark:hover:text-white cursor-pointer shrink-0"
+                            >
+                              {(() => {
+                                const spd = getEffectivePlaybackSpeed(
+                                  project.sourceType,
+                                  editSettings.playbackSpeed,
+                                  voiceSettings.speed
+                                );
+                                return `${formatRangeSec(sub.startTime / spd)} – ${formatRangeSec(
+                                  sub.endTime / spd
+                                )}`;
+                              })()}
+                            </button>
+                            <span className="text-[11px] text-neutral-400 dark:text-neutral-500 truncate">
+                              {sub.originalSpokenText}
+                            </span>
+                          </div>
 
-        {activeTab === "voice" && (
-          <VoiceChangerPanel
-            sourceType={
-              project?.sourceType ?? localMedia?.sourceType ?? youtubeMedia?.sourceType ?? "youtube"
-            }
-            localVideoTitle={
-              project?.sourceType === "local"
-                ? project.title
-                : localMedia?.title
-            }
-            settings={voiceSettings}
-            canDownload={Boolean(project)}
-            isExporting={isExporting}
-            onChange={onChangeVoiceSettings}
-            onUploadVoiceVideo={onUploadVoiceVideo}
-            onDownloadMp4={onDownloadMp4}
-          />
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (isEditingTime) {
+                                  setEditingTimeId(null);
+                                } else {
+                                  setEditingTimeId(sub.id);
+                                  setEditStartVal(sub.startTime.toFixed(1));
+                                  setEditEndVal(sub.endTime.toFixed(1));
+                                }
+                              }}
+                              title="Edit subtitle timing"
+                              aria-label="Edit subtitle timing"
+                              className={`w-7 h-7 rounded-md flex items-center justify-center transition-colors cursor-pointer ${
+                                isEditingTime
+                                  ? "bg-neutral-200 dark:bg-neutral-800 text-neutral-950 dark:text-white"
+                                  : "text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+                              }`}
+                            >
+                              <Clock className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (editingTimeId === sub.id) setEditingTimeId(null);
+                                onDeleteSubtitle(sub.id);
+                              }}
+                              title="Delete subtitle"
+                              aria-label="Delete subtitle"
+                              className="w-7 h-7 rounded-md flex items-center justify-center text-neutral-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 transition-colors cursor-pointer"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+
+                        {isEditingTime && (
+                          <div className="mb-2 flex flex-wrap items-center gap-2 p-2 rounded-lg bg-neutral-100/80 dark:bg-neutral-800/70 text-xs">
+                            <label className="flex items-center gap-1 text-neutral-600 dark:text-neutral-300">
+                              <span>Start (s)</span>
+                              <input
+                                type="number"
+                                step="0.1"
+                                min={0}
+                                max={project.targetDurationSec}
+                                value={editStartVal}
+                                onChange={(e) => setEditStartVal(e.target.value)}
+                                className="w-16 h-7 px-2 rounded border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 font-mono-tabular text-xs"
+                              />
+                            </label>
+                            <label className="flex items-center gap-1 text-neutral-600 dark:text-neutral-300">
+                              <span>End (s)</span>
+                              <input
+                                type="number"
+                                step="0.1"
+                                min={0.2}
+                                max={project.targetDurationSec}
+                                value={editEndVal}
+                                onChange={(e) => setEditEndVal(e.target.value)}
+                                className="w-16 h-7 px-2 rounded border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 font-mono-tabular text-xs"
+                              />
+                            </label>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const s = parseFloat(editStartVal);
+                                const en = parseFloat(editEndVal);
+                                if (Number.isFinite(s) && Number.isFinite(en)) {
+                                  onUpdateSubtitleTiming(sub.id, s, en);
+                                }
+                                setEditingTimeId(null);
+                              }}
+                              className="h-7 px-2.5 rounded bg-neutral-950 text-white dark:bg-white dark:text-neutral-950 text-[11px] font-medium flex items-center gap-1 cursor-pointer"
+                            >
+                              <Check className="w-3 h-3" />
+                              <span>Apply</span>
+                            </button>
+                          </div>
+                        )}
+
+                        <input
+                          type="text"
+                          value={sub.thaiPhonetic}
+                          onChange={(e) => onUpdateSubtitle(sub.id, "thaiPhonetic", e.target.value)}
+                          placeholder="Thai phonetic..."
+                          aria-label="Thai in English phonetics"
+                          className="w-full text-sm font-semibold text-neutral-950 dark:text-neutral-50 bg-transparent border-b border-transparent focus:border-neutral-400 dark:focus:border-neutral-600 focus:outline-none py-0.5"
+                        />
+
+                        <input
+                          type="text"
+                          value={sub.burmese}
+                          onChange={(e) => onUpdateSubtitle(sub.id, "burmese", e.target.value)}
+                          placeholder="မြန်မာဘာသာပြန်..."
+                          aria-label="Burmese translation"
+                          className="w-full font-myanmar text-[13px] text-neutral-700 dark:text-neutral-300 bg-transparent border-b border-transparent focus:border-neutral-400 dark:focus:border-neutral-600 focus:outline-none py-0.5 mt-1"
+                        />
+                      </div>
+                    );
+                  });
+                })()}
+              </div>
+            )}
+          </div>
         )}
 
         {activeTab === "projects" && (

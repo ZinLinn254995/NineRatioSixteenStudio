@@ -2061,6 +2061,129 @@ app.get("/api/image-proxy", async (req, res) => {
   }
 });
 
+// Check whether an uploadId still exists on disk (e.g. after server restarts)
+app.get("/api/upload-exists/:uploadId", (req, res) => {
+  const uploadId = String(req.params.uploadId || "");
+  const p = uploadId ? uploadedFiles.get(uploadId) : undefined;
+  const exists = Boolean(p && fs.existsSync(p));
+  res.json({ exists });
+});
+
+// Pre-extract selected scenes into a lightweight, all-keyframe (GOP=1) H.264 MP4
+// so browser canvas export seeks instantaneously with zero blink/black frames
+app.post("/api/prepare-export-clip", async (req, res) => {
+  const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "thai-prep-"));
+  try {
+    const { uploadId, scenes = [] } = req.body as {
+      uploadId?: string;
+      scenes?: SpeakingScene[];
+    };
+
+    const uploadedPath = uploadId ? uploadedFiles.get(uploadId) : undefined;
+    if (!uploadId || !uploadedPath || !fs.existsSync(uploadedPath)) {
+      res.status(404).json({ error: "Uploaded video file not found. Please re-upload." });
+      return;
+    }
+
+    const validScenes = (Array.isArray(scenes) ? scenes : [])
+      .map((sc) => ({
+        startSec: Math.max(0, Number(sc.startSec) || 0),
+        durationSec: Math.max(0.1, Number(sc.durationSec) || Math.max(0.1, (Number(sc.endSec) || 0) - (Number(sc.startSec) || 0))),
+      }))
+      .filter((sc) => Number.isFinite(sc.startSec) && Number.isFinite(sc.durationSec) && sc.durationSec > 0.05);
+
+    const outClipPath = path.join(tmpDir, "prepared-clip.mp4");
+    const scaleFilter =
+      "fps=24,scale=w='min(960,iw)':h='min(960,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1";
+
+    if (validScenes.length <= 1) {
+      const sc = validScenes[0];
+      const seekArgs = sc ? ["-ss", String(sc.startSec), "-t", String(sc.durationSec)] : [];
+      await execFileAsync("ffmpeg", [
+        "-y",
+        ...seekArgs,
+        "-i",
+        uploadedPath,
+        "-vf",
+        `${scaleFilter},format=yuv420p`,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-crf",
+        "21",
+        "-g",
+        "1",
+        "-keyint_min",
+        "1",
+        "-bf",
+        "0",
+        "-profile:v",
+        "baseline",
+        "-movflags",
+        "+faststart",
+        "-an",
+        outClipPath,
+      ]);
+    } else {
+      const inputArgs: string[] = [];
+      const filterParts: string[] = [];
+      const concatInputs: string[] = [];
+      for (let i = 0; i < validScenes.length; i++) {
+        const sc = validScenes[i];
+        inputArgs.push("-ss", String(sc.startSec), "-t", String(sc.durationSec), "-i", uploadedPath);
+        filterParts.push(`[${i}:v]${scaleFilter}[v${i}]`);
+        concatInputs.push(`[v${i}]`);
+      }
+      const filterComplex = `${filterParts.join(";")};${concatInputs.join("")}concat=n=${validScenes.length}:v=1:a=0,format=yuv420p[outv]`;
+
+      await execFileAsync("ffmpeg", [
+        "-y",
+        ...inputArgs,
+        "-filter_complex",
+        filterComplex,
+        "-map",
+        "[outv]",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-crf",
+        "21",
+        "-g",
+        "1",
+        "-keyint_min",
+        "1",
+        "-bf",
+        "0",
+        "-profile:v",
+        "baseline",
+        "-movflags",
+        "+faststart",
+        "-an",
+        outClipPath,
+      ]);
+    }
+
+    if (!fs.existsSync(outClipPath) || fs.statSync(outClipPath).size < 512) {
+      res.status(422).json({ error: "Could not prepare video stream from file." });
+      return;
+    }
+
+    const buf = await fs.promises.readFile(outClipPath);
+    res.setHeader("Content-Type", "video/mp4");
+    res.setHeader("Cache-Control", "no-store");
+    res.send(buf);
+  } catch (err) {
+    console.error("Prepare export clip error:", err);
+    res.status(500).json({
+      error: err instanceof Error ? err.message : "Failed to prepare export video clip.",
+    });
+  } finally {
+    await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
 // Mux exported 9:16 H.264/WebM video + original audio from uploaded scenes into MP4
 app.post("/api/mux-mp4", async (req, res) => {
   const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "thai-studio-"));
@@ -2100,10 +2223,26 @@ app.post("/api/mux-mp4", async (req, res) => {
     const uploadedPath = uploadId ? uploadedFiles.get(uploadId) : undefined;
     const hasOriginalUploadAudio = uploadedPath && fs.existsSync(uploadedPath) && scenes.length > 0;
 
-    const videoCodecArgs =
-      videoFormat === "mp4"
-        ? ["-c:v", "copy"]
-        : ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p"];
+    // Always normalize output video to standard 24fps CFR yuv420p H.264 Main@L4.0
+    // so mobile gallery players, Android/iOS, and social apps never show black/blinking frames
+    const videoCodecArgs = [
+      "-c:v",
+      "libx264",
+      "-preset",
+      "veryfast",
+      "-crf",
+      "20",
+      "-pix_fmt",
+      "yuv420p",
+      "-profile:v",
+      "main",
+      "-level",
+      "4.0",
+      "-r",
+      "24",
+      "-vsync",
+      "cfr",
+    ];
 
     if (hasOriginalUploadAudio && uploadedPath) {
       const segFiles: string[] = [];
@@ -2126,7 +2265,9 @@ app.post("/api/mux-mp4", async (req, res) => {
             "44100",
             segOut,
           ]);
-          segFiles.push(segOut);
+          if (fs.existsSync(segOut) && fs.statSync(segOut).size > 44) {
+            segFiles.push(segOut);
+          }
         } catch {
           // ignore if video had no audio stream
         }
@@ -2178,6 +2319,7 @@ app.post("/api/mux-mp4", async (req, res) => {
             audioFilters.push(`aecho=0.8:0.7:${delayMs}:${decay}`);
           }
         }
+        audioFilters.push("apad");
 
         await execFileAsync("ffmpeg", [
           "-y",
@@ -2185,12 +2327,21 @@ app.post("/api/mux-mp4", async (req, res) => {
           inputVideoPath,
           "-i",
           origWavPath,
+          "-map",
+          "0:v:0",
+          "-map",
+          "1:a:0",
           ...videoCodecArgs,
-          ...(audioFilters.length > 0 ? ["-af", audioFilters.join(",")] : []),
+          "-af",
+          audioFilters.join(","),
           "-c:a",
           "aac",
           "-b:a",
           "192k",
+          "-ar",
+          "44100",
+          "-ac",
+          "2",
           "-movflags",
           "+faststart",
           "-shortest",
@@ -2204,6 +2355,7 @@ app.post("/api/mux-mp4", async (req, res) => {
           ...videoCodecArgs,
           "-movflags",
           "+faststart",
+          "-an",
           outputMp4Path,
         ]);
       }
@@ -2215,6 +2367,7 @@ app.post("/api/mux-mp4", async (req, res) => {
         ...videoCodecArgs,
         "-movflags",
         "+faststart",
+        "-an",
         outputMp4Path,
       ]);
     }
