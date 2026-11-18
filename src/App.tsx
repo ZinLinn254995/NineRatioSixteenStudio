@@ -45,7 +45,8 @@ export default function App() {
   const [searchError, setSearchError] = useState<string | null>(null);
 
   const [activeTab, setActiveTab] = useState<WorkspaceTab>("videos");
-  const [activeMedia, setActiveMedia] = useState<ActiveMediaSource | null>(null);
+  const [localMedia, setLocalMedia] = useState<ActiveMediaSource | null>(null);
+  const [youtubeMedia, setYoutubeMedia] = useState<ActiveMediaSource | null>(null);
   const [selectedScenes, setSelectedScenes] = useState<SceneSelection[]>([]);
   const [voiceSettings, setVoiceSettings] = useState<VoiceSettings>({
     ...DEFAULT_VOICE_SETTINGS,
@@ -70,12 +71,25 @@ export default function App() {
   const [isSavingProject, setIsSavingProject] = useState(false);
   const [justSaved, setJustSaved] = useState(false);
   const [saveNotice, setSaveNotice] = useState<string | null>(null);
+  const [ytPreviewSec, setYtPreviewSec] = useState(0);
+  const [ytSeekRequest, setYtSeekRequest] = useState<{ sec: number; nonce: number } | null>(null);
+  const [isDesktop, setIsDesktop] = useState<boolean>(() =>
+    typeof window !== "undefined" ? window.matchMedia("(min-width: 1024px)").matches : true
+  );
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const activeRunIdRef = useRef(0);
   const searchSeqRef = useRef(0);
   const createdUrlsRef = useRef<string[]>([]);
   const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    const mql = window.matchMedia("(min-width: 1024px)");
+    const onChange = () => setIsDesktop(mql.matches);
+    setIsDesktop(mql.matches);
+    mql.addEventListener("change", onChange);
+    return () => mql.removeEventListener("change", onChange);
+  }, []);
 
   const registerBlobUrl = useCallback((blob: Blob): string => {
     const url = URL.createObjectURL(blob);
@@ -173,6 +187,21 @@ export default function App() {
     runSearch("", "all");
   }, [runSearch]);
 
+  // Pre-load the first recommended YouTube video into YouTube Preview by default
+  useEffect(() => {
+    if (!youtubeMedia && videos.length > 0) {
+      const first = videos[0];
+      setYoutubeMedia({
+        sourceType: "youtube",
+        videoId: first.videoId,
+        title: first.title,
+        channel: first.channel,
+        durationSec: first.durationSec,
+        thumbnail: first.thumbnail,
+      });
+    }
+  }, [youtubeMedia, videos]);
+
   const handleChangeLicenseFilter = useCallback(
     (nextLicense: YouTubeLicenseFilter) => {
       setLicenseFilter(nextLicense);
@@ -208,17 +237,14 @@ export default function App() {
     };
   }, []);
 
-  // Clicking a YouTube video opens it in Watch & Scenes first without auto-generating
+  // Clicking a YouTube video opens it in its dedicated YouTube Preview tab without disturbing Watch & Scenes local edits
   const handleSelectVideo = (video: YouTubeVideo) => {
-    activeRunIdRef.current++;
-    setIsPlaying(false);
-    setCutTime(0);
+    setYtPreviewSec(0);
+    setYtSeekRequest(null);
     setProcessError(null);
     setSaveNotice(null);
-    setActiveSavedId(null);
-    setProject(null);
-    setSelectedScenes([]);
-    setActiveMedia({
+    setProject((prev) => (prev?.sourceType === "local" ? prev : null));
+    setYoutubeMedia({
       sourceType: "youtube",
       videoId: video.videoId,
       title: video.title,
@@ -226,7 +252,7 @@ export default function App() {
       durationSec: video.durationSec,
       thumbnail: video.thumbnail,
     });
-    setActiveTab("scenes");
+    setActiveTab("ytPreview");
   };
 
   // Uploading a local video opens it in Watch & Scenes first without auto-generating
@@ -244,13 +270,25 @@ export default function App() {
     const durationSec = await new Promise<number>((resolve) => {
       const v = document.createElement("video");
       v.preload = "metadata";
-      v.onloadedmetadata = () =>
-        resolve(Math.max(0.5, Math.round((v.duration || 120) * 10) / 10));
-      v.onerror = () => resolve(120);
+      let done = false;
+      const finish = (dur: number) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        v.removeAttribute("src");
+        v.load();
+        resolve(dur);
+      };
+      const timer = setTimeout(() => finish(120), 4000);
+      v.onloadedmetadata = () => {
+        const raw = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : 120;
+        finish(Math.max(0.5, Math.round(raw * 10) / 10));
+      };
+      v.onerror = () => finish(120);
       v.src = localUrl;
     });
 
-    setActiveMedia({
+    setLocalMedia({
       sourceType: "local",
       localUrl,
       localFile: file,
@@ -281,13 +319,26 @@ export default function App() {
     const durationSec = await new Promise<number>((resolve) => {
       const v = document.createElement("video");
       v.preload = "metadata";
-      v.onloadedmetadata = () => resolve(Math.max(1, Math.round(v.duration) || 30));
-      v.onerror = () => resolve(30);
+      let done = false;
+      const finish = (dur: number) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        v.removeAttribute("src");
+        v.load();
+        resolve(dur);
+      };
+      const timer = setTimeout(() => finish(30), 4000);
+      v.onloadedmetadata = () => {
+        const raw = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : 30;
+        finish(Math.max(1, Math.round(raw)));
+      };
+      v.onerror = () => finish(30);
       v.src = localUrl;
     });
 
     const cleanTitle = file.name.replace(/\.[^.]+$/, "");
-    setActiveMedia({
+    setLocalMedia({
       sourceType: "local",
       localUrl,
       localFile: file,
@@ -325,15 +376,22 @@ export default function App() {
     setActiveTab("voice");
   };
 
-  const handleAddScene = (startSec: number, endSec: number) => {
-    setSelectedScenes((prev) => [
-      ...prev,
-      {
-        id: `sc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-        startSec,
-        endSec,
-      },
-    ]);
+  const handleClearLocalVideo = () => {
+    activeRunIdRef.current++;
+    if (localMedia?.localUrl?.startsWith("blob:")) {
+      URL.revokeObjectURL(localMedia.localUrl);
+      createdUrlsRef.current = createdUrlsRef.current.filter((u) => u !== localMedia.localUrl);
+    }
+    setIsProcessing(false);
+    setIsPlaying(false);
+    setCutTime(0);
+    setProcessError(null);
+    setSaveNotice(null);
+    setActiveSavedId(null);
+    setSelectedScenes([]);
+    setLocalMedia(null);
+    setProject((prev) => (prev?.sourceType === "local" ? null : prev));
+    setActiveTab("scenes");
   };
 
   const handleUpdateScene = (id: string, startSec: number, endSec: number) => {
@@ -348,7 +406,8 @@ export default function App() {
 
   // Triggered explicitly by the user after watching and selecting their scenes
   const handleGenerateSubtitles = async () => {
-    if (!activeMedia || selectedScenes.length === 0) return;
+    const targetMedia = localMedia ?? youtubeMedia;
+    if (!targetMedia || selectedScenes.length === 0) return;
 
     const runId = ++activeRunIdRef.current;
     setIsPlaying(false);
@@ -362,15 +421,15 @@ export default function App() {
         endSec,
       }));
 
-      if (activeMedia.sourceType === "local" && activeMedia.localFile) {
-        let uploadId = activeMedia.uploadId;
+      if (targetMedia.sourceType === "local" && targetMedia.localFile) {
+        let uploadId = targetMedia.uploadId;
         if (!uploadId) {
           uploadId = await uploadBlobInChunks(
-            activeMedia.localFile,
-            activeMedia.localFile.name
+            targetMedia.localFile,
+            targetMedia.localFile.name
           );
           if (activeRunIdRef.current !== runId) return;
-          setActiveMedia((prev) => (prev ? { ...prev, uploadId } : prev));
+          setLocalMedia((prev) => (prev ? { ...prev, uploadId } : prev));
         }
 
         let resp = await fetch("/api/process-upload", {
@@ -378,8 +437,8 @@ export default function App() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             uploadId,
-            title: activeMedia.title,
-            durationSec: activeMedia.durationSec,
+            title: targetMedia.title,
+            durationSec: targetMedia.durationSec,
             selectedScenes: scenePayload,
           }),
         });
@@ -387,18 +446,18 @@ export default function App() {
         // If server restarted and tmp upload expired, re-upload once transparently
         if (resp.status === 404) {
           uploadId = await uploadBlobInChunks(
-            activeMedia.localFile,
-            activeMedia.localFile.name
+            targetMedia.localFile,
+            targetMedia.localFile.name
           );
           if (activeRunIdRef.current !== runId) return;
-          setActiveMedia((prev) => (prev ? { ...prev, uploadId } : prev));
+          setLocalMedia((prev) => (prev ? { ...prev, uploadId } : prev));
           resp = await fetch("/api/process-upload", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               uploadId,
-              title: activeMedia.title,
-              durationSec: activeMedia.durationSec,
+              title: targetMedia.title,
+              durationSec: targetMedia.durationSec,
               selectedScenes: scenePayload,
             }),
           });
@@ -411,19 +470,19 @@ export default function App() {
         setProject({
           ...data,
           sourceType: "local",
-          localUrl: activeMedia.localUrl,
-          localFile: activeMedia.localFile,
+          localUrl: targetMedia.localUrl,
+          localFile: targetMedia.localFile,
         });
         setActiveTab("script");
-      } else if (activeMedia.sourceType === "youtube" && activeMedia.videoId) {
+      } else if (targetMedia.sourceType === "youtube" && targetMedia.videoId) {
         const resp = await fetch("/api/process-video", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            videoId: activeMedia.videoId,
-            title: activeMedia.title,
-            channel: activeMedia.channel,
-            durationSec: activeMedia.durationSec,
+            videoId: targetMedia.videoId,
+            title: targetMedia.title,
+            channel: targetMedia.channel,
+            durationSec: targetMedia.durationSec,
             selectedScenes: scenePayload,
           }),
         });
@@ -549,7 +608,7 @@ export default function App() {
     }
   };
 
-  const canSaveCurrent = Boolean(project || (activeMedia && selectedScenes.length > 0));
+  const canSaveCurrent = Boolean(project || (localMedia && selectedScenes.length > 0));
 
   const handleSaveProject = useCallback(
     async (asNew = false) => {
@@ -559,18 +618,21 @@ export default function App() {
       setSaveNotice(null);
 
       try {
+        const mediaForSave =
+          project?.sourceType === "youtube" ? youtubeMedia : (localMedia ?? youtubeMedia);
+
         const snapshotProject: VideoProject | null =
           project ??
-          (activeMedia
+          (mediaForSave
             ? {
-                sourceType: activeMedia.sourceType,
-                videoId: activeMedia.videoId,
-                localUrl: activeMedia.localUrl,
-                localFile: activeMedia.localFile,
-                uploadId: activeMedia.uploadId,
-                title: activeMedia.title,
-                channel: activeMedia.channel,
-                sourceDurationSec: activeMedia.durationSec,
+                sourceType: mediaForSave.sourceType,
+                videoId: mediaForSave.videoId,
+                localUrl: mediaForSave.localUrl,
+                localFile: mediaForSave.localFile,
+                uploadId: mediaForSave.uploadId,
+                title: mediaForSave.title,
+                channel: mediaForSave.channel,
+                sourceDurationSec: mediaForSave.durationSec,
                 targetDurationSec: selectedScenes.reduce(
                   (acc, sc) => acc + Math.max(0, sc.endSec - sc.startSec),
                   0
@@ -583,7 +645,7 @@ export default function App() {
                   summary: `Scene ${i + 1}`,
                 })),
                 subtitles: [],
-                keyframeUrls: activeMedia.thumbnail ? [activeMedia.thumbnail] : [],
+                keyframeUrls: mediaForSave.thumbnail ? [mediaForSave.thumbnail] : [],
               }
             : null);
 
@@ -592,7 +654,7 @@ export default function App() {
         const { record, blobSaved } = await saveOfflineProject({
           existingId: asNew ? null : activeSavedId,
           project: snapshotProject,
-          activeMedia,
+          activeMedia: mediaForSave,
           selectedScenes,
           voiceSettings,
           editSettings: videoEdit,
@@ -624,7 +686,8 @@ export default function App() {
       canSaveCurrent,
       isSavingProject,
       project,
-      activeMedia,
+      localMedia,
+      youtubeMedia,
       selectedScenes,
       activeSavedId,
       voiceSettings,
@@ -679,7 +742,7 @@ export default function App() {
     setSelectedScenes(record.selectedScenes.map((s) => ({ ...s })));
     setVoiceSettings({ ...DEFAULT_VOICE_SETTINGS, ...record.voiceSettings });
     setVideoEdit({ ...DEFAULT_VIDEO_EDIT, ...record.editSettings });
-    setActiveMedia({
+    const openedMedia: ActiveMediaSource = {
       sourceType: record.sourceType,
       videoId: record.videoId,
       localUrl,
@@ -688,7 +751,13 @@ export default function App() {
       channel: record.channel,
       durationSec: record.sourceDurationSec,
       thumbnail: record.thumbnail,
-    });
+    };
+    if (record.sourceType === "local") {
+      setLocalMedia(openedMedia);
+    } else {
+      setLocalMedia(null);
+      setYoutubeMedia(openedMedia);
+    }
     setProject({
       sourceType: record.sourceType,
       videoId: record.videoId,
@@ -709,7 +778,11 @@ export default function App() {
     if (record.subtitles.length > 0) {
       setActiveTab("script");
     } else if (record.sourceType === "local" && localUrl) {
-      setActiveTab("voice");
+      setActiveTab("scenes");
+    } else if (record.sourceType === "youtube") {
+      setYtPreviewSec(0);
+      setYtSeekRequest(null);
+      setActiveTab("ytPreview");
     } else {
       setActiveTab("scenes");
     }
@@ -724,7 +797,11 @@ export default function App() {
       );
       if (activeSavedId === id) {
         setProject((prev) => (prev ? { ...prev, title: updated.title } : prev));
-        setActiveMedia((prev) => (prev ? { ...prev, title: updated.title } : prev));
+        if (updated.sourceType === "local") {
+          setLocalMedia((prev) => (prev ? { ...prev, title: updated.title } : prev));
+        } else {
+          setYoutubeMedia((prev) => (prev ? { ...prev, title: updated.title } : prev));
+        }
       }
     } catch (err) {
       setProcessError(err instanceof Error ? err.message : "Failed to rename project.");
@@ -789,7 +866,7 @@ export default function App() {
       }
       if (activeSavedId === id) {
         const localUrl = registerBlobUrl(file);
-        setActiveMedia((prev) =>
+        setLocalMedia((prev) =>
           prev ? { ...prev, localUrl, localFile: file, thumbnail: record.thumbnail || prev.thumbnail } : prev
         );
         setProject((prev) => (prev ? { ...prev, localUrl, localFile: file } : prev));
@@ -800,7 +877,11 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen lg:h-screen flex flex-col bg-white text-neutral-950 dark:bg-neutral-950 dark:text-neutral-50 transition-colors duration-150">
+    <div
+      className={`${
+        activeTab === "edit" ? "h-[100dvh] overflow-hidden" : "min-h-screen lg:h-screen"
+      } flex flex-col bg-white text-neutral-950 dark:bg-neutral-950 dark:text-neutral-50 transition-colors duration-150`}
+    >
       {/* Minimal 3-Zone Top Bar */}
       <header className="h-14 px-4 sm:px-6 border-b border-neutral-200 dark:border-neutral-800 flex items-center justify-between gap-4 sm:gap-8 shrink-0">
         {/* Zone 1: Brand Wordmark */}
@@ -930,14 +1011,43 @@ export default function App() {
 
       {/* Main Workspace */}
       {(() => {
-        const showStage = activeTab !== "videos";
+        const showStage = activeTab !== "videos" && activeTab !== "ytPreview";
+        const isEditFocus = activeTab === "edit";
+        const renderInlineStageInSidebar = showStage && isEditFocus && !isDesktop;
+        const stageNode = showStage ? (
+          <Stage9x16
+            project={project}
+            cutTime={cutTime}
+            seekNonce={seekNonce}
+            isPlaying={isPlaying}
+            muted={muted}
+            voiceSettings={voiceSettings}
+            editSettings={videoEdit}
+            onTogglePlay={handleTogglePlay}
+            onPlayingChange={setIsPlaying}
+            onSeek={handleSeek}
+            onTimeUpdate={handlePlayerTimeUpdate}
+            onEnded={handlePlaybackEnded}
+            onToggleMute={() => setMuted((m) => !m)}
+            compactMobile={isEditFocus}
+          />
+        ) : null;
+
         return (
-          <main className="flex-1 min-h-0 max-w-[1440px] w-full mx-auto px-4 sm:px-6 py-4 grid grid-cols-1 lg:grid-cols-12 gap-6">
-            {/* Left / Full: Video Picker, Watch & Custom Scene Selection, Subtitles, Voice, and Saved Projects */}
+          <main
+            className={`flex-1 min-h-0 max-w-[1440px] w-full mx-auto px-4 sm:px-6 py-4 ${
+              isEditFocus
+                ? "flex flex-col lg:grid lg:grid-cols-12 gap-3 lg:gap-6 overflow-hidden"
+                : "grid grid-cols-1 lg:grid-cols-12 gap-6"
+            }`}
+          >
+            {/* Left / Full: Video Picker, YouTube Preview, Watch & Custom Scene Selection, Subtitles, Voice, and Saved Projects */}
             <section
               className={`${
                 showStage ? "lg:col-span-7" : "lg:col-span-12"
-              } min-h-0 flex flex-col`}
+              } ${
+                isEditFocus ? "flex-1 min-h-0" : "min-h-0"
+              } flex flex-col`}
             >
           {processError && (
             <div className="mb-3 px-3.5 py-2.5 rounded-lg border border-neutral-300 dark:border-neutral-700 text-xs text-neutral-900 dark:text-neutral-100 shrink-0">
@@ -961,16 +1071,17 @@ export default function App() {
           <WorkspaceSidebar
             activeTab={activeTab}
             onTabChange={(tab) => {
-              if (tab === "videos") setIsPlaying(false);
+              if (tab === "videos" || tab === "ytPreview") setIsPlaying(false);
               setActiveTab(tab);
             }}
             videos={videos}
-            selectedVideoId={activeMedia?.videoId}
+            selectedVideoId={youtubeMedia?.videoId}
             activeQuery={activeQuery}
             licenseFilter={licenseFilter}
             hasMoreVideos={Boolean(nextContinuation)}
             isLoadingMore={isLoadingMore}
-            activeMedia={activeMedia}
+            localMedia={localMedia}
+            youtubeMedia={youtubeMedia}
             selectedScenes={selectedScenes}
             voiceSettings={voiceSettings}
             editSettings={videoEdit}
@@ -989,16 +1100,20 @@ export default function App() {
             onChangeLicenseFilter={handleChangeLicenseFilter}
             onLoadMoreVideos={handleLoadMoreVideos}
             onResetToRecommended={handleResetToRecommended}
-            onAddScene={handleAddScene}
             onUpdateScene={handleUpdateScene}
             onRemoveScene={handleRemoveScene}
             onReplaceScenes={setSelectedScenes}
-            onDetectedDuration={(dur) =>
-              setActiveMedia((prev) => (prev ? { ...prev, durationSec: dur } : prev))
+            onDetectedLocalDuration={(dur) =>
+              setLocalMedia((prev) => (prev ? { ...prev, durationSec: dur } : prev))
+            }
+            onDetectedYouTubeDuration={(dur) =>
+              setYoutubeMedia((prev) => (prev ? { ...prev, durationSec: dur } : prev))
             }
             onGenerateSubtitles={handleGenerateSubtitles}
             onChangeVoiceSettings={setVoiceSettings}
             onChangeEditSettings={setVideoEdit}
+            onUploadLocalVideo={handleUploadLocalVideo}
+            onClearLocalVideo={handleClearLocalVideo}
             onUploadVoiceVideo={handleUploadVoiceVideo}
             onDownloadMp4={handleDownloadMp4}
             onSeek={handleSeek}
@@ -1010,27 +1125,17 @@ export default function App() {
             onExportSavedJson={handleExportSavedJson}
             onImportSavedJson={handleImportSavedJson}
             onRelinkLocalVideo={handleRelinkLocalVideo}
+            ytPreviewSec={ytPreviewSec}
+            ytSeekRequest={ytSeekRequest}
+            onYtCurrentSecChange={setYtPreviewSec}
+            inlineStage={renderInlineStageInSidebar ? stageNode : undefined}
           />
         </section>
 
-        {/* Right: Focused 9:16 Stage (hidden while browsing Videos tab) */}
-        {showStage && (
+        {/* Right: Focused 9:16 Stage */}
+        {showStage && !renderInlineStageInSidebar && (
           <section className="lg:col-span-5 flex items-center justify-center min-h-0">
-            <Stage9x16
-              project={project}
-              cutTime={cutTime}
-              seekNonce={seekNonce}
-              isPlaying={isPlaying}
-              muted={muted}
-              voiceSettings={voiceSettings}
-              editSettings={videoEdit}
-              onTogglePlay={handleTogglePlay}
-              onPlayingChange={setIsPlaying}
-              onSeek={handleSeek}
-              onTimeUpdate={handlePlayerTimeUpdate}
-              onEnded={handlePlaybackEnded}
-              onToggleMute={() => setMuted((m) => !m)}
-            />
+            {stageNode}
           </section>
         )}
       </main>

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { Film, Loader2 } from "lucide-react";
 import type {
   ActiveMediaSource,
@@ -12,12 +12,20 @@ import type {
   YouTubeVideo,
 } from "../types";
 import { ScenePicker } from "./ScenePicker";
+import { YouTubePreviewPanel } from "./YouTubePreviewPanel";
 import { VoiceChangerPanel } from "./VoiceChangerPanel";
 import { VideoEditPanel } from "./VideoEditPanel";
 import { SavedProjectsPanel } from "./SavedProjectsPanel";
 import { getEffectivePlaybackSpeed } from "../utils/voicePresets";
 
-export type WorkspaceTab = "videos" | "scenes" | "edit" | "script" | "voice" | "projects";
+export type WorkspaceTab =
+  | "videos"
+  | "ytPreview"
+  | "scenes"
+  | "edit"
+  | "script"
+  | "voice"
+  | "projects";
 
 interface WorkspaceSidebarProps {
   activeTab: WorkspaceTab;
@@ -28,7 +36,8 @@ interface WorkspaceSidebarProps {
   licenseFilter: YouTubeLicenseFilter;
   hasMoreVideos: boolean;
   isLoadingMore: boolean;
-  activeMedia: ActiveMediaSource | null;
+  localMedia: ActiveMediaSource | null;
+  youtubeMedia: ActiveMediaSource | null;
   selectedScenes: SceneSelection[];
   voiceSettings: VoiceSettings;
   editSettings: VideoEditSettings;
@@ -47,14 +56,16 @@ interface WorkspaceSidebarProps {
   onChangeLicenseFilter: (license: YouTubeLicenseFilter) => void;
   onLoadMoreVideos: () => void;
   onResetToRecommended: () => void;
-  onAddScene: (startSec: number, endSec: number) => void;
   onUpdateScene: (id: string, startSec: number, endSec: number) => void;
   onRemoveScene: (id: string) => void;
   onReplaceScenes: (scenes: SceneSelection[]) => void;
-  onDetectedDuration: (dur: number) => void;
+  onDetectedLocalDuration: (dur: number) => void;
+  onDetectedYouTubeDuration: (dur: number) => void;
   onGenerateSubtitles: () => void;
   onChangeVoiceSettings: (next: VoiceSettings) => void;
   onChangeEditSettings: (next: VideoEditSettings) => void;
+  onUploadLocalVideo: (file: File) => void;
+  onClearLocalVideo: () => void;
   onUploadVoiceVideo: (file: File) => void;
   onDownloadMp4: () => void;
   onSeek: (sec: number) => void;
@@ -66,6 +77,10 @@ interface WorkspaceSidebarProps {
   onExportSavedJson: (record: SavedProjectRecord) => void;
   onImportSavedJson: (file: File) => void;
   onRelinkLocalVideo: (id: string, file: File) => void;
+  ytPreviewSec?: number;
+  ytSeekRequest?: { sec: number; nonce: number } | null;
+  onYtCurrentSecChange?: (sec: number) => void;
+  inlineStage?: ReactNode;
 }
 
 function formatRangeSec(sec: number): string {
@@ -84,7 +99,8 @@ export function WorkspaceSidebar({
   licenseFilter,
   hasMoreVideos,
   isLoadingMore,
-  activeMedia,
+  localMedia,
+  youtubeMedia,
   selectedScenes,
   voiceSettings,
   editSettings,
@@ -103,14 +119,16 @@ export function WorkspaceSidebar({
   onChangeLicenseFilter,
   onLoadMoreVideos,
   onResetToRecommended,
-  onAddScene,
   onUpdateScene,
   onRemoveScene,
   onReplaceScenes,
-  onDetectedDuration,
+  onDetectedLocalDuration,
+  onDetectedYouTubeDuration,
   onGenerateSubtitles,
   onChangeVoiceSettings,
   onChangeEditSettings,
+  onUploadLocalVideo,
+  onClearLocalVideo,
   onUploadVoiceVideo,
   onDownloadMp4,
   onSeek,
@@ -122,6 +140,10 @@ export function WorkspaceSidebar({
   onExportSavedJson,
   onImportSavedJson,
   onRelinkLocalVideo,
+  ytPreviewSec = 0,
+  ytSeekRequest,
+  onYtCurrentSecChange,
+  inlineStage,
 }: WorkspaceSidebarProps) {
   const scrollRootRef = useRef<HTMLDivElement | null>(null);
   const loadMoreSentinelRef = useRef<HTMLDivElement | null>(null);
@@ -160,9 +182,19 @@ export function WorkspaceSidebar({
           </button>
           <button
             type="button"
+            onClick={() => onTabChange("ytPreview")}
+            className={`px-3 py-1.5 text-xs font-medium rounded-md whitespace-nowrap transition-colors cursor-pointer ${
+              activeTab === "ytPreview"
+                ? "bg-white dark:bg-neutral-800 text-neutral-950 dark:text-white shadow-xs"
+                : "text-neutral-500 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-200"
+            }`}
+          >
+            YouTube Preview
+          </button>
+          <button
+            type="button"
             onClick={() => onTabChange("scenes")}
-            disabled={!activeMedia}
-            className={`px-3 py-1.5 text-xs font-medium rounded-md whitespace-nowrap transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
+            className={`px-3 py-1.5 text-xs font-medium rounded-md whitespace-nowrap transition-colors cursor-pointer ${
               activeTab === "scenes"
                 ? "bg-white dark:bg-neutral-800 text-neutral-950 dark:text-white shadow-xs"
                 : "text-neutral-500 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-200"
@@ -233,8 +265,18 @@ export function WorkspaceSidebar({
         )}
       </div>
 
+      {/* Inline 9:16 Stage directly below Tab Switcher (used on compact mobile Edit view) */}
+      {inlineStage && (
+        <div className="py-2 border-b border-neutral-200 dark:border-neutral-800 shrink-0 flex justify-center">
+          {inlineStage}
+        </div>
+      )}
+
       {/* Tab Body */}
-      <div ref={scrollRootRef} className="flex-1 overflow-y-auto pt-4 pr-1 min-h-0">
+      <div
+        ref={scrollRootRef}
+        className={`flex-1 overflow-y-auto pr-1 min-h-0 ${inlineStage ? "pt-3" : "pt-4"}`}
+      >
         {isProcessing && (
           <div className="mb-4 px-4 py-3 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-900 flex items-center gap-3 text-sm text-neutral-800 dark:text-neutral-200">
             <Loader2 className="w-4 h-4 animate-spin shrink-0" />
@@ -418,26 +460,67 @@ export function WorkspaceSidebar({
           </>
         )}
 
-        {activeTab === "scenes" && activeMedia && (
+        {activeTab === "ytPreview" && (
+          <YouTubePreviewPanel
+            media={youtubeMedia}
+            videos={videos}
+            hasMoreVideos={hasMoreVideos}
+            isLoadingMore={isLoadingMore}
+            isSearching={isSearching}
+            voiceSettings={voiceSettings}
+            editSettings={editSettings}
+            initialSec={ytPreviewSec}
+            seekRequest={ytSeekRequest}
+            onSelectPreviewVideo={onSelectVideo}
+            onLoadMoreVideos={onLoadMoreVideos}
+            onCurrentSecChange={onYtCurrentSecChange}
+            onDetectedDuration={onDetectedYouTubeDuration}
+          />
+        )}
+
+        {localMedia && (
+          <div className={activeTab === "scenes" ? "" : "hidden"}>
+            <ScenePicker
+              media={localMedia}
+              scenes={selectedScenes}
+              voiceSettings={voiceSettings}
+              editSettings={editSettings}
+              isProcessing={isProcessing}
+              isTabActive={activeTab === "scenes"}
+              onUpdateScene={onUpdateScene}
+              onRemoveScene={onRemoveScene}
+              onReplaceScenes={onReplaceScenes}
+              onDetectedDuration={onDetectedLocalDuration}
+              onGenerate={onGenerateSubtitles}
+              onUploadVideo={onUploadLocalVideo}
+              onClearVideo={onClearLocalVideo}
+            />
+          </div>
+        )}
+
+        {!localMedia && activeTab === "scenes" && (
           <ScenePicker
-            media={activeMedia}
+            media={null}
             scenes={selectedScenes}
             voiceSettings={voiceSettings}
             editSettings={editSettings}
             isProcessing={isProcessing}
-            onAddScene={onAddScene}
             onUpdateScene={onUpdateScene}
             onRemoveScene={onRemoveScene}
             onReplaceScenes={onReplaceScenes}
-            onDetectedDuration={onDetectedDuration}
+            onDetectedDuration={onDetectedLocalDuration}
             onGenerate={onGenerateSubtitles}
+            onUploadVideo={onUploadLocalVideo}
+            onClearVideo={onClearLocalVideo}
           />
         )}
 
         {activeTab === "edit" && (
           <VideoEditPanel
             settings={editSettings}
-            sourceType={project?.sourceType ?? activeMedia?.sourceType ?? "local"}
+            sourceType={
+              project?.sourceType ?? localMedia?.sourceType ?? youtubeMedia?.sourceType ?? "local"
+            }
             sourceDurationSec={
               project?.targetDurationSec ??
               (selectedScenes.length > 0
@@ -445,7 +528,7 @@ export function WorkspaceSidebar({
                     (acc, sc) => acc + Math.max(0, sc.endSec - sc.startSec),
                     0
                   )
-                : activeMedia?.durationSec)
+                : localMedia?.durationSec ?? youtubeMedia?.durationSec)
             }
             voiceSpeed={voiceSettings.speed}
             onChange={onChangeEditSettings}
@@ -546,13 +629,13 @@ export function WorkspaceSidebar({
 
         {activeTab === "voice" && (
           <VoiceChangerPanel
-            sourceType={project?.sourceType ?? activeMedia?.sourceType ?? "youtube"}
+            sourceType={
+              project?.sourceType ?? localMedia?.sourceType ?? youtubeMedia?.sourceType ?? "youtube"
+            }
             localVideoTitle={
               project?.sourceType === "local"
                 ? project.title
-                : activeMedia?.sourceType === "local"
-                  ? activeMedia.title
-                  : undefined
+                : localMedia?.title
             }
             settings={voiceSettings}
             canDownload={Boolean(project)}

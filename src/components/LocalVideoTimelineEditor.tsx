@@ -18,6 +18,7 @@ import type {
 import { buildCssFilterString, buildCssTransformString } from "../utils/videoFilters";
 import { getEffectivePlaybackSpeed } from "../utils/voicePresets";
 import { applyVoiceEffectsToVideoElement, resumeAllVoiceContexts } from "../utils/webAudioVoice";
+import { AdversarialNoiseOverlay } from "./AdversarialNoiseOverlay";
 
 interface LocalVideoTimelineEditorProps {
   media: ActiveMediaSource;
@@ -28,6 +29,7 @@ interface LocalVideoTimelineEditorProps {
   onRemoveScene: (id: string) => void;
   onReplaceScenes?: (scenes: SceneSelection[]) => void;
   onDetectedDuration?: (dur: number) => void;
+  isTabActive?: boolean;
 }
 
 interface ClipSegment {
@@ -96,6 +98,7 @@ export function LocalVideoTimelineEditor({
   onRemoveScene,
   onReplaceScenes,
   onDetectedDuration,
+  isTabActive = true,
 }: LocalVideoTimelineEditorProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -113,12 +116,14 @@ export function LocalVideoTimelineEditor({
   const [dragBadge, setDragBadge] = useState<{ label: string; sec: number } | null>(null);
   const [thumbnails, setThumbnails] = useState<string[]>([]);
   const [undoStack, setUndoStack] = useState<SceneSelection[][]>([]);
+  const [playError, setPlayError] = useState<string | null>(null);
 
   const dragStateRef = useRef<DragMode | null>(null);
   dragStateRef.current = dragState;
   const lastDragTargetRef = useRef<{ cutTime: number; sourceSec: number } | null>(null);
   const trimPreUndoRef = useRef<SceneSelection[] | null>(null);
   const pendingSeekSecRef = useRef<number | null>(null);
+  const lastSeekFixAtRef = useRef<number>(0);
   const seekRafRef = useRef<number>(0);
   const activePlaybackIdxRef = useRef<number>(0);
   const activePointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
@@ -181,11 +186,21 @@ export function LocalVideoTimelineEditor({
     setCutTime(0);
     setFrozenTrackTime(null);
     setDragState(null);
+    setPlayError(null);
     setUndoStack([]);
     pendingSeekSecRef.current = null;
     activePlaybackIdxRef.current = 0;
-    setSourceDuration(Math.max(1, media.durationSec || 30));
+    const safeDur = Number.isFinite(media.durationSec) && media.durationSec > 0 ? media.durationSec : 30;
+    setSourceDuration(Math.max(1, safeDur));
   }, [media.localUrl]);
+
+  // Pause timeline playback when user switches away from Watch & Scenes tab
+  useEffect(() => {
+    if (!isTabActive && videoRef.current && !videoRef.current.paused) {
+      videoRef.current.pause();
+      setIsPlaying(false);
+    }
+  }, [isTabActive]);
 
   // Keep activeSceneId synced to existing scenes
   useEffect(() => {
@@ -230,10 +245,14 @@ export function LocalVideoTimelineEditor({
     const hiddenVid = document.createElement("video");
     hiddenVid.muted = true;
     hiddenVid.playsInline = true;
-    hiddenVid.preload = "auto";
-    hiddenVid.src = media.localUrl;
+    hiddenVid.preload = "metadata";
 
     const captureFrames = async () => {
+      // Give the primary preview <video> element priority before decoding filmstrip frames
+      await new Promise((r) => setTimeout(r, 180));
+      if (cancelled) return;
+      hiddenVid.src = media.localUrl!;
+
       await new Promise<void>((resolve) => {
         if (hiddenVid.readyState >= 1) return resolve();
         hiddenVid.onloadeddata = () => resolve();
@@ -326,13 +345,14 @@ export function LocalVideoTimelineEditor({
         Number.isFinite(vid.duration) && vid.duration > 0 ? vid.duration : sourceDuration;
       const clamped = Math.max(0, Math.min(Math.max(0, actualDur - 0.02), sourceSec));
       pendingSeekSecRef.current = clamped;
+      if (vid.readyState < 1) return;
 
       if (seekRafRef.current) return;
       seekRafRef.current = requestAnimationFrame(() => {
         seekRafRef.current = 0;
         const v = videoRef.current;
         const next = pendingSeekSecRef.current;
-        if (!v || next === null) return;
+        if (!v || next === null || v.readyState < 1) return;
         if (!v.seeking) {
           pendingSeekSecRef.current = null;
           if (Math.abs(v.currentTime - next) > 0.01) {
@@ -362,9 +382,13 @@ export function LocalVideoTimelineEditor({
         const idx = Math.min(activePlaybackIdxRef.current, segs.length - 1);
         const seg = segs[idx];
         const srcT = vid.currentTime;
+        const now = performance.now();
 
         if (srcT < seg.startSec - 0.18) {
-          vid.currentTime = seg.startSec;
+          if (now - lastSeekFixAtRef.current > 500) {
+            lastSeekFixAtRef.current = now;
+            vid.currentTime = seg.startSec;
+          }
         } else if (srcT >= seg.endSec - 0.03) {
           if (idx + 1 < segs.length) {
             const nextIdx = idx + 1;
@@ -372,6 +396,7 @@ export function LocalVideoTimelineEditor({
             activePlaybackIdxRef.current = nextIdx;
             // Only seek when there is an actual cut gap; contiguous splits flow smoothly
             if (Math.abs(nextSeg.startSec - srcT) > 0.18) {
+              lastSeekFixAtRef.current = now;
               vid.currentTime = nextSeg.startSec;
             }
             setCutTime(nextSeg.cutStart);
@@ -419,6 +444,8 @@ export function LocalVideoTimelineEditor({
       const segs = segmentsRef.current;
       if (!vid || segs.length === 0) return;
 
+      setPlayError(null);
+      vid.muted = false;
       if (hasVoiceEffects || voiceAttachedRef.current) {
         resumeAllVoiceContexts();
       }
@@ -433,20 +460,43 @@ export function LocalVideoTimelineEditor({
 
       const { segIndex, sourceSec } = mapCutTimeToSource(startCut);
       activePlaybackIdxRef.current = segIndex;
-      pendingSeekSecRef.current = null;
-      const actualDur =
-        Number.isFinite(vid.duration) && vid.duration > 0 ? vid.duration : sourceDuration;
-      vid.currentTime = Math.max(0, Math.min(Math.max(0, actualDur - 0.05), sourceSec));
+
+      if (vid.readyState >= 1) {
+        const actualDur =
+          Number.isFinite(vid.duration) && vid.duration > 0 ? vid.duration : sourceDuration;
+        const clamped = Math.max(0, Math.min(Math.max(0, actualDur - 0.05), sourceSec));
+        pendingSeekSecRef.current = null;
+        if (Math.abs(vid.currentTime - clamped) > 0.08) {
+          vid.currentTime = clamped;
+        }
+      } else {
+        pendingSeekSecRef.current = sourceSec;
+      }
       setCutTime(startCut);
 
       const playPromise = vid.play();
       if (playPromise && typeof playPromise.then === "function") {
+        setIsPlaying(true);
         playPromise
           .then(() => {
             setIsPlaying(!vid.paused);
           })
           .catch(() => {
-            setIsPlaying(!vid.paused);
+            if (!vid.muted) {
+              vid.muted = true;
+              vid
+                .play()
+                .then(() => {
+                  setIsPlaying(!vid.paused);
+                })
+                .catch(() => {
+                  setIsPlaying(false);
+                  setPlayError("Tap the video to play or check the video format.");
+                });
+            } else {
+              setIsPlaying(false);
+              setPlayError("Could not play this video file.");
+            }
           });
       } else {
         setIsPlaying(!vid.paused);
@@ -622,6 +672,7 @@ export function LocalVideoTimelineEditor({
 
   // Keyboard shortcuts: Space to Play/Pause, Delete/Backspace to remove selected clip
   useEffect(() => {
+    if (!isTabActive) return;
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       const tag = target?.tagName;
@@ -638,7 +689,7 @@ export function LocalVideoTimelineEditor({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [togglePlay, targetClipForDelete, handleDeleteClip]);
+  }, [isTabActive, togglePlay, targetClipForDelete, handleDeleteClip]);
 
   const trackCenterTime = frozenTrackTime ?? cutTime;
   const centerX = viewportWidth / 2;
@@ -894,57 +945,102 @@ export function LocalVideoTimelineEditor({
         onClick={togglePlay}
         className="relative w-full aspect-video rounded-xl overflow-hidden bg-neutral-950 border border-neutral-200 dark:border-neutral-800 cursor-pointer group"
       >
-        {media.localUrl && (
-          <video
-            ref={videoRef}
-            src={media.localUrl}
-            playsInline
-            onLoadedMetadata={(e) => {
-              const d = e.currentTarget.duration;
-              if (d && Number.isFinite(d) && d > 0) {
-                setSourceDuration(d);
-                onDetectedDuration?.(roundTenth(d));
-                // Sync full-video initial clip endSec to exact metadata duration if untouched
-                if (
-                  scenes.length === 1 &&
-                  scenes[0].startSec === 0 &&
-                  Math.abs(scenes[0].endSec - (media.durationSec || d)) < 0.25 &&
-                  Math.abs(scenes[0].endSec - roundTenth(d)) > 0.05
-                ) {
-                  onUpdateScene(scenes[0].id, 0, roundTenth(d));
-                }
-              }
-            }}
-            onEnded={() => setIsPlaying(false)}
-            onSeeked={(e) => {
-              const next = pendingSeekSecRef.current;
-              if (next !== null && Math.abs(e.currentTarget.currentTime - next) > 0.04) {
-                pendingSeekSecRef.current = null;
-                e.currentTarget.currentTime = next;
-              }
-            }}
-            onPlay={(e) => {
-              if (hasVoiceEffects || voiceAttachedRef.current) {
-                resumeAllVoiceContexts();
-                voiceAttachedRef.current = true;
-                applyVoiceEffectsToVideoElement(e.currentTarget, voiceSettings, true);
-              }
-              e.currentTarget.preservesPitch = true;
-              e.currentTarget.playbackRate = getEffectivePlaybackSpeed(
-                "local",
-                editSettings.playbackSpeed,
-                voiceSettings.speed
-              );
-              setIsPlaying(true);
-            }}
-            onPause={() => setIsPlaying(false)}
-            style={{
-              transform: buildCssTransformString(editSettings),
-              filter: buildCssFilterString(editSettings),
-            }}
-            className="w-full h-full object-contain bg-black origin-center transition-transform duration-75"
-          />
+        {media.localUrl ? (
+          (() => {
+            const transformCss = buildCssTransformString(editSettings);
+            const filterCss = buildCssFilterString(editSettings);
+            return (
+              <video
+                ref={videoRef}
+                src={media.localUrl}
+                preload="auto"
+                playsInline
+                onLoadedMetadata={(e) => {
+                  const vidEl = e.currentTarget;
+                  const d = vidEl.duration;
+                  if (Number.isFinite(d) && d > 0) {
+                    setSourceDuration(d);
+                    onDetectedDuration?.(roundTenth(d));
+                    // Sync full-video initial clip endSec to exact metadata duration if untouched
+                    if (
+                      scenes.length === 1 &&
+                      scenes[0].startSec === 0 &&
+                      Math.abs(scenes[0].endSec - (media.durationSec || d)) < 0.25 &&
+                      Math.abs(scenes[0].endSec - roundTenth(d)) > 0.05
+                    ) {
+                      onUpdateScene(scenes[0].id, 0, roundTenth(d));
+                    }
+                  }
+                  if (pendingSeekSecRef.current !== null) {
+                    const maxSeek = Number.isFinite(d) && d > 0 ? Math.max(0, d - 0.02) : pendingSeekSecRef.current;
+                    const target = Math.max(0, Math.min(maxSeek, pendingSeekSecRef.current));
+                    pendingSeekSecRef.current = null;
+                    if (Math.abs(vidEl.currentTime - target) > 0.04) {
+                      vidEl.currentTime = target;
+                    }
+                  }
+                }}
+                onCanPlay={(e) => {
+                  const vidEl = e.currentTarget;
+                  if (pendingSeekSecRef.current !== null) {
+                    const d = vidEl.duration;
+                    const maxSeek = Number.isFinite(d) && d > 0 ? Math.max(0, d - 0.02) : pendingSeekSecRef.current;
+                    const target = Math.max(0, Math.min(maxSeek, pendingSeekSecRef.current));
+                    pendingSeekSecRef.current = null;
+                    if (Math.abs(vidEl.currentTime - target) > 0.04) {
+                      vidEl.currentTime = target;
+                    }
+                  }
+                }}
+                onEnded={() => setIsPlaying(false)}
+                onSeeked={(e) => {
+                  const next = pendingSeekSecRef.current;
+                  if (next !== null && Math.abs(e.currentTarget.currentTime - next) > 0.04) {
+                    pendingSeekSecRef.current = null;
+                    e.currentTarget.currentTime = next;
+                  }
+                }}
+                onPlay={(e) => {
+                  setPlayError(null);
+                  if (hasVoiceEffects || voiceAttachedRef.current) {
+                    resumeAllVoiceContexts();
+                    voiceAttachedRef.current = true;
+                    applyVoiceEffectsToVideoElement(e.currentTarget, voiceSettings, true);
+                  }
+                  e.currentTarget.preservesPitch = true;
+                  e.currentTarget.playbackRate = getEffectivePlaybackSpeed(
+                    "local",
+                    editSettings.playbackSpeed,
+                    voiceSettings.speed
+                  );
+                  setIsPlaying(true);
+                }}
+                onPause={() => setIsPlaying(false)}
+                onError={() => {
+                  setIsPlaying(false);
+                  setPlayError("Could not load or play this local video file.");
+                }}
+                style={{
+                  ...(transformCss !== "none" ? { transform: transformCss } : {}),
+                  ...(filterCss !== "none" ? { filter: filterCss } : {}),
+                }}
+                className="w-full h-full object-contain bg-black origin-center transition-transform duration-75"
+              />
+            );
+          })()
+        ) : (
+          <div className="w-full h-full flex items-center justify-center p-4 text-center">
+            <p className="text-xs text-neutral-300">
+              Local video is not linked. Link or re-upload the video file to preview.
+            </p>
+          </div>
         )}
+
+        <AdversarialNoiseOverlay
+          enabled={editSettings.adversarialNoise}
+          strength={editSettings.adversarialStrength}
+          animate={isPlaying}
+        />
 
         {editSettings.vignette > 0 && (
           <div
@@ -958,11 +1054,16 @@ export function LocalVideoTimelineEditor({
           />
         )}
 
-        {!isPlaying && (
-          <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/15 group-hover:bg-black/25 transition-colors">
+        {!isPlaying && media.localUrl && (
+          <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/15 group-hover:bg-black/25 transition-colors">
             <div className="w-12 h-12 rounded-full bg-black/70 text-white flex items-center justify-center backdrop-blur-xs">
               <Play className="w-5 h-5 ml-0.5" />
             </div>
+            {playError && (
+              <span className="px-2.5 py-1 rounded-md bg-black/80 text-white text-[11px]">
+                {playError}
+              </span>
+            )}
           </div>
         )}
 

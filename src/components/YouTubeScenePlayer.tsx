@@ -11,6 +11,8 @@ import type { SpeakingScene, VideoEditSettings, VoiceSettings } from "../types";
 import { applyVoiceEffectsToVideoElement, resumeAllVoiceContexts } from "../utils/webAudioVoice";
 import { getEffectivePlaybackSpeed } from "../utils/voicePresets";
 import { buildCssFilterString, buildCssTransformString } from "../utils/videoFilters";
+import { loadYouTubeIframeAPI } from "../utils/youtubeApi";
+import { AdversarialNoiseOverlay } from "./AdversarialNoiseOverlay";
 
 interface YTPlayerInstance {
   seekTo: (seconds: number, allowSeekAhead: boolean) => void;
@@ -46,25 +48,6 @@ declare global {
     };
     onYouTubeIframeAPIReady?: () => void;
   }
-}
-
-let ytApiPromise: Promise<void> | null = null;
-function loadYouTubeIframeAPI(): Promise<void> {
-  if (window.YT?.Player) return Promise.resolve();
-  if (ytApiPromise) return ytApiPromise;
-
-  ytApiPromise = new Promise<void>((resolve) => {
-    const existing = window.onYouTubeIframeAPIReady;
-    window.onYouTubeIframeAPIReady = () => {
-      if (existing) existing();
-      resolve();
-    };
-    const tag = document.createElement("script");
-    tag.src = "https://www.youtube.com/iframe_api";
-    tag.async = true;
-    document.head.appendChild(tag);
-  });
-  return ytApiPromise;
 }
 
 export function getSceneCutStart(scenes: SpeakingScene[], sceneIndex: number): number {
@@ -147,7 +130,11 @@ export const YouTubeScenePlayer = forwardRef<
   const activeSceneIdxRef = useRef<number>(0);
   const pendingLocalSeekRef = useRef<number | null>(null);
   const voiceAttachedRef = useRef<boolean>(false);
+  const autoMutedFallbackRef = useRef<boolean>(false);
+  const lastSeekFixAtRef = useRef<number>(0);
   const ytStateRef = useRef<number>(-1);
+  const ytHasPlayedRef = useRef<boolean>(false);
+  const ytPlayKickAtRef = useRef<number>(0);
   const ytAnchorRef = useRef({
     rawYtTime: -1,
     sourceSec: 0,
@@ -155,6 +142,8 @@ export const YouTubeScenePlayer = forwardRef<
     suppressUntilMs: 0,
   });
 
+  const [autoMutedFallback, setAutoMutedFallback] = useState(false);
+  const [ytActualPlaying, setYtActualPlaying] = useState(false);
   const [needsDirectYtTap, setNeedsDirectYtTap] = useState(false);
   const [ytEmbedError, setYtEmbedError] = useState<string | null>(null);
   const [localPlayError, setLocalPlayError] = useState<string | null>(null);
@@ -196,11 +185,18 @@ export const YouTubeScenePlayer = forwardRef<
     voiceSettings.speed
   );
 
-  // Reset voice attachment when local URL changes
+  // Reset playback guards when source changes
   useEffect(() => {
     voiceAttachedRef.current = false;
+    autoMutedFallbackRef.current = false;
+    setAutoMutedFallback(false);
     setLocalPlayError(null);
   }, [localUrl]);
+
+  useEffect(() => {
+    autoMutedFallbackRef.current = false;
+    setAutoMutedFallback(false);
+  }, [muted]);
 
   // Mount YouTube IFrame player when videoId changes
   useEffect(() => {
@@ -209,6 +205,9 @@ export const YouTubeScenePlayer = forwardRef<
     let cancelled = false;
     readyRef.current = false;
     ytStateRef.current = -1;
+    ytHasPlayedRef.current = false;
+    ytPlayKickAtRef.current = 0;
+    setYtActualPlaying(false);
     setNeedsDirectYtTap(false);
     setYtEmbedError(null);
 
@@ -217,105 +216,141 @@ export const YouTubeScenePlayer = forwardRef<
     containerRef.current.innerHTML = "";
     containerRef.current.appendChild(mountHost);
 
-    loadYouTubeIframeAPI().then(() => {
-      if (cancelled || !window.YT?.Player) return;
-      const initial = mapCutTimeToSource(scenesRef.current, cutTimeRef.current);
-      activeSceneIdxRef.current = initial.sceneIndex;
-      ytAnchorRef.current = {
-        rawYtTime: -1,
-        sourceSec: initial.sourceSec,
-        perfMs: performance.now(),
-        suppressUntilMs: performance.now() + 450,
-      };
+    loadYouTubeIframeAPI()
+      .then(() => {
+        if (cancelled || !window.YT?.Player) return;
+        const initial = mapCutTimeToSource(scenesRef.current, cutTimeRef.current);
+        activeSceneIdxRef.current = initial.sceneIndex;
+        ytAnchorRef.current = {
+          rawYtTime: -1,
+          sourceSec: initial.sourceSec,
+          perfMs: performance.now(),
+          suppressUntilMs: performance.now() + 1000,
+        };
 
-      const player = new window.YT.Player(mountHost, {
-        width: "100%",
-        height: "100%",
-        videoId,
-        playerVars: {
+        const playerVars: Record<string, string | number> = {
           autoplay: 0,
-          controls: 0,
-          disablekb: 1,
+          controls: 1,
           fs: 0,
           modestbranding: 1,
           rel: 0,
           playsinline: 1,
           start: Math.floor(initial.sourceSec),
-          origin: window.location.origin,
-        },
-        events: {
-          onReady: (e) => {
-            if (cancelled) return;
-            readyRef.current = true;
-            try {
-              const iframe = e.target.getIframe?.();
-              if (iframe) {
-                iframe.style.width = "100%";
-                iframe.style.height = "100%";
+        };
+        if (window.location.origin.startsWith("http")) {
+          playerVars.origin = window.location.origin;
+        }
+
+        const player = new window.YT.Player(mountHost, {
+          width: "100%",
+          height: "100%",
+          videoId,
+          playerVars,
+          events: {
+            onReady: (e) => {
+              if (cancelled) return;
+              readyRef.current = true;
+              try {
+                const iframe = e.target.getIframe?.();
+                if (iframe) {
+                  iframe.style.width = "100%";
+                  iframe.style.height = "100%";
+                }
+              } catch {
+                // ignore
               }
-            } catch {
-              // ignore
-            }
-            if (mutedRef.current) e.target.mute();
-            else e.target.unMute();
-            e.target.setPlaybackRate?.(youtubeSpeedRef.current);
-            const target = mapCutTimeToSource(scenesRef.current, cutTimeRef.current);
-            activeSceneIdxRef.current = target.sceneIndex;
-            e.target.seekTo(target.sourceSec, true);
-            ytAnchorRef.current = {
-              rawYtTime: -1,
-              sourceSec: target.sourceSec,
-              perfMs: performance.now(),
-              suppressUntilMs: performance.now() + 450,
-            };
-            if (isPlayingRef.current) {
-              e.target.playVideo();
-            }
-          },
-          onStateChange: (e) => {
-            if (cancelled || !playerRef.current) return;
-            ytStateRef.current = e.data;
-            if (e.data === 1) {
-              setNeedsDirectYtTap(false);
-              setYtEmbedError(null);
-              playerRef.current.setPlaybackRate?.(youtubeSpeedRef.current);
-              const ytT = playerRef.current.getCurrentTime?.();
-              if (typeof ytT === "number" && Number.isFinite(ytT)) {
-                ytAnchorRef.current.perfMs = performance.now();
-                if (performance.now() >= ytAnchorRef.current.suppressUntilMs) {
-                  ytAnchorRef.current.rawYtTime = ytT;
-                  ytAnchorRef.current.sourceSec = ytT;
+              if (mutedRef.current) e.target.mute();
+              else e.target.unMute();
+              e.target.setPlaybackRate?.(youtubeSpeedRef.current);
+              const target = mapCutTimeToSource(scenesRef.current, cutTimeRef.current);
+              activeSceneIdxRef.current = target.sceneIndex;
+              const startFloor = Math.floor(initial.sourceSec);
+              if (
+                isPlayingRef.current ||
+                Math.abs(target.sourceSec - startFloor) >= 1.5
+              ) {
+                if (target.sourceSec > 0.5) {
+                  e.target.seekTo(target.sourceSec, true);
                 }
               }
-              if (!isPlayingRef.current) {
-                onPlayingChangeRef.current(true);
+              ytAnchorRef.current = {
+                rawYtTime: -1,
+                sourceSec: target.sourceSec,
+                perfMs: performance.now(),
+                suppressUntilMs: performance.now() + 500,
+              };
+              if (isPlayingRef.current) {
+                ytPlayKickAtRef.current = performance.now();
+                e.target.playVideo();
               }
-            } else if (e.data === 2) {
-              if (
-                isPlayingRef.current &&
-                performance.now() >= ytAnchorRef.current.suppressUntilMs + 350
-              ) {
-                onPlayingChangeRef.current(false);
+            },
+            onStateChange: (e) => {
+              if (cancelled || !playerRef.current) return;
+              ytStateRef.current = e.data;
+              if (e.data === 1) {
+                ytHasPlayedRef.current = true;
+                setYtActualPlaying(true);
+                setNeedsDirectYtTap(false);
+                setYtEmbedError(null);
+                playerRef.current.setPlaybackRate?.(youtubeSpeedRef.current);
+                const ytT = playerRef.current.getCurrentTime?.();
+                if (typeof ytT === "number" && Number.isFinite(ytT)) {
+                  ytAnchorRef.current.perfMs = performance.now();
+                  if (performance.now() >= ytAnchorRef.current.suppressUntilMs) {
+                    ytAnchorRef.current.rawYtTime = ytT;
+                    ytAnchorRef.current.sourceSec = ytT;
+                  }
+                }
+                if (!isPlayingRef.current) {
+                  onPlayingChangeRef.current(true);
+                }
+              } else if (e.data === 2) {
+                setYtActualPlaying(false);
+                const now = performance.now();
+                if (
+                  isPlayingRef.current &&
+                  ytHasPlayedRef.current &&
+                  now >= ytAnchorRef.current.suppressUntilMs + 600 &&
+                  now - ytPlayKickAtRef.current >= 900
+                ) {
+                  ytHasPlayedRef.current = false;
+                  onPlayingChangeRef.current(false);
+                }
+              } else if (e.data === 0) {
+                setYtActualPlaying(false);
+                ytHasPlayedRef.current = false;
+                if (isPlayingRef.current) {
+                  onEndedRef.current();
+                }
+              } else if (e.data === 3) {
+                setYtActualPlaying(false);
               }
-            }
+            },
+            onError: (e) => {
+              if (cancelled) return;
+              setYtActualPlaying(false);
+              if (e.data === 101 || e.data === 150) {
+                setYtEmbedError("Video owner disabled embedded playback on other sites.");
+              } else {
+                setYtEmbedError("YouTube player could not load this video.");
+              }
+              onPlayingChangeRef.current(false);
+            },
           },
-          onError: (e) => {
-            if (cancelled) return;
-            if (e.data === 101 || e.data === 150) {
-              setYtEmbedError("Video owner disabled embedded playback on other sites.");
-            } else {
-              setYtEmbedError("YouTube player could not load this video.");
-            }
-            onPlayingChangeRef.current(false);
-          },
-        },
+        });
+        playerRef.current = player;
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setYtEmbedError("Could not initialize YouTube player.");
+          onPlayingChangeRef.current(false);
+        }
       });
-      playerRef.current = player;
-    });
 
     return () => {
       cancelled = true;
       readyRef.current = false;
+      setYtActualPlaying(false);
       try {
         playerRef.current?.destroy();
       } catch {
@@ -328,10 +363,18 @@ export const YouTubeScenePlayer = forwardRef<
   // Synchronous Play/Pause helpers so Android/iOS mobile browsers honor user tap gestures
   const startLocalPlayback = useCallback(() => {
     const vid = localVideoRef.current;
-    const curScenes = scenesRef.current;
-    if (!vid || curScenes.length === 0) return;
+    if (!vid) return;
+
+    const fallbackDur = Number.isFinite(vid.duration) && vid.duration > 0 ? vid.duration : 30;
+    const curScenes =
+      scenesRef.current.length > 0
+        ? scenesRef.current
+        : [{ index: 0, startSec: 0, endSec: fallbackDur, durationSec: fallbackDur, summary: "Full video" }];
 
     setLocalPlayError(null);
+    autoMutedFallbackRef.current = false;
+    setAutoMutedFallback(false);
+
     if (hasVoiceEffectsRef.current || voiceAttachedRef.current) {
       resumeAllVoiceContexts();
       voiceAttachedRef.current = true;
@@ -352,7 +395,7 @@ export const YouTubeScenePlayer = forwardRef<
       const actualDur =
         Number.isFinite(vid.duration) && vid.duration > 0 ? vid.duration : sourceSec + 10;
       const clamped = Math.max(0, Math.min(Math.max(0, actualDur - 0.05), sourceSec));
-      if (Math.abs(vid.currentTime - clamped) > 0.12) {
+      if (Math.abs(vid.currentTime - clamped) > 0.08) {
         vid.currentTime = clamped;
       }
       pendingLocalSeekRef.current = null;
@@ -379,6 +422,8 @@ export const YouTubeScenePlayer = forwardRef<
         .catch(() => {
           // If unmuted autoplay blocked in an edge-case webview, retry muted cleanly
           if (!vid.muted) {
+            autoMutedFallbackRef.current = true;
+            setAutoMutedFallback(true);
             vid.muted = true;
             vid
               .play()
@@ -386,6 +431,8 @@ export const YouTubeScenePlayer = forwardRef<
                 onPlayingChangeRef.current(!vid.paused);
               })
               .catch(() => {
+                autoMutedFallbackRef.current = false;
+                setAutoMutedFallback(false);
                 onPlayingChangeRef.current(false);
                 setLocalPlayError("Tap the video to start playback.");
               });
@@ -400,6 +447,8 @@ export const YouTubeScenePlayer = forwardRef<
   }, []);
 
   const pauseLocalPlayback = useCallback(() => {
+    autoMutedFallbackRef.current = false;
+    setAutoMutedFallback(false);
     const vid = localVideoRef.current;
     if (vid && !vid.paused) {
       vid.pause();
@@ -408,13 +457,16 @@ export const YouTubeScenePlayer = forwardRef<
   }, []);
 
   const startYouTubePlayback = useCallback(() => {
+    ytPlayKickAtRef.current = performance.now();
+    ytHasPlayedRef.current = false;
+    setNeedsDirectYtTap(false);
     onPlayingChangeRef.current(true);
     if (!readyRef.current || !playerRef.current) return;
     try {
       const curScenes = scenesRef.current;
       const totalDur = curScenes.reduce((acc, s) => acc + s.durationSec, 0);
       let startCut = cutTimeRef.current;
-      if (startCut >= Math.max(0, totalDur - 0.08)) {
+      if (totalDur > 0 && startCut >= Math.max(0, totalDur - 0.08)) {
         startCut = 0;
         onTimeUpdateRef.current(0);
       }
@@ -425,15 +477,22 @@ export const YouTubeScenePlayer = forwardRef<
       else playerRef.current.unMute();
       playerRef.current.setPlaybackRate?.(youtubeSpeedRef.current);
 
-      const ytT = playerRef.current.getCurrentTime?.();
-      if (typeof ytT !== "number" || Math.abs(ytT - sourceSec) > 0.35) {
-        playerRef.current.seekTo(sourceSec, true);
-        ytAnchorRef.current = {
-          rawYtTime: -1,
-          sourceSec,
-          perfMs: performance.now(),
-          suppressUntilMs: performance.now() + 450,
-        };
+      const isUnstartedSameAnchor =
+        ytStateRef.current === -1 &&
+        Math.abs(sourceSec - ytAnchorRef.current.sourceSec) < 0.8;
+      if (!isUnstartedSameAnchor) {
+        const ytT = playerRef.current.getCurrentTime?.();
+        if (typeof ytT !== "number" || Math.abs(ytT - sourceSec) > 0.35) {
+          playerRef.current.seekTo(sourceSec, true);
+          ytAnchorRef.current = {
+            rawYtTime: -1,
+            sourceSec,
+            perfMs: performance.now(),
+            suppressUntilMs: performance.now() + 500,
+          };
+        } else {
+          ytAnchorRef.current.perfMs = performance.now();
+        }
       } else {
         ytAnchorRef.current.perfMs = performance.now();
       }
@@ -444,6 +503,8 @@ export const YouTubeScenePlayer = forwardRef<
   }, []);
 
   const pauseYouTubePlayback = useCallback(() => {
+    ytHasPlayedRef.current = false;
+    setYtActualPlaying(false);
     setNeedsDirectYtTap(false);
     onPlayingChangeRef.current(false);
     if (readyRef.current && playerRef.current) {
@@ -475,7 +536,9 @@ export const YouTubeScenePlayer = forwardRef<
             pauseLocalPlayback();
           }
         } else {
-          if (isPlayingRef.current) {
+          const st = playerRef.current?.getPlayerState?.() ?? ytStateRef.current;
+          const actuallyPlaying = ytActualPlaying || st === 1 || st === 3;
+          if (isPlayingRef.current && actuallyPlaying) {
             pauseYouTubePlayback();
           } else {
             startYouTubePlayback();
@@ -483,26 +546,27 @@ export const YouTubeScenePlayer = forwardRef<
         }
       },
     }),
-    [sourceType, startLocalPlayback, pauseLocalPlayback, startYouTubePlayback, pauseYouTubePlayback]
+    [sourceType, ytActualPlaying, startLocalPlayback, pauseLocalPlayback, startYouTubePlayback, pauseYouTubePlayback]
   );
 
   // If Android mobile browser blocks external YT.Player.playVideo(), surface a direct tap hint onto the iframe
   useEffect(() => {
     if (sourceType !== "youtube" || !isPlaying) {
-      setNeedsDirectYtTap(false);
       return;
     }
     const timer = window.setTimeout(() => {
       const st = playerRef.current?.getPlayerState?.() ?? ytStateRef.current;
       if (isPlayingRef.current && st !== 1 && st !== 3) {
         setNeedsDirectYtTap(true);
+        onPlayingChangeRef.current(false);
       }
     }, 1100);
     return () => window.clearTimeout(timer);
   }, [sourceType, isPlaying]);
 
-  // Reset initial position when source or scenes change
+  // Reset initial position when source or scenes change (without interrupting active playback)
   useEffect(() => {
+    if (isPlayingRef.current) return;
     const { sceneIndex, sourceSec } = mapCutTimeToSource(scenes, cutTimeRef.current);
     activeSceneIdxRef.current = sceneIndex;
 
@@ -510,23 +574,30 @@ export const YouTubeScenePlayer = forwardRef<
       const vid = localVideoRef.current;
       if (vid) {
         if (vid.readyState >= 1) {
-          vid.currentTime = sourceSec;
+          if (Math.abs(vid.currentTime - sourceSec) > 0.08) {
+            vid.currentTime = sourceSec;
+          }
           pendingLocalSeekRef.current = null;
         } else {
           pendingLocalSeekRef.current = sourceSec;
         }
       }
     } else if (sourceType === "youtube" && readyRef.current && playerRef.current) {
-      try {
-        playerRef.current.seekTo(sourceSec, true);
-        ytAnchorRef.current = {
-          rawYtTime: -1,
-          sourceSec,
-          perfMs: performance.now(),
-          suppressUntilMs: performance.now() + 450,
-        };
-      } catch {
-        // ignore
+      if (
+        ytStateRef.current !== -1 ||
+        Math.abs(sourceSec - ytAnchorRef.current.sourceSec) >= 1.5
+      ) {
+        try {
+          playerRef.current.seekTo(sourceSec, true);
+          ytAnchorRef.current = {
+            rawYtTime: -1,
+            sourceSec,
+            perfMs: performance.now(),
+            suppressUntilMs: performance.now() + 500,
+          };
+        } catch {
+          // ignore
+        }
       }
     }
   }, [sourceType, localUrl, scenes]);
@@ -554,7 +625,7 @@ export const YouTubeScenePlayer = forwardRef<
           rawYtTime: -1,
           sourceSec,
           perfMs: performance.now(),
-          suppressUntilMs: performance.now() + 450,
+          suppressUntilMs: performance.now() + 1200,
         };
       } catch {
         // ignore
@@ -572,6 +643,10 @@ export const YouTubeScenePlayer = forwardRef<
       playerRef.current.setPlaybackRate?.(youtubeSpeedRef.current);
 
       if (isPlaying) {
+        // Skip duplicate seek/play if startYouTubePlayback() just kicked off playback synchronously
+        if (performance.now() - ytPlayKickAtRef.current < 600) {
+          return;
+        }
         const st = playerRef.current.getPlayerState?.() ?? ytStateRef.current;
         if (st !== 1 && st !== 3) {
           const { sceneIndex, sourceSec } = mapCutTimeToSource(scenesRef.current, cutTimeRef.current);
@@ -583,11 +658,12 @@ export const YouTubeScenePlayer = forwardRef<
               rawYtTime: -1,
               sourceSec,
               perfMs: performance.now(),
-              suppressUntilMs: performance.now() + 450,
+              suppressUntilMs: performance.now() + 500,
             };
           } else {
             ytAnchorRef.current.perfMs = performance.now();
           }
+          ytPlayKickAtRef.current = performance.now();
           playerRef.current.playVideo();
         }
       } else {
@@ -621,13 +697,11 @@ export const YouTubeScenePlayer = forwardRef<
               if (
                 typeof ytTime === "number" &&
                 Number.isFinite(ytTime) &&
-                Math.abs(ytTime - anchor.sourceSec) < 0.65
+                Math.abs(ytTime - anchor.sourceSec) < 0.85
               ) {
                 anchor.suppressUntilMs = 0;
                 anchor.rawYtTime = ytTime;
                 anchor.sourceSec = ytTime;
-                anchor.perfMs = now;
-              } else {
                 anchor.perfMs = now;
               }
             } else if (typeof ytTime === "number" && Number.isFinite(ytTime)) {
@@ -649,7 +723,7 @@ export const YouTubeScenePlayer = forwardRef<
               anchor.rawYtTime = -1;
               anchor.sourceSec = sc.startSec;
               anchor.perfMs = now;
-              anchor.suppressUntilMs = now + 450;
+              anchor.suppressUntilMs = now + 500;
             } else if (estSourceSec >= sc.endSec - 0.04) {
               if (idx + 1 < curScenes.length) {
                 const nextIdx = idx + 1;
@@ -690,7 +764,9 @@ export const YouTubeScenePlayer = forwardRef<
   useEffect(() => {
     const vid = localVideoRef.current;
     if (sourceType !== "local" || !vid) return;
-    vid.muted = muted;
+    if (!autoMutedFallbackRef.current || muted) {
+      vid.muted = muted;
+    }
     vid.preservesPitch = true;
     (vid as unknown as { webkitPreservesPitch?: boolean }).webkitPreservesPitch = true;
     vid.playbackRate = getEffectivePlaybackSpeed(
@@ -703,8 +779,12 @@ export const YouTubeScenePlayer = forwardRef<
       applyVoiceEffectsToVideoElement(vid, voiceSettings, isPlaying);
     }
 
-    if (!isPlaying && !vid.paused) {
-      vid.pause();
+    if (!isPlaying) {
+      autoMutedFallbackRef.current = false;
+      setAutoMutedFallback(false);
+      if (!vid.paused) {
+        vid.pause();
+      }
     }
   }, [sourceType, isPlaying, muted, voiceSettings, editSettings.playbackSpeed, hasVoiceEffects]);
 
@@ -715,20 +795,29 @@ export const YouTubeScenePlayer = forwardRef<
 
     const tick = () => {
       const vid = localVideoRef.current;
-      const curScenes = scenesRef.current;
+      const fallbackDur = vid && Number.isFinite(vid.duration) && vid.duration > 0 ? vid.duration : 30;
+      const curScenes =
+        scenesRef.current.length > 0
+          ? scenesRef.current
+          : [{ index: 0, startSec: 0, endSec: fallbackDur, durationSec: fallbackDur, summary: "Full video" }];
       if (vid && curScenes.length > 0 && !vid.paused && !vid.seeking && vid.readyState >= 1) {
         const idx = Math.min(activeSceneIdxRef.current, curScenes.length - 1);
         const sc = curScenes[idx];
         const srcT = vid.currentTime;
+        const now = performance.now();
 
         if (srcT < sc.startSec - 0.25) {
-          vid.currentTime = sc.startSec;
+          if (now - lastSeekFixAtRef.current > 500) {
+            lastSeekFixAtRef.current = now;
+            vid.currentTime = sc.startSec;
+          }
         } else if (srcT >= sc.endSec - 0.03) {
           if (idx + 1 < curScenes.length) {
             const nextIdx = idx + 1;
             const nextSc = curScenes[nextIdx];
             activeSceneIdxRef.current = nextIdx;
             if (Math.abs(nextSc.startSec - srcT) > 0.18) {
+              lastSeekFixAtRef.current = now;
               vid.currentTime = nextSc.startSec;
             }
             onTimeUpdateRef.current(getSceneCutStart(curScenes, nextIdx));
@@ -749,11 +838,32 @@ export const YouTubeScenePlayer = forwardRef<
     return () => cancelAnimationFrame(rafId);
   }, [sourceType, isPlaying]);
 
+  const applyPendingLocalSeek = useCallback((vid: HTMLVideoElement) => {
+    const target = pendingLocalSeekRef.current;
+    if (target === null) return;
+    const actualDur = Number.isFinite(vid.duration) && vid.duration > 0 ? vid.duration : target + 1;
+    const clamped = Math.max(0, Math.min(Math.max(0, actualDur - 0.05), target));
+    pendingLocalSeekRef.current = null;
+    if (Math.abs(vid.currentTime - clamped) > 0.04) {
+      vid.currentTime = clamped;
+    }
+  }, []);
+
   const transformCss = buildCssTransformString(editSettings);
   const filterCss = buildCssFilterString(editSettings);
   const vignetteOpacity = Math.max(0, Math.min(1, editSettings.vignette / 100));
 
-  if (sourceType === "local" && localUrl) {
+  if (sourceType === "local") {
+    if (!localUrl) {
+      return (
+        <div className="relative w-full h-full flex items-center justify-center p-4 bg-neutral-950 text-center">
+          <p className="text-xs text-neutral-300 leading-relaxed max-w-[240px]">
+            Local video file is not linked. Link or re-upload the video in the Saved tab to preview.
+          </p>
+        </div>
+      );
+    }
+
     return (
       <div
         onClick={() => {
@@ -768,12 +878,12 @@ export const YouTubeScenePlayer = forwardRef<
           src={localUrl}
           preload="auto"
           playsInline
-          muted={muted}
+          muted={muted || autoMutedFallback}
           onLoadedMetadata={(e) => {
-            if (pendingLocalSeekRef.current !== null) {
-              e.currentTarget.currentTime = pendingLocalSeekRef.current;
-              pendingLocalSeekRef.current = null;
-            }
+            applyPendingLocalSeek(e.currentTarget);
+          }}
+          onCanPlay={(e) => {
+            applyPendingLocalSeek(e.currentTarget);
           }}
           onPlay={(e) => {
             setLocalPlayError(null);
@@ -795,17 +905,39 @@ export const YouTubeScenePlayer = forwardRef<
               onPlayingChangeRef.current(false);
             }
           }}
+          onEnded={() => {
+            const curScenes = scenesRef.current;
+            const idx = activeSceneIdxRef.current;
+            const vid = localVideoRef.current;
+            if (vid && idx + 1 < curScenes.length) {
+              const nextIdx = idx + 1;
+              const nextSc = curScenes[nextIdx];
+              activeSceneIdxRef.current = nextIdx;
+              vid.currentTime = nextSc.startSec;
+              onTimeUpdateRef.current(getSceneCutStart(curScenes, nextIdx));
+              vid.play().catch(() => {
+                onEndedRef.current();
+              });
+            } else {
+              onEndedRef.current();
+            }
+          }}
           onError={() => {
             onPlayingChangeRef.current(false);
             setLocalPlayError("Could not play this video file.");
           }}
           style={{
-            transform: transformCss,
-            filter: filterCss,
+            ...(transformCss !== "none" ? { transform: transformCss } : {}),
+            ...(filterCss !== "none" ? { filter: filterCss } : {}),
           }}
           className={`w-full h-full bg-neutral-950 origin-center transition-transform duration-75 ${
             editSettings.fitMode === "contain" ? "object-contain" : "object-cover"
           }`}
+        />
+        <AdversarialNoiseOverlay
+          enabled={editSettings.adversarialNoise}
+          strength={editSettings.adversarialStrength}
+          animate={isPlaying}
         />
         {vignetteOpacity > 0 && (
           <div
@@ -835,12 +967,19 @@ export const YouTubeScenePlayer = forwardRef<
   }
 
   return (
-    <div className="relative w-full h-full overflow-hidden bg-neutral-950">
+    <div
+      onClick={() => {
+        if (ytActualPlaying && !needsDirectYtTap) {
+          pauseYouTubePlayback();
+        }
+      }}
+      className="relative w-full h-full overflow-hidden bg-neutral-950"
+    >
       <div
         className="w-full h-full origin-center transition-transform duration-75"
         style={{
-          transform: transformCss,
-          filter: filterCss,
+          ...(transformCss !== "none" ? { transform: transformCss } : {}),
+          ...(filterCss !== "none" ? { filter: filterCss } : {}),
         }}
       >
         {fallbackThumbnail && (
@@ -856,10 +995,15 @@ export const YouTubeScenePlayer = forwardRef<
         <div
           ref={containerRef}
           className={`relative w-full h-full ${
-            isPlaying && !needsDirectYtTap ? "pointer-events-none" : "pointer-events-auto"
+            ytActualPlaying && !needsDirectYtTap ? "pointer-events-none" : "pointer-events-auto"
           } ${editSettings.fitMode === "cover" ? "scale-[1.06]" : "scale-100"}`}
         />
       </div>
+      <AdversarialNoiseOverlay
+        enabled={editSettings.adversarialNoise}
+        strength={editSettings.adversarialStrength}
+        animate={isPlaying && ytActualPlaying}
+      />
       {vignetteOpacity > 0 && (
         <div
           aria-hidden="true"

@@ -1,6 +1,10 @@
 import { Muxer, ArrayBufferTarget } from "mp4-muxer";
 import type { SubtitleItem, VideoEditSettings, VideoProject, VoiceSettings } from "../types";
-import { buildCssFilterString } from "./videoFilters";
+import {
+  applyAdversarialPerturbationToImageData,
+  buildCssFilterString,
+  createAdversarialPerturbationTile,
+} from "./videoFilters";
 import { uploadBlobInChunks } from "./uploadFile";
 import { getEffectivePlaybackSpeed } from "./voicePresets";
 
@@ -205,7 +209,12 @@ export async function exportProjectToMp4(
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
-  const ctx = canvas.getContext("2d")!;
+  const ctx = canvas.getContext("2d", {
+    willReadFrequently: Boolean(editSettings.adversarialNoise),
+  })!;
+  const advTiles = editSettings.adversarialNoise
+    ? [0, 1, 2, 3].map((p) => createAdversarialPerturbationTile(p))
+    : null;
 
   // Load media source: either local <video> element or proxied YouTube keyframes
   let localVideoEl: HTMLVideoElement | null = null;
@@ -252,7 +261,7 @@ export async function exportProjectToMp4(
 
   let currentScrollY = 0;
 
-  const renderFrameAtTime = async (t: number) => {
+  const renderFrameAtTime = async (t: number, frameIdx = 0) => {
     // 1. Background (warm study paper in light mode, deep study slate in dark mode)
     ctx.fillStyle = darkMode ? "#0b1120" : "#f8fafc";
     ctx.fillRect(0, 0, width, height);
@@ -329,6 +338,21 @@ export async function exportProjectToMp4(
       );
     }
 
+    if (advTiles && advTiles.length > 0) {
+      try {
+        const imgData = ctx.getImageData(0, 0, width, topVideoH);
+        const tile = advTiles[frameIdx % advTiles.length];
+        applyAdversarialPerturbationToImageData(
+          imgData,
+          editSettings.adversarialStrength,
+          tile
+        );
+        ctx.putImageData(imgData, 0, 0);
+      } catch {
+        // Ignore if cross-origin canvas tainting occurs
+      }
+    }
+
     if (editSettings.vignette > 0) {
       const alpha = Math.max(0, Math.min(0.85, (editSettings.vignette / 100) * 0.85));
       const grad = ctx.createRadialGradient(
@@ -352,7 +376,8 @@ export async function exportProjectToMp4(
       ctx.fillRect(0, topVideoH, width, 1);
 
       // 3. Bottom Scrolling List Item Subtitle View (Educational Study Palette)
-      const targetScroll = getScrollYForTime(t);
+      const ht = Math.min(sourceTotalDuration, t + 0.06);
+      const targetScroll = getScrollYForTime(ht);
       currentScrollY += (targetScroll - currentScrollY) * 0.14;
 
       ctx.save();
@@ -361,7 +386,7 @@ export async function exportProjectToMp4(
       ctx.clip();
       ctx.translate(0, topVideoH - currentScrollY);
 
-      const activeCardIdx = getActiveCardIndex(t);
+      const activeCardIdx = getActiveCardIndex(ht);
 
       for (let ci = 0; ci < cards.length; ci++) {
         const card = cards[ci];
@@ -407,9 +432,9 @@ export async function exportProjectToMp4(
           const isLastWord = wi === card.wordLayouts.length - 1;
           const isSpoken =
             isActive &&
-            t >= wl.startTime &&
-            (isLastWord ? t <= wl.endTime : t < wl.endTime);
-          const wasSpoken = isActive && (isLastWord ? t > wl.endTime : t >= wl.endTime);
+            ht >= wl.startTime &&
+            (isLastWord ? ht <= wl.endTime : ht < wl.endTime);
+          const wasSpoken = isActive && (isLastWord ? ht > wl.endTime : ht >= wl.endTime);
 
           if (isSpoken) {
             ctx.fillStyle = darkMode ? "#fbbf24" : "#fde047";
@@ -551,7 +576,7 @@ export async function exportProjectToMp4(
 
     for (let frameIdx = 0; frameIdx < totalFrames; frameIdx++) {
       const t = (frameIdx / fps) * speed;
-      await renderFrameAtTime(t);
+      await renderFrameAtTime(t, frameIdx);
 
       const frame = new VideoFrame(canvas, {
         timestamp: Math.round((frameIdx * 1_000_000) / fps),
@@ -599,10 +624,11 @@ export async function exportProjectToMp4(
     });
     recorder.start();
     const startMs = performance.now();
+    let fallbackFrameIdx = 0;
     while (true) {
       const elapsed = (performance.now() - startMs) / 1000;
       if (elapsed >= totalDuration) break;
-      await renderFrameAtTime(elapsed * speed);
+      await renderFrameAtTime(elapsed * speed, fallbackFrameIdx++);
       onProgress({
         phase: "rendering",
         percent: 10 + Math.min(75, Math.round((elapsed / totalDuration) * 75)),

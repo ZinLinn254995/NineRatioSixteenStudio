@@ -19,6 +19,8 @@ export const DEFAULT_VIDEO_EDIT: VideoEditSettings = {
   grayscale: 0,
   blurPx: 0,
   vignette: 0,
+  adversarialNoise: false,
+  adversarialStrength: 12,
 };
 
 export interface VideoFilterPresetOption {
@@ -150,7 +152,97 @@ export function buildCssFilterString(edit: VideoEditSettings): string {
 }
 
 export function buildCssTransformString(edit: VideoEditSettings): string {
+  if (
+    edit.zoom === 1 &&
+    edit.panX === 0 &&
+    edit.panY === 0 &&
+    edit.rotateDeg === 0 &&
+    !edit.flipH &&
+    !edit.flipV
+  ) {
+    return "none";
+  }
   const sx = edit.zoom * (edit.flipH ? -1 : 1);
   const sy = edit.zoom * (edit.flipV ? -1 : 1);
   return `translate(${edit.panX}%, ${edit.panY}%) scale(${sx}, ${sy}) rotate(${edit.rotateDeg}deg)`;
 }
+
+const ADV_TILE_SIZE = 128;
+
+// Build a deterministic structured high-frequency RGB perturbation tile (-127..+127 normalized sign-gradient + checkerboard)
+export function createAdversarialPerturbationTile(phase = 0): Int8Array {
+  const tile = new Int8Array(ADV_TILE_SIZE * ADV_TILE_SIZE * 3);
+  let seed = (0x9e3779b9 ^ ((phase + 1) * 0x85ebca6b)) >>> 0;
+  const pOffset = phase * 19;
+
+  for (let y = 0; y < ADV_TILE_SIZE; y++) {
+    for (let x = 0; x < ADV_TILE_SIZE; x++) {
+      // Deterministic LCG + multi-frequency Fourier/checkerboard spatial grating
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      const randA = ((seed >>> 16) & 0xff) / 127.5 - 1; // [-1, 1]
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      const randB = ((seed >>> 16) & 0xff) / 127.5 - 1;
+
+      const checker = ((x + y + phase) & 1) === 0 ? 1 : -1;
+      const hfX = Math.sin((x + pOffset) * 1.15) * Math.cos((y - pOffset) * 0.85);
+      const hfY = Math.cos((x - pOffset) * 0.9) * Math.sin((y + pOffset) * 1.2);
+
+      // Decoupled R/G/B channel perturbations preserve perceived luminance while shifting pixel feature maps
+      const baseIdx = (y * ADV_TILE_SIZE + x) * 3;
+      const rVal = Math.max(-1, Math.min(1, 0.45 * checker + 0.35 * hfX + 0.2 * randA));
+      const gVal = Math.max(-1, Math.min(1, -0.45 * checker + 0.35 * hfY + 0.2 * randB));
+      const bVal = Math.max(-1, Math.min(1, 0.35 * checker - 0.35 * hfX + 0.3 * (randA - randB) * 0.5));
+
+      tile[baseIdx] = Math.round(rVal * 127);
+      tile[baseIdx + 1] = Math.round(gVal * 127);
+      tile[baseIdx + 2] = Math.round(bVal * 127);
+    }
+  }
+  return tile;
+}
+
+// Apply L-infinity bounded ±epsilon RGB pixel perturbations directly onto canvas ImageData
+export function applyAdversarialPerturbationToImageData(
+  imageData: ImageData,
+  epsilon: number,
+  tile: Int8Array
+): void {
+  const eps = Math.max(1, Math.min(32, epsilon));
+  const scale = eps / 127;
+  const { data, width, height } = imageData;
+
+  for (let y = 0; y < height; y++) {
+    const ty = (y & (ADV_TILE_SIZE - 1)) * ADV_TILE_SIZE;
+    const rowOffset = y * width * 4;
+    for (let x = 0; x < width; x++) {
+      const tIdx = (ty + (x & (ADV_TILE_SIZE - 1))) * 3;
+      const pIdx = rowOffset + x * 4;
+      data[pIdx] += Math.round(tile[tIdx] * scale);
+      data[pIdx + 1] += Math.round(tile[tIdx + 1] * scale);
+      data[pIdx + 2] += Math.round(tile[tIdx + 2] * scale);
+    }
+  }
+}
+
+export function createAdversarialOverlayTileDataUrl(phase = 0): string {
+  if (typeof document === "undefined") return "";
+  const canvas = document.createElement("canvas");
+  canvas.width = ADV_TILE_SIZE;
+  canvas.height = ADV_TILE_SIZE;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return "";
+
+  const tile = createAdversarialPerturbationTile(phase);
+  const img = ctx.createImageData(ADV_TILE_SIZE, ADV_TILE_SIZE);
+  const { data } = img;
+  for (let i = 0, p = 0; i < tile.length; i += 3, p += 4) {
+    // Neutral 128 midpoint for overlay/hard-light blending across positive & negative perturbations
+    data[p] = 128 + tile[i];
+    data[p + 1] = 128 + tile[i + 1];
+    data[p + 2] = 128 + tile[i + 2];
+    data[p + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  return canvas.toDataURL("image/png");
+}
+

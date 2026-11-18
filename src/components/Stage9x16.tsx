@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
 import { Pause, Play, Volume2, VolumeX } from "lucide-react";
 import type { SubtitleItem, VideoEditSettings, VideoProject, VoiceSettings } from "../types";
@@ -19,6 +19,7 @@ interface Stage9x16Props {
   onTimeUpdate: (newCutTime: number) => void;
   onEnded: () => void;
   onToggleMute: () => void;
+  compactMobile?: boolean;
 }
 
 function formatSec(sec: number): string {
@@ -42,15 +43,50 @@ export function Stage9x16({
   onTimeUpdate,
   onEnded,
   onToggleMute,
+  compactMobile = false,
 }: Stage9x16Props) {
   const playerRef = useRef<YouTubeScenePlayerHandle | null>(null);
+  const stageFrameRef = useRef<HTMLDivElement | null>(null);
   const listContainerRef = useRef<HTMLDivElement | null>(null);
   const itemRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const [stageWidth, setStageWidth] = useState<number>(360);
+
+  useEffect(() => {
+    const el = stageFrameRef.current;
+    if (!el) return;
+    const update = () => {
+      const w = el.clientWidth;
+      if (w > 0) setStageWidth(w);
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const uiScale = Math.max(0.32, Math.min(1.08, stageWidth / 360));
+
+  const totalDuration = project?.targetDurationSec || 90;
+  const effectiveSpeed = project
+    ? getEffectivePlaybackSpeed(
+        project.sourceType,
+        editSettings.playbackSpeed,
+        voiceSettings.speed
+      )
+    : 1;
+  // Subtle visual lead while playing so highlights hit right as speech begins instead of lagging
+  const highlightTime =
+    isPlaying && project
+      ? Math.min(
+          totalDuration,
+          cutTime + (project.sourceType === "youtube" ? 0.22 : 0.12)
+        )
+      : cutTime;
 
   // Keep the current subtitle selected across silent gaps until the next subtitle starts
   const activeSub: SubtitleItem | undefined = project?.subtitles.reduce<
     SubtitleItem | undefined
-  >((acc, s) => (cutTime >= s.startTime ? s : acc), undefined);
+  >((acc, s) => (highlightTime >= s.startTime ? s : acc), undefined);
 
   const scrollTargetSub: SubtitleItem | undefined = activeSub ?? project?.subtitles[0];
 
@@ -69,33 +105,38 @@ export function Stage9x16({
     });
   }, [scrollTargetSub?.id]);
 
-  const totalDuration = project?.targetDurationSec || 90;
-  const effectiveSpeed = project
-    ? getEffectivePlaybackSpeed(
-        project.sourceType,
-        editSettings.playbackSpeed,
-        voiceSettings.speed
-      )
-    : 1;
   const displayCutTime = cutTime / effectiveSpeed;
   const displayTotalDuration = totalDuration / effectiveSpeed;
   const progressPct = totalDuration > 0 ? Math.min(100, (cutTime / totalDuration) * 100) : 0;
 
   return (
-    <div className="flex flex-col items-center justify-center w-full gap-3">
+    <div
+      className={`flex flex-col items-center justify-center w-full ${
+        compactMobile ? "gap-2 lg:gap-3" : "gap-3"
+      }`}
+    >
       {/* Strictly 9:16 Vertical Video Frame */}
       <div
-        className="relative h-[min(calc(100dvh-180px),675px)] min-h-[300px] max-w-full aspect-[9/16] rounded-2xl overflow-hidden border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 flex flex-col shadow-sm"
+        ref={stageFrameRef}
+        className={`relative max-w-full aspect-[9/16] rounded-2xl overflow-hidden border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 flex flex-col shadow-sm ${
+          compactMobile
+            ? "h-[min(46dvh,420px)] min-h-[240px] lg:h-[min(calc(100dvh-180px),675px)] lg:min-h-[360px]"
+            : "h-[min(calc(100dvh-180px),675px)] min-h-[360px]"
+        }`}
       >
         {!project ? (
-          <div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
-            <div className="w-12 h-12 rounded-xl border border-neutral-200 dark:border-neutral-800 flex items-center justify-center mb-3 text-neutral-400">
-              <Play className="w-5 h-5" />
+          <div
+            className={`flex-1 flex flex-col items-center justify-center text-center ${
+              compactMobile ? "p-4 lg:p-8" : "p-8"
+            }`}
+          >
+            <div className="w-10 h-10 lg:w-12 lg:h-12 rounded-xl border border-neutral-200 dark:border-neutral-800 flex items-center justify-center mb-2.5 lg:mb-3 text-neutral-400">
+              <Play className="w-4 h-4 lg:w-5 lg:h-5" />
             </div>
-            <p className="text-sm font-medium text-neutral-900 dark:text-neutral-100">
+            <p className="text-xs lg:text-sm font-medium text-neutral-900 dark:text-neutral-100">
               9:16 Stage
             </p>
-            <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+            <p className="text-[11px] lg:text-xs text-neutral-500 dark:text-neutral-400 mt-1">
               Watch a video, pick scenes, and generate subtitles
             </p>
           </div>
@@ -110,7 +151,9 @@ export function Stage9x16({
               }
               className={`w-full bg-neutral-950 overflow-hidden ${
                 project.subtitles.length > 0
-                  ? "shrink-0 border-b border-neutral-200 dark:border-neutral-800"
+                  ? `${
+                      compactMobile ? "min-h-[108px] lg:min-h-[200px]" : "min-h-[200px]"
+                    } shrink-0 border-b border-neutral-200 dark:border-neutral-800`
                   : "flex-1 h-full"
               }`}
             >
@@ -133,15 +176,22 @@ export function Stage9x16({
               />
             </div>
 
-            {/* Bottom Scrolling List Item View (when subtitles exist) */}
+            {/* Bottom Scrolling List Item View (when subtitles exist, scaled proportionally to preview width) */}
             {project.subtitles.length > 0 && (
               <div
                 ref={listContainerRef}
-                className="relative flex-1 overflow-y-auto no-scrollbar px-3.5 py-4 space-y-2.5 bg-slate-50 dark:bg-[#0b1120]"
+                style={{
+                  padding: `${Math.max(4, Math.round(14 * uiScale))}px ${Math.max(
+                    4,
+                    Math.round(12 * uiScale)
+                  )}px`,
+                  gap: `${Math.max(3, Math.round(10 * uiScale))}px`,
+                }}
+                className="relative flex-1 flex flex-col overflow-y-auto overflow-x-hidden no-scrollbar bg-slate-50 dark:bg-[#0b1120]"
               >
                 {project.subtitles.map((sub, subIdx) => {
                   const isActive = activeSub?.id === sub.id;
-                  const localElapsed = Math.max(0, cutTime - sub.startTime);
+                  const localElapsed = Math.max(0, highlightTime - sub.startTime);
 
                   return (
                     <button
@@ -151,7 +201,17 @@ export function Stage9x16({
                       }}
                       type="button"
                       onClick={() => onSeek(sub.startTime)}
-                      className={`relative w-full text-left rounded-xl pl-4 pr-3.5 py-3 transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 dark:focus-visible:ring-indigo-400 ${
+                      style={{
+                        borderRadius: `${Math.max(6, Math.round(12 * uiScale))}px`,
+                        padding: `${Math.max(4, Math.round(11 * uiScale))}px ${Math.max(
+                          4,
+                          Math.round(12 * uiScale)
+                        )}px ${Math.max(4, Math.round(11 * uiScale))}px ${Math.max(
+                          7,
+                          Math.round(15 * uiScale)
+                        )}px`,
+                      }}
+                      className={`relative w-full text-left shrink-0 overflow-hidden transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 dark:focus-visible:ring-indigo-400 ${
                         isActive
                           ? "bg-white dark:bg-[#131c31] border border-indigo-200/90 dark:border-indigo-500/40 shadow-sm shadow-indigo-950/5"
                           : "bg-white/65 dark:bg-slate-900/45 border border-slate-200/70 dark:border-slate-800/70 opacity-70 hover:opacity-95 hover:border-indigo-200/60 dark:hover:border-indigo-500/30"
@@ -160,7 +220,13 @@ export function Stage9x16({
                       {/* Educational Left Accent Bar */}
                       <span
                         aria-hidden="true"
-                        className={`absolute left-1.5 top-3 bottom-3 w-1 rounded-full transition-colors ${
+                        style={{
+                          left: `${Math.max(2, Math.round(6 * uiScale))}px`,
+                          top: `${Math.max(4, Math.round(11 * uiScale))}px`,
+                          bottom: `${Math.max(4, Math.round(11 * uiScale))}px`,
+                          width: `${Math.max(2, Math.round(4 * uiScale))}px`,
+                        }}
+                        className={`absolute rounded-full transition-colors ${
                           isActive
                             ? "bg-indigo-600 dark:bg-indigo-400"
                             : "bg-slate-200 dark:bg-slate-800"
@@ -168,7 +234,13 @@ export function Stage9x16({
                       />
 
                       {/* Line 1: Thai in English phonetics with warm Amber study-highlighter word sync */}
-                      <div className="flex flex-wrap items-start gap-x-1.5 gap-y-2 leading-snug">
+                      <div
+                        style={{
+                          columnGap: `${Math.max(2, Math.round(6 * uiScale))}px`,
+                          rowGap: `${Math.max(2, Math.round(6 * uiScale))}px`,
+                        }}
+                        className="flex flex-wrap items-start leading-snug"
+                      >
                         {sub.words.map((word, wi) => {
                           const isLastWord = wi === sub.words.length - 1;
                           const isWordSpoken =
@@ -186,16 +258,28 @@ export function Stage9x16({
                           return (
                             <span
                               key={`${sub.id}-w-${wi}`}
-                              className="inline-flex flex-col items-center"
+                              className="inline-flex flex-col items-center max-w-full"
                             >
                               <motion.span
                                 animate={
                                   isWordSpoken
-                                    ? { scale: 1.06, y: -1 }
+                                    ? {
+                                        scale: 1.05,
+                                        y: -Math.max(0.5, Number((1 * uiScale).toFixed(1))),
+                                      }
                                     : { scale: 1, y: 0 }
                                 }
-                                transition={{ duration: 0.14, ease: [0.16, 1, 0.3, 1] }}
-                                className={`px-1.5 py-0.5 rounded-md text-[15px] font-semibold tracking-tight transition-colors duration-150 ${
+                                transition={{ duration: 0.05, ease: [0.16, 1, 0.3, 1] }}
+                                style={{
+                                  fontSize: `${Math.max(7.5, Number((15 * uiScale).toFixed(1)))}px`,
+                                  padding: `${Math.max(1, Math.round(2 * uiScale))}px ${Math.max(
+                                    2,
+                                    Math.round(6 * uiScale)
+                                  )}px`,
+                                  borderRadius: `${Math.max(3, Math.round(6 * uiScale))}px`,
+                                  lineHeight: 1.2,
+                                }}
+                                className={`font-semibold tracking-tight max-w-full break-words ${
                                   isWordSpoken
                                     ? "bg-amber-300 text-slate-950 ring-1 ring-amber-400/80 dark:bg-amber-400 dark:text-slate-950 dark:ring-amber-300/70 shadow-xs"
                                     : isActive
@@ -209,7 +293,14 @@ export function Stage9x16({
                               </motion.span>
                               {word.burmeseGloss && (
                                 <span
-                                  className={`font-myanmar text-[10px] leading-tight mt-0.5 ${
+                                  style={{
+                                    fontSize: `${Math.max(
+                                      6,
+                                      Number((10 * uiScale).toFixed(1))
+                                    )}px`,
+                                    marginTop: `${Math.max(1, Math.round(2 * uiScale))}px`,
+                                  }}
+                                  className={`font-myanmar leading-tight max-w-full break-words ${
                                     isWordSpoken
                                       ? "text-amber-700 dark:text-amber-300 font-semibold"
                                       : isActive
@@ -227,14 +318,22 @@ export function Stage9x16({
 
                       {/* Line 2: Burmese translation */}
                       <div
-                        className={`mt-2 pt-2 border-t flex items-baseline gap-2 ${
+                        style={{
+                          marginTop: `${Math.max(3, Math.round(8 * uiScale))}px`,
+                          paddingTop: `${Math.max(3, Math.round(8 * uiScale))}px`,
+                          gap: `${Math.max(3, Math.round(8 * uiScale))}px`,
+                        }}
+                        className={`border-t flex items-baseline ${
                           isActive
                             ? "border-indigo-100 dark:border-indigo-500/20"
                             : "border-slate-100 dark:border-slate-800/70"
                         }`}
                       >
                         <span
-                          className={`text-[10px] font-mono-tabular font-semibold shrink-0 ${
+                          style={{
+                            fontSize: `${Math.max(6, Number((10 * uiScale).toFixed(1)))}px`,
+                          }}
+                          className={`font-mono-tabular font-semibold shrink-0 ${
                             isActive
                               ? "text-indigo-500 dark:text-indigo-400"
                               : "text-slate-400 dark:text-slate-500"
@@ -243,7 +342,14 @@ export function Stage9x16({
                           {String(subIdx + 1).padStart(2, "0")}
                         </span>
                         <p
-                          className={`font-myanmar text-[13.5px] leading-relaxed ${
+                          style={{
+                            fontSize: `${Math.max(
+                              7,
+                              Number((13.5 * uiScale).toFixed(1))
+                            )}px`,
+                            lineHeight: 1.45,
+                          }}
+                          className={`font-myanmar min-w-0 break-words ${
                             isActive
                               ? "text-teal-800 dark:text-teal-200 font-medium"
                               : "text-slate-500 dark:text-slate-400"
@@ -255,7 +361,11 @@ export function Stage9x16({
                     </button>
                   );
                 })}
-                <div className="h-24" aria-hidden="true" />
+                <div
+                  style={{ height: `${Math.max(24, Math.round(96 * uiScale))}px` }}
+                  className="shrink-0"
+                  aria-hidden="true"
+                />
               </div>
             )}
           </>
@@ -264,7 +374,11 @@ export function Stage9x16({
 
       {/* Minimal Transport Controls below 9:16 Stage */}
       {project && (
-        <div className="w-full max-w-[380px] flex items-center gap-3">
+        <div
+          className={`w-full max-w-[380px] flex items-center ${
+            compactMobile ? "gap-2 lg:gap-3" : "gap-3"
+          }`}
+        >
           <button
             type="button"
             onClick={() => {
@@ -275,7 +389,9 @@ export function Stage9x16({
               }
             }}
             aria-label={isPlaying ? "Pause" : "Play"}
-            className="w-10 h-10 rounded-lg bg-neutral-950 text-white dark:bg-white dark:text-neutral-950 flex items-center justify-center shrink-0 hover:opacity-90 transition-opacity cursor-pointer"
+            className={`${
+              compactMobile ? "w-8 h-8 lg:w-10 lg:h-10" : "w-10 h-10"
+            } rounded-lg bg-neutral-950 text-white dark:bg-white dark:text-neutral-950 flex items-center justify-center shrink-0 hover:opacity-90 transition-opacity cursor-pointer`}
           >
             {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 ml-0.5" />}
           </button>
@@ -304,7 +420,9 @@ export function Stage9x16({
             type="button"
             onClick={onToggleMute}
             aria-label={muted ? "Unmute original audio" : "Mute original audio"}
-            className="w-10 h-10 rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 hover:bg-neutral-100 dark:hover:bg-neutral-900 flex items-center justify-center shrink-0 transition-colors cursor-pointer"
+            className={`${
+              compactMobile ? "w-8 h-8 lg:w-10 lg:h-10" : "w-10 h-10"
+            } rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 hover:bg-neutral-100 dark:hover:bg-neutral-900 flex items-center justify-center shrink-0 transition-colors cursor-pointer`}
           >
             {muted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
           </button>

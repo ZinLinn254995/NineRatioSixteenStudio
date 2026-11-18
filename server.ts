@@ -814,6 +814,7 @@ function getEnvelopeStats(rms: Float32Array): {
   noiseFloor: number;
   speechPeak: number;
   speechThreshold: number;
+  onsetThreshold: number;
   hasClearDynamicRange: boolean;
   smooth: Float32Array;
 } {
@@ -830,10 +831,14 @@ function getEnvelopeStats(rms: Float32Array): {
   const speechPeak = sorted[Math.floor(sorted.length * 0.85)] || 0.01;
   const hasClearDynamicRange = speechPeak > Math.max(0.01, noiseFloor * 2.5);
   const speechThreshold = Math.max(
-    noiseFloor * 2.1,
-    noiseFloor + (speechPeak - noiseFloor) * 0.13
+    noiseFloor * 1.85,
+    noiseFloor + (speechPeak - noiseFloor) * 0.085
   );
-  return { noiseFloor, speechPeak, speechThreshold, hasClearDynamicRange, smooth };
+  const onsetThreshold = Math.max(
+    noiseFloor * 1.45,
+    noiseFloor + (speechPeak - noiseFloor) * 0.045
+  );
+  return { noiseFloor, speechPeak, speechThreshold, onsetThreshold, hasClearDynamicRange, smooth };
 }
 
 function detectSpeechSegments10ms(rms: Float32Array, clipDur: number): SpeechWindow[] {
@@ -881,7 +886,7 @@ function detectSpeechSegments10ms(rms: Float32Array, clipDur: number): SpeechWin
   return merged
     .filter((s) => s.endSec - s.startSec >= 0.15)
     .map((s) => ({
-      startSec: Number(Math.max(0, s.startSec - 0.04).toFixed(2)),
+      startSec: Number(Math.max(0, s.startSec - 0.07).toFixed(2)),
       endSec: Number(Math.min(clipDur, s.endSec + 0.08).toFixed(2)),
     }));
 }
@@ -956,7 +961,7 @@ function refineUtterancesWithEnvelope(
     return res;
   }
 
-  const { speechThreshold, hasClearDynamicRange, smooth } = getEnvelopeStats(rms);
+  const { speechThreshold, onsetThreshold, hasClearDynamicRange, smooth } = getEnvelopeStats(rms);
   if (!hasClearDynamicRange) {
     return res;
   }
@@ -966,17 +971,28 @@ function refineUtterancesWithEnvelope(
     (a, b) => (Number(a.startSec) || 0) - (Number(b.startSec) || 0)
   );
 
+  const walkBackToConsonantOnset = (frame: number, minFrame: number) => {
+    let f = frame;
+    let steps = 0;
+    while (f > minFrame && steps < 18 && smooth[f - 1] >= onsetThreshold) {
+      f--;
+      steps++;
+    }
+    return f;
+  };
+
   const refined = utts.map((u, idx) => {
     const origStart = Math.max(0, Math.min(clipDur - 0.3, Number(u.startSec) || 0));
     const origEnd = Math.max(origStart + 0.3, Math.min(clipDur, Number(u.endSec) || origStart + 1));
 
     const prevEndBound = idx > 0 ? Math.max(0, Number(utts[idx - 1].endSec) || 0) : 0;
+    const prevEndFrame = Math.floor(prevEndBound / frameDur);
     const nextStartBound =
       idx < utts.length - 1 ? Math.min(clipDur, Number(utts[idx + 1].startSec) || clipDur) : clipDur;
 
     // Search up to ±1.6s when Gemini's boundary lands in silence (bounded by neighbor utterances)
     const searchStartMin = Math.max(
-      Math.floor(prevEndBound / frameDur),
+      prevEndFrame,
       Math.floor((origStart - 1.4) / frameDur)
     );
     const searchStartMax = Math.min(
@@ -1009,12 +1025,15 @@ function refineUtterancesWithEnvelope(
       if (foundForward !== -1 && foundBackward !== -1) {
         const distF = foundForward - origStartFrame;
         const distB = origStartFrame - foundBackward;
-        const chosen = distB <= distF && distB <= 110 ? foundBackward : foundForward;
-        newStart = Math.max(0, chosen * frameDur - 0.04);
+        const rawChosen = distB <= distF && distB <= 110 ? foundBackward : foundForward;
+        const onsetF = walkBackToConsonantOnset(rawChosen, searchStartMin);
+        newStart = Math.max(prevEndBound, onsetF * frameDur - 0.07);
       } else if (foundForward !== -1) {
-        newStart = Math.max(0, foundForward * frameDur - 0.04);
+        const onsetF = walkBackToConsonantOnset(foundForward, searchStartMin);
+        newStart = Math.max(prevEndBound, onsetF * frameDur - 0.07);
       } else if (foundBackward !== -1) {
-        newStart = Math.max(0, foundBackward * frameDur - 0.04);
+        const onsetF = walkBackToConsonantOnset(foundBackward, searchStartMin);
+        newStart = Math.max(prevEndBound, onsetF * frameDur - 0.07);
       }
     } else {
       // Already inside speech: walk backward to true voice onset (max 0.6s, or up to VAD window start)
@@ -1028,8 +1047,9 @@ function refineUtterancesWithEnvelope(
       while (f > minWalk && smooth[f - 1] >= speechThreshold) {
         f--;
       }
-      if (f < origStartFrame) {
-        newStart = Math.max(0, f * frameDur - 0.03);
+      const onsetF = walkBackToConsonantOnset(f, searchStartMin);
+      if (onsetF <= origStartFrame) {
+        newStart = Math.max(prevEndBound, onsetF * frameDur - 0.07);
       }
     }
 

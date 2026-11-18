@@ -123,6 +123,8 @@ export interface VideoEditSettings {
   grayscale: number;
   blurPx: number;
   vignette: number;
+  adversarialNoise: boolean;
+  adversarialStrength: number;
 }
 
 export interface SavedProjectRecord {
