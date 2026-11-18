@@ -13,6 +13,12 @@ export const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
   tone: 0,
   echo: 0,
   robot: 0,
+  adversarialNoise: false,
+  adversarialStrength: 35,
+  spectralPhaseShift: false,
+  spectralPhaseStrength: 50,
+  vocalIsolation: false,
+  vocalIsolationStrength: 65,
 };
 
 const YOUTUBE_SUPPORTED_RATES = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
@@ -47,6 +53,7 @@ export const VOICE_PRESETS: VoicePresetOption[] = [
     id: "deep",
     label: "Deep",
     settings: {
+      ...DEFAULT_VOICE_SETTINGS,
       presetId: "deep",
       pitchSemitones: -4.5,
       speed: 0.96,
@@ -59,6 +66,7 @@ export const VOICE_PRESETS: VoicePresetOption[] = [
     id: "cute",
     label: "Cute",
     settings: {
+      ...DEFAULT_VOICE_SETTINGS,
       presetId: "cute",
       pitchSemitones: 4.5,
       speed: 1.06,
@@ -71,6 +79,7 @@ export const VOICE_PRESETS: VoicePresetOption[] = [
     id: "cartoon",
     label: "Cartoon",
     settings: {
+      ...DEFAULT_VOICE_SETTINGS,
       presetId: "cartoon",
       pitchSemitones: 6.5,
       speed: 1.15,
@@ -83,6 +92,7 @@ export const VOICE_PRESETS: VoicePresetOption[] = [
     id: "robot",
     label: "Robot",
     settings: {
+      ...DEFAULT_VOICE_SETTINGS,
       presetId: "robot",
       pitchSemitones: -1.5,
       speed: 1,
@@ -95,6 +105,7 @@ export const VOICE_PRESETS: VoicePresetOption[] = [
     id: "echo",
     label: "Echo Hall",
     settings: {
+      ...DEFAULT_VOICE_SETTINGS,
       presetId: "echo",
       pitchSemitones: 0,
       speed: 1,
@@ -107,6 +118,7 @@ export const VOICE_PRESETS: VoicePresetOption[] = [
     id: "radio",
     label: "Radio",
     settings: {
+      ...DEFAULT_VOICE_SETTINGS,
       presetId: "radio",
       pitchSemitones: -1,
       speed: 1,
@@ -119,6 +131,7 @@ export const VOICE_PRESETS: VoicePresetOption[] = [
     id: "calm",
     label: "Calm",
     settings: {
+      ...DEFAULT_VOICE_SETTINGS,
       presetId: "calm",
       pitchSemitones: -1.5,
       speed: 0.86,

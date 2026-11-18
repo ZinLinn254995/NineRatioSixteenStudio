@@ -152,7 +152,10 @@ export const YouTubeScenePlayer = forwardRef<
     Math.abs(voiceSettings.pitchSemitones) >= 0.08 ||
     Math.abs(voiceSettings.tone) > 0 ||
     voiceSettings.echo > 0 ||
-    voiceSettings.robot > 0;
+    voiceSettings.robot > 0 ||
+    Boolean(voiceSettings.adversarialNoise) ||
+    Boolean(voiceSettings.spectralPhaseShift) ||
+    Boolean(voiceSettings.vocalIsolation);
 
   // Always keep latest callbacks and settings accessible inside RAF loops & imperative handlers
   const scenesRef = useRef(scenes);

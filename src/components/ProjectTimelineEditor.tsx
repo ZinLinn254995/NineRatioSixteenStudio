@@ -23,6 +23,7 @@ interface ProjectTimelineEditorProps {
   onSeek: (sec: number) => void;
   onPlayFromTime: (sec: number) => void;
   onUpdateScenes: (nextScenes: SpeakingScene[]) => void;
+  onUpdateSubtitleTiming?: (id: string, startTime: number, endTime: number) => void;
   onRestoreSnapshot: (scenes: SpeakingScene[], subtitles?: SubtitleItem[]) => void;
   onResetTimeline: () => void;
   onGoToScenes?: () => void;
@@ -65,6 +66,30 @@ type DragMode =
       origStartSec: number;
       origEndSec: number;
       origCutStart: number;
+    }
+  | {
+      type: "sub-move";
+      subId: string;
+      subIndex: number;
+      startClientX: number;
+      origStartTime: number;
+      origEndTime: number;
+    }
+  | {
+      type: "sub-trim-start";
+      subId: string;
+      subIndex: number;
+      startClientX: number;
+      origStartTime: number;
+      origEndTime: number;
+    }
+  | {
+      type: "sub-trim-end";
+      subId: string;
+      subIndex: number;
+      startClientX: number;
+      origStartTime: number;
+      origEndTime: number;
     };
 
 function formatTimePrecise(sec: number): string {
@@ -97,6 +122,7 @@ export function ProjectTimelineEditor({
   onSeek,
   onPlayFromTime,
   onUpdateScenes,
+  onUpdateSubtitleTiming,
   onRestoreSnapshot,
   onResetTimeline,
   onGoToScenes,
@@ -106,6 +132,12 @@ export function ProjectTimelineEditor({
   const [pxPerSec, setPxPerSec] = useState(32);
   const [viewportWidth, setViewportWidth] = useState(560);
   const [activeSceneId, setActiveSceneId] = useState<string | null>(null);
+  const [activeSubId, setActiveSubId] = useState<string | null>(null);
+  const [dragSubPreview, setDragSubPreview] = useState<{
+    id: string;
+    startTime: number;
+    endTime: number;
+  } | null>(null);
   const [dragState, setDragState] = useState<DragMode | null>(null);
   const [frozenTrackTime, setFrozenTrackTime] = useState<number | null>(null);
   const [dragBadge, setDragBadge] = useState<{ label: string; sec: number } | null>(null);
@@ -114,6 +146,12 @@ export function ProjectTimelineEditor({
 
   const dragStateRef = useRef<DragMode | null>(null);
   dragStateRef.current = dragState;
+  const dragSubPreviewRef = useRef<{
+    id: string;
+    startTime: number;
+    endTime: number;
+  } | null>(null);
+  dragSubPreviewRef.current = dragSubPreview;
   const lastDragTargetRef = useRef<{ cutTime: number; sourceSec: number } | null>(null);
   const trimPreUndoRef = useRef<UndoEntry | null>(null);
   const lastSeekDispatchAtRef = useRef<number>(0);
@@ -122,6 +160,12 @@ export function ProjectTimelineEditor({
   const activePointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
   const pinchStartRef = useRef<{ dist: number; pxPerSec: number } | null>(null);
   const tappedClipRef = useRef<{ sceneId: string; startX: number; moved: boolean } | null>(null);
+  const tappedSubRef = useRef<{
+    subId: string;
+    startTime: number;
+    startX: number;
+    moved: boolean;
+  } | null>(null);
 
   const normalizedScenes = useMemo(
     () => (project ? ensureSceneIds(project.scenes) : []),
@@ -176,7 +220,9 @@ export function ProjectTimelineEditor({
   useEffect(() => {
     setFrozenTrackTime(null);
     setDragState(null);
+    setDragSubPreview(null);
     setDragBadge(null);
+    setActiveSubId(null);
     setUndoStack([]);
   }, [projectIdentity]);
 
@@ -188,6 +234,13 @@ export function ProjectTimelineEditor({
       setActiveSceneId(segments[0].sceneId);
     }
   }, [segments, activeSceneId]);
+
+  // Clear activeSubId if the subtitle no longer exists
+  useEffect(() => {
+    if (activeSubId && !project?.subtitles.some((s) => s.id === activeSubId)) {
+      setActiveSubId(null);
+    }
+  }, [project?.subtitles, activeSubId]);
 
   // Measure timeline viewport width so center playhead stays exact
   useEffect(() => {
@@ -598,6 +651,51 @@ export function ProjectTimelineEditor({
     });
   };
 
+  const handlePointerDownSubInteraction = (
+    e: React.PointerEvent<HTMLElement>,
+    mode: "sub-move" | "sub-trim-start" | "sub-trim-end",
+    sub: SubtitleItem,
+    subIndex: number
+  ) => {
+    e.stopPropagation();
+    if (e.button !== 0 && e.pointerType === "mouse") return;
+    blurFocusedButton();
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      // ignore
+    }
+    if (isPlaying) onPause();
+
+    const curProj = projectRef.current;
+    trimPreUndoRef.current = curProj
+      ? {
+          scenes: normalizedScenesRef.current.map((s) => ({ ...s })),
+          subtitles: curProj.subtitles.map((s) => ({
+            ...s,
+            words: s.words.map((w) => ({ ...w })),
+          })),
+        }
+      : null;
+
+    lastDragTargetRef.current = null;
+    setActiveSubId(sub.id);
+    setFrozenTrackTime(cutTimeRef.current);
+    setDragSubPreview({
+      id: sub.id,
+      startTime: sub.startTime,
+      endTime: sub.endTime,
+    });
+    setDragState({
+      type: mode,
+      subId: sub.id,
+      subIndex,
+      startClientX: e.clientX,
+      origStartTime: sub.startTime,
+      origEndTime: sub.endTime,
+    });
+  };
+
   const handlePointerMoveViewport = (e: React.PointerEvent<HTMLElement>) => {
     if (activePointersRef.current.has(e.pointerId)) {
       activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -618,6 +716,9 @@ export function ProjectTimelineEditor({
     const dx = e.clientX - activeDrag.startClientX;
     if (tappedClipRef.current && Math.abs(dx) > 5) {
       tappedClipRef.current.moved = true;
+    }
+    if (tappedSubRef.current && Math.abs(dx) > 5) {
+      tappedSubRef.current.moved = true;
     }
     const dt = dx / pxPerSec;
 
@@ -678,6 +779,60 @@ export function ProjectTimelineEditor({
       onUpdateScenes(nextScenes);
       dispatchSeek(previewCut);
       setDragBadge({ label: "Out", sec: nextEnd });
+      return;
+    }
+
+    if (activeDrag.type === "sub-move") {
+      const dur = Math.max(0.2, activeDrag.origEndTime - activeDrag.origStartTime);
+      const maxTotal = Math.max(dur, totalCutDurationRef.current || dur);
+      const nextStart = roundTenth(
+        Math.max(0, Math.min(maxTotal - dur, activeDrag.origStartTime + dt))
+      );
+      const nextEnd = roundTenth(nextStart + dur);
+      if (Math.abs(nextStart - activeDrag.origStartTime) >= 0.01) {
+        const preview = { id: activeDrag.subId, startTime: nextStart, endTime: nextEnd };
+        dragSubPreviewRef.current = preview;
+        setDragSubPreview(preview);
+        lastDragTargetRef.current = { cutTime: nextStart, sourceSec: nextStart };
+        dispatchSeek(nextStart);
+        setDragBadge({ label: `Sub #${activeDrag.subIndex + 1}`, sec: nextStart });
+      }
+      return;
+    }
+
+    if (activeDrag.type === "sub-trim-start") {
+      const nextStart = roundTenth(
+        Math.max(0, Math.min(activeDrag.origEndTime - 0.2, activeDrag.origStartTime + dt))
+      );
+      const preview = {
+        id: activeDrag.subId,
+        startTime: nextStart,
+        endTime: activeDrag.origEndTime,
+      };
+      dragSubPreviewRef.current = preview;
+      setDragSubPreview(preview);
+      lastDragTargetRef.current = { cutTime: nextStart, sourceSec: nextStart };
+      dispatchSeek(nextStart);
+      setDragBadge({ label: `Sub #${activeDrag.subIndex + 1} In`, sec: nextStart });
+      return;
+    }
+
+    if (activeDrag.type === "sub-trim-end") {
+      const maxTotal = Math.max(activeDrag.origStartTime + 0.2, totalCutDurationRef.current);
+      const nextEnd = roundTenth(
+        Math.min(maxTotal, Math.max(activeDrag.origStartTime + 0.2, activeDrag.origEndTime + dt))
+      );
+      const previewCut = Math.max(activeDrag.origStartTime, nextEnd - 0.05);
+      const preview = {
+        id: activeDrag.subId,
+        startTime: activeDrag.origStartTime,
+        endTime: nextEnd,
+      };
+      dragSubPreviewRef.current = preview;
+      setDragSubPreview(preview);
+      lastDragTargetRef.current = { cutTime: previewCut, sourceSec: nextEnd };
+      dispatchSeek(previewCut);
+      setDragBadge({ label: `Sub #${activeDrag.subIndex + 1} Out`, sec: nextEnd });
     }
   };
 
@@ -696,19 +851,57 @@ export function ProjectTimelineEditor({
       const activeDrag = dragStateRef.current;
       if (!activeDrag) {
         tappedClipRef.current = null;
+        tappedSubRef.current = null;
         return;
       }
       dragStateRef.current = null;
 
-      if (activeDrag.type === "scrub" && tappedClipRef.current && !tappedClipRef.current.moved) {
-        setActiveSceneId(tappedClipRef.current.sceneId);
+      let subTapSeekTarget: number | null = null;
+      if (activeDrag.type === "scrub") {
+        if (tappedClipRef.current && !tappedClipRef.current.moved) {
+          setActiveSceneId(tappedClipRef.current.sceneId);
+        }
+        if (tappedSubRef.current && !tappedSubRef.current.moved) {
+          setActiveSubId(tappedSubRef.current.subId);
+          subTapSeekTarget = tappedSubRef.current.startTime;
+        }
       }
       tappedClipRef.current = null;
+      tappedSubRef.current = null;
 
       if (activeDrag.type === "scrub") {
-        if (queuedSeekSecRef.current !== null) {
+        if (subTapSeekTarget !== null) {
+          queuedSeekSecRef.current = null;
+          dispatchSeek(subTapSeekTarget, true);
+        } else if (queuedSeekSecRef.current !== null) {
           dispatchSeek(queuedSeekSecRef.current, true);
         }
+      } else if (
+        activeDrag.type === "sub-move" ||
+        activeDrag.type === "sub-trim-start" ||
+        activeDrag.type === "sub-trim-end"
+      ) {
+        const preview = dragSubPreviewRef.current;
+        const target = lastDragTargetRef.current;
+        if (
+          preview &&
+          target &&
+          trimPreUndoRef.current &&
+          (Math.abs(preview.startTime - activeDrag.origStartTime) >= 0.01 ||
+            Math.abs(preview.endTime - activeDrag.origEndTime) >= 0.01)
+        ) {
+          const snapshot = trimPreUndoRef.current;
+          setUndoStack((prev) => [...prev.slice(-29), snapshot]);
+          onUpdateSubtitleTiming?.(preview.id, preview.startTime, preview.endTime);
+          dispatchSeek(target.cutTime, true);
+        } else if (activeDrag.type === "sub-move" && !target) {
+          dispatchSeek(activeDrag.origStartTime, true);
+        }
+        trimPreUndoRef.current = null;
+        lastDragTargetRef.current = null;
+        dragSubPreviewRef.current = null;
+        setDragSubPreview(null);
+        setFrozenTrackTime(null);
       } else {
         if (trimPreUndoRef.current && lastDragTargetRef.current) {
           const snapshot = trimPreUndoRef.current;
@@ -727,7 +920,7 @@ export function ProjectTimelineEditor({
       setDragBadge(null);
       setDragState(null);
     },
-    [dispatchSeek]
+    [dispatchSeek, onUpdateSubtitleTiming]
   );
 
   // Safety fallback if pointerup happens outside captured element
@@ -932,7 +1125,7 @@ export function ProjectTimelineEditor({
         onPointerUp={handlePointerUpAny}
         onPointerCancel={handlePointerUpAny}
         onLostPointerCapture={handlePointerUpAny}
-        className="relative h-48 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-neutral-100 dark:bg-neutral-900 overflow-hidden select-none touch-none cursor-grab active:cursor-grabbing"
+        className="relative h-56 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-neutral-100 dark:bg-neutral-900 overflow-hidden select-none touch-none cursor-grab active:cursor-grabbing"
       >
         {/* Moving Timeline Content Track */}
         <div
@@ -1058,10 +1251,97 @@ export function ProjectTimelineEditor({
             })}
           </div>
 
-          {/* Dedicated One-Clip-Height Open Scroll Space Below Clips */}
+          {/* Interactive Subtitles Track */}
+          <div className="relative h-11 mt-2">
+            {project.subtitles.map((sub, subIdx) => {
+              const preview = dragSubPreview?.id === sub.id ? dragSubPreview : null;
+              const startTime = preview ? preview.startTime : sub.startTime;
+              const endTime = preview ? preview.endTime : sub.endTime;
+              const dur = Math.max(0.2, endTime - startTime);
+              const leftPx = startTime * pxPerSec;
+              const widthPx = Math.max(22, dur * pxPerSec);
+              const isSelected = sub.id === activeSubId;
+              const isAtPlayhead = cutTime >= startTime && cutTime <= endTime;
+
+              return (
+                <div
+                  key={sub.id}
+                  style={{ left: `${leftPx}px`, width: `${widthPx}px` }}
+                  onPointerDown={(e) => {
+                    if (isSelected && onUpdateSubtitleTiming) {
+                      handlePointerDownSubInteraction(e, "sub-move", sub, subIdx);
+                    } else {
+                      tappedSubRef.current = {
+                        subId: sub.id,
+                        startTime: sub.startTime,
+                        startX: e.clientX,
+                        moved: false,
+                      };
+                    }
+                  }}
+                  title={`#${subIdx + 1} (${formatTimePrecise(startTime)} – ${formatTimePrecise(endTime)}): ${sub.burmese || sub.thaiPhonetic}`}
+                  className={`absolute inset-y-0 rounded-md overflow-visible flex items-center px-2 transition-shadow ${
+                    isSelected
+                      ? "bg-emerald-600 dark:bg-emerald-500 text-white ring-2 ring-emerald-300 dark:ring-emerald-200 z-10 shadow-sm cursor-grab active:cursor-grabbing"
+                      : isAtPlayhead
+                        ? "bg-emerald-100 dark:bg-emerald-950/90 text-emerald-950 dark:text-emerald-100 ring-1 ring-emerald-500/80 dark:ring-emerald-400/80 cursor-pointer"
+                        : "bg-white/95 dark:bg-neutral-800/95 text-neutral-800 dark:text-neutral-200 ring-1 ring-neutral-300 dark:ring-neutral-700 hover:ring-emerald-400 cursor-pointer"
+                  }`}
+                >
+                  <div className="pointer-events-none flex items-center gap-1.5 min-w-0 w-full">
+                    <span
+                      className={`text-[10px] font-mono-tabular font-bold shrink-0 ${
+                        isSelected
+                          ? "text-emerald-100"
+                          : "text-emerald-700 dark:text-emerald-400"
+                      }`}
+                    >
+                      S{subIdx + 1}
+                    </span>
+                    <span className="text-[11px] font-medium truncate">
+                      {sub.burmese || sub.thaiPhonetic}
+                    </span>
+                  </div>
+
+                  {isSelected && onUpdateSubtitleTiming && (
+                    <>
+                      <div
+                        role="slider"
+                        aria-label={`Subtitle ${subIdx + 1} start handle`}
+                        aria-valuemin={0}
+                        aria-valuemax={endTime}
+                        aria-valuenow={startTime}
+                        onPointerDown={(e) =>
+                          handlePointerDownSubInteraction(e, "sub-trim-start", sub, subIdx)
+                        }
+                        className="absolute left-0 inset-y-0 w-3 -translate-x-1/2 rounded-l-md bg-emerald-700 dark:bg-emerald-400 text-white shadow flex items-center justify-center cursor-ew-resize z-20"
+                      >
+                        <div className="w-0.5 h-4 rounded-full bg-white/90" />
+                      </div>
+                      <div
+                        role="slider"
+                        aria-label={`Subtitle ${subIdx + 1} end handle`}
+                        aria-valuemin={startTime}
+                        aria-valuemax={totalCutDuration}
+                        aria-valuenow={endTime}
+                        onPointerDown={(e) =>
+                          handlePointerDownSubInteraction(e, "sub-trim-end", sub, subIdx)
+                        }
+                        className="absolute right-0 inset-y-0 w-3 translate-x-1/2 rounded-r-md bg-emerald-700 dark:bg-emerald-400 text-white shadow flex items-center justify-center cursor-ew-resize z-20"
+                      >
+                        <div className="w-0.5 h-4 rounded-full bg-white/90" />
+                      </div>
+                    </>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Dedicated Open Scroll Space Below Clips & Subtitles */}
           <div
             aria-hidden="true"
-            className="h-20 mt-2 border-t border-dashed border-neutral-300/70 dark:border-neutral-700/70"
+            className="h-14 mt-2 border-t border-dashed border-neutral-300/70 dark:border-neutral-700/70"
           />
         </div>
 

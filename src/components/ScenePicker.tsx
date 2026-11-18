@@ -1,12 +1,21 @@
 import { useRef } from "react";
 import { Loader2, Upload, X } from "lucide-react";
-import type { ActiveMediaSource, SceneSelection } from "../types";
+import type { ActiveMediaSource, SceneSelection, TranslationTone } from "../types";
 import { LocalVideoTimelineEditor } from "./LocalVideoTimelineEditor";
+
+const TONE_OPTIONS: { id: TranslationTone; label: string }[] = [
+  { id: "casual", label: "Casual" },
+  { id: "formal", label: "Polite" },
+  { id: "dramatic", label: "Drama" },
+  { id: "literal", label: "Literal" },
+];
 
 interface ScenePickerProps {
   media?: ActiveMediaSource | null;
   scenes: SceneSelection[];
   isProcessing: boolean;
+  translationTone: TranslationTone;
+  onChangeTranslationTone: (tone: TranslationTone) => void;
   onUpdateScene: (id: string, startSec: number, endSec: number) => void;
   onRemoveScene: (id: string) => void;
   onReplaceScenes?: (scenes: SceneSelection[]) => void;
@@ -21,6 +30,8 @@ export function ScenePicker({
   media,
   scenes,
   isProcessing,
+  translationTone,
+  onChangeTranslationTone,
   onUpdateScene,
   onRemoveScene,
   onReplaceScenes,
@@ -108,12 +119,39 @@ export function ScenePicker({
         isTabActive={isTabActive}
       />
 
-      {/* Generate Subtitles Action Bar */}
-      <div className="flex items-center justify-between gap-4 pt-1">
-        <span className="text-xs font-mono-tabular text-neutral-500 dark:text-neutral-400">
-          {scenes.length} {scenes.length === 1 ? "scene" : "scenes"} ·{" "}
-          {`${Math.round(totalSelectedSec * 10) / 10}s`}
-        </span>
+      {/* Translation Tone & Generate Subtitles Action Bar */}
+      <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+        <div className="flex flex-wrap items-center gap-2.5">
+          <span className="text-xs font-mono-tabular text-neutral-500 dark:text-neutral-400 whitespace-nowrap">
+            {scenes.length} {scenes.length === 1 ? "scene" : "scenes"} ·{" "}
+            {`${Math.round(totalSelectedSec * 10) / 10}s`}
+          </span>
+
+          <div
+            role="group"
+            aria-label="Translation tone"
+            className="inline-flex items-center p-0.5 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800"
+          >
+            {TONE_OPTIONS.map((opt) => {
+              const active = translationTone === opt.id;
+              return (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => onChangeTranslationTone(opt.id)}
+                  disabled={isProcessing}
+                  className={`px-2.5 py-1 rounded-md text-[11px] font-medium whitespace-nowrap transition-colors cursor-pointer disabled:opacity-50 ${
+                    active
+                      ? "bg-white dark:bg-neutral-800 text-neutral-950 dark:text-white shadow-xs"
+                      : "text-neutral-600 dark:text-neutral-400 hover:text-neutral-950 dark:hover:text-white"
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
 
         <button
           type="button"

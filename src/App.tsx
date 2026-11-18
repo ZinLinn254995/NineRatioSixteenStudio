@@ -7,13 +7,14 @@ import type {
   SpeakingScene,
   SubtitleItem,
   SubtitleWord,
+  TranslationTone,
   VideoEditSettings,
   VideoProject,
   VoiceSettings,
   YouTubeLicenseFilter,
   YouTubeVideo,
 } from "./types";
-import { Stage9x16 } from "./components/Stage9x16";
+import { Stage9x16, type StagePreviewSize } from "./components/Stage9x16";
 import { mapCutTimeToSource } from "./components/YouTubeScenePlayer";
 import { WorkspaceSidebar, type WorkspaceTab } from "./components/WorkspaceSidebar";
 import { exportProjectToMp4, type ExportProgress } from "./utils/exportVideo";
@@ -68,6 +69,11 @@ export default function App() {
 
   const [isProcessing, setIsProcessing] = useState(false);
   const [processError, setProcessError] = useState<string | null>(null);
+  const [regeneratingSubIds, setRegeneratingSubIds] = useState<string[]>([]);
+  const [isRetranslatingAll, setIsRetranslatingAll] = useState(false);
+  const [isResyncingTimings, setIsResyncingTimings] = useState(false);
+  const [subtitleRegenError, setSubtitleRegenError] = useState<string | null>(null);
+  const [loopingSubId, setLoopingSubId] = useState<string | null>(null);
 
   const [project, setProject] = useState<VideoProject | null>(null);
   const [cutTime, setCutTime] = useState(0);
@@ -87,19 +93,146 @@ export default function App() {
   const [isDesktop, setIsDesktop] = useState<boolean>(() =>
     typeof window !== "undefined" ? window.matchMedia("(min-width: 1024px)").matches : true
   );
+  const [stagePreviewSize, setStagePreviewSize] = useState<StagePreviewSize>("normal");
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const activeRunIdRef = useRef(0);
+  const generateAbortRef = useRef<AbortController | null>(null);
+  const resyncAbortRef = useRef<AbortController | null>(null);
+  const retranslateAbortRef = useRef<AbortController | null>(null);
+  const regenAbortMapRef = useRef<Map<string, AbortController>>(new Map());
   const searchSeqRef = useRef(0);
   const createdUrlsRef = useRef<string[]>([]);
   const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const projectRef = useRef<VideoProject | null>(null);
+  projectRef.current = project;
+  const loopingSubIdRef = useRef<string | null>(null);
+  loopingSubIdRef.current = loopingSubId;
+  const cutTimeRef = useRef(0);
+  cutTimeRef.current = cutTime;
+  const lastLoopSeekAtRef = useRef(0);
   const timelineBaselineRef = useRef<{
     scenes: SpeakingScene[];
     subtitles: SubtitleItem[];
   } | null>(null);
   const [timelineDirty, setTimelineDirty] = useState(false);
 
+  interface SubtitleSnapshot {
+    subtitles: SubtitleItem[];
+    baselineSubtitles: SubtitleItem[] | null;
+  }
+  const [subUndoStack, setSubUndoStack] = useState<SubtitleSnapshot[]>([]);
+  const [subRedoStack, setSubRedoStack] = useState<SubtitleSnapshot[]>([]);
+  const subUndoStackRef = useRef<SubtitleSnapshot[]>([]);
+  subUndoStackRef.current = subUndoStack;
+  const subRedoStackRef = useRef<SubtitleSnapshot[]>([]);
+  subRedoStackRef.current = subRedoStack;
+  const lastSubTypingCoalesceRef = useRef<{ key: string; at: number } | null>(null);
+
+  const cloneSubtitleList = useCallback(
+    (subs: SubtitleItem[]): SubtitleItem[] =>
+      subs.map((sub) => ({
+        ...sub,
+        words: (Array.isArray(sub.words) ? sub.words : []).map((w) => ({ ...w })),
+      })),
+    []
+  );
+
+  const pushSubtitleUndo = useCallback(
+    (coalesceKey?: string) => {
+      const curProj = projectRef.current;
+      if (!curProj) return;
+      if (coalesceKey) {
+        const now = performance.now();
+        if (
+          lastSubTypingCoalesceRef.current &&
+          lastSubTypingCoalesceRef.current.key === coalesceKey &&
+          now - lastSubTypingCoalesceRef.current.at < 800
+        ) {
+          lastSubTypingCoalesceRef.current.at = now;
+          return;
+        }
+        lastSubTypingCoalesceRef.current = { key: coalesceKey, at: now };
+      } else {
+        lastSubTypingCoalesceRef.current = null;
+      }
+
+      const snap: SubtitleSnapshot = {
+        subtitles: cloneSubtitleList(curProj.subtitles),
+        baselineSubtitles: timelineBaselineRef.current
+          ? cloneSubtitleList(timelineBaselineRef.current.subtitles)
+          : null,
+      };
+      setSubUndoStack((prev) => [...prev.slice(-39), snap]);
+      setSubRedoStack([]);
+    },
+    [cloneSubtitleList]
+  );
+
+  const handleUndoSubtitles = useCallback(() => {
+    const curProj = projectRef.current;
+    const undoList = subUndoStackRef.current;
+    if (!curProj || undoList.length === 0) return;
+
+    const prevSnap = undoList[undoList.length - 1];
+    const currentSnap: SubtitleSnapshot = {
+      subtitles: cloneSubtitleList(curProj.subtitles),
+      baselineSubtitles: timelineBaselineRef.current
+        ? cloneSubtitleList(timelineBaselineRef.current.subtitles)
+        : null,
+    };
+
+    lastSubTypingCoalesceRef.current = null;
+    setSubUndoStack((prev) => prev.slice(0, -1));
+    setSubRedoStack((prev) => [...prev.slice(-39), currentSnap]);
+
+    if (timelineBaselineRef.current && prevSnap.baselineSubtitles) {
+      timelineBaselineRef.current.subtitles = cloneSubtitleList(prevSnap.baselineSubtitles);
+    }
+    setProject((prev) =>
+      prev ? { ...prev, subtitles: cloneSubtitleList(prevSnap.subtitles) } : prev
+    );
+  }, [cloneSubtitleList]);
+
+  const handleRedoSubtitles = useCallback(() => {
+    const curProj = projectRef.current;
+    const redoList = subRedoStackRef.current;
+    if (!curProj || redoList.length === 0) return;
+
+    const nextSnap = redoList[redoList.length - 1];
+    const currentSnap: SubtitleSnapshot = {
+      subtitles: cloneSubtitleList(curProj.subtitles),
+      baselineSubtitles: timelineBaselineRef.current
+        ? cloneSubtitleList(timelineBaselineRef.current.subtitles)
+        : null,
+    };
+
+    lastSubTypingCoalesceRef.current = null;
+    setSubRedoStack((prev) => prev.slice(0, -1));
+    setSubUndoStack((prev) => [...prev.slice(-39), currentSnap]);
+
+    if (timelineBaselineRef.current && nextSnap.baselineSubtitles) {
+      timelineBaselineRef.current.subtitles = cloneSubtitleList(nextSnap.baselineSubtitles);
+    }
+    setProject((prev) =>
+      prev ? { ...prev, subtitles: cloneSubtitleList(nextSnap.subtitles) } : prev
+    );
+  }, [cloneSubtitleList]);
+
   const setBaselineFromProject = useCallback((proj: VideoProject | null) => {
+    resyncAbortRef.current?.abort();
+    resyncAbortRef.current = null;
+    retranslateAbortRef.current?.abort();
+    retranslateAbortRef.current = null;
+    regenAbortMapRef.current.forEach((ctrl) => ctrl.abort());
+    regenAbortMapRef.current.clear();
+    setIsResyncingTimings(false);
+    setIsRetranslatingAll(false);
+    setRegeneratingSubIds([]);
+
+    lastSubTypingCoalesceRef.current = null;
+    setSubUndoStack([]);
+    setSubRedoStack([]);
     if (!proj) {
       timelineBaselineRef.current = null;
       setTimelineDirty(false);
@@ -420,12 +553,24 @@ export default function App() {
     setSelectedScenes((prev) => prev.filter((sc) => sc.id !== id));
   };
 
+  const handleCancelGenerateSubtitles = useCallback(() => {
+    activeRunIdRef.current++;
+    generateAbortRef.current?.abort();
+    generateAbortRef.current = null;
+    setIsProcessing(false);
+    setProcessError(null);
+  }, []);
+
   // Triggered explicitly by the user after watching and selecting their scenes
   const handleGenerateSubtitles = async () => {
     const targetMedia = localMedia ?? youtubeMedia;
     if (!targetMedia || selectedScenes.length === 0) return;
 
     const runId = ++activeRunIdRef.current;
+    generateAbortRef.current?.abort();
+    const controller = new AbortController();
+    generateAbortRef.current = controller;
+
     setIsPlaying(false);
     setCutTime(0);
     setIsProcessing(true);
@@ -442,7 +587,8 @@ export default function App() {
         if (!uploadId) {
           uploadId = await uploadBlobInChunks(
             targetMedia.localFile,
-            targetMedia.localFile.name
+            targetMedia.localFile.name,
+            controller.signal
           );
           if (activeRunIdRef.current !== runId) return;
           setLocalMedia((prev) => (prev ? { ...prev, uploadId } : prev));
@@ -456,14 +602,17 @@ export default function App() {
             title: targetMedia.title,
             durationSec: targetMedia.durationSec,
             selectedScenes: scenePayload,
+            translationTone: videoEdit.translationTone,
           }),
+          signal: controller.signal,
         });
 
         // If server restarted and tmp upload expired, re-upload once transparently
         if (resp.status === 404) {
           uploadId = await uploadBlobInChunks(
             targetMedia.localFile,
-            targetMedia.localFile.name
+            targetMedia.localFile.name,
+            controller.signal
           );
           if (activeRunIdRef.current !== runId) return;
           setLocalMedia((prev) => (prev ? { ...prev, uploadId } : prev));
@@ -475,7 +624,9 @@ export default function App() {
               title: targetMedia.title,
               durationSec: targetMedia.durationSec,
               selectedScenes: scenePayload,
+              translationTone: videoEdit.translationTone,
             }),
+            signal: controller.signal,
           });
         }
 
@@ -503,7 +654,9 @@ export default function App() {
             channel: targetMedia.channel,
             durationSec: targetMedia.durationSec,
             selectedScenes: scenePayload,
+            translationTone: videoEdit.translationTone,
           }),
+          signal: controller.signal,
         });
         const data = await safeReadJson<VideoProject & { error?: string }>(resp);
         if (!resp.ok) throw new Error(data.error || "Processing failed");
@@ -518,10 +671,19 @@ export default function App() {
         setActiveTab("script");
       }
     } catch (err) {
+      if (
+        controller.signal.aborted ||
+        (err instanceof DOMException && err.name === "AbortError")
+      ) {
+        return;
+      }
       if (activeRunIdRef.current === runId) {
         setProcessError(err instanceof Error ? err.message : "Failed to transcribe scenes.");
       }
     } finally {
+      if (generateAbortRef.current === controller) {
+        generateAbortRef.current = null;
+      }
       if (activeRunIdRef.current === runId) {
         setIsProcessing(false);
       }
@@ -529,15 +691,47 @@ export default function App() {
   };
 
   const handleSeek = (sec: number) => {
+    const activeLoopId = loopingSubIdRef.current;
+    if (activeLoopId) {
+      const loopSub = projectRef.current?.subtitles.find((s) => s.id === activeLoopId);
+      if (!loopSub || sec < loopSub.startTime - 0.1 || sec > loopSub.endTime + 0.1) {
+        setLoopingSubId(null);
+      }
+    }
     setCutTime(sec);
     setSeekNonce((n) => n + 1);
   };
 
   const handlePlayerTimeUpdate = useCallback((newCutTime: number) => {
+    const activeLoopId = loopingSubIdRef.current;
+    if (activeLoopId) {
+      const loopSub = projectRef.current?.subtitles.find((s) => s.id === activeLoopId);
+      if (loopSub && newCutTime >= loopSub.endTime - 0.04) {
+        const now = performance.now();
+        if (now - lastLoopSeekAtRef.current > 180) {
+          lastLoopSeekAtRef.current = now;
+          setCutTime(loopSub.startTime);
+          setSeekNonce((n) => n + 1);
+          return;
+        }
+      }
+    }
     setCutTime(newCutTime);
   }, []);
 
   const handlePlaybackEnded = useCallback(() => {
+    const activeLoopId = loopingSubIdRef.current;
+    if (activeLoopId) {
+      const loopSub = projectRef.current?.subtitles.find((s) => s.id === activeLoopId);
+      if (loopSub) {
+        lastLoopSeekAtRef.current = performance.now();
+        setCutTime(loopSub.startTime);
+        setSeekNonce((n) => n + 1);
+        setIsPlaying(true);
+        return;
+      }
+    }
+    setLoopingSubId(null);
     setIsPlaying(false);
     setCutTime(0);
     setSeekNonce((n) => n + 1);
@@ -546,10 +740,14 @@ export default function App() {
   const handleTogglePlay = () => {
     if (!project || project.scenes.length === 0) return;
     resumeAllVoiceContexts();
-    setIsPlaying((p) => !p);
+    setIsPlaying((p) => {
+      if (p) setLoopingSubId(null);
+      return !p;
+    });
   };
 
   const handlePause = useCallback(() => {
+    setLoopingSubId(null);
     setIsPlaying(false);
   }, []);
 
@@ -557,11 +755,34 @@ export default function App() {
     (sec: number) => {
       if (!project || project.scenes.length === 0) return;
       resumeAllVoiceContexts();
+      setLoopingSubId(null);
       setCutTime(sec);
       setSeekNonce((n) => n + 1);
       setIsPlaying(true);
     },
     [project]
+  );
+
+  const handleToggleLoopSubtitle = useCallback(
+    (id: string) => {
+      if (!project || project.scenes.length === 0) return;
+      const targetSub = project.subtitles.find((s) => s.id === id);
+      if (!targetSub) return;
+
+      if (loopingSubIdRef.current === id && isPlaying) {
+        setLoopingSubId(null);
+        setIsPlaying(false);
+        return;
+      }
+
+      resumeAllVoiceContexts();
+      lastLoopSeekAtRef.current = performance.now();
+      setLoopingSubId(id);
+      setCutTime(targetSub.startTime);
+      setSeekNonce((n) => n + 1);
+      setIsPlaying(true);
+    },
+    [project, isPlaying]
   );
 
   const checkTimelineDirty = useCallback((nextScenes: SpeakingScene[]) => {
@@ -686,13 +907,15 @@ export default function App() {
 
   const handleUpdateSubtitle = (
     id: string,
-    field: "thaiPhonetic" | "burmese",
+    field: "thaiPhonetic" | "burmese" | "thaiScript",
     value: string
   ) => {
+    pushSubtitleUndo(`sub:${id}:${field}`);
     const applyEdit = (list: SubtitleItem[]): SubtitleItem[] =>
       list.map((sub: SubtitleItem) => {
         if (sub.id !== id) return sub;
         if (field === "burmese") return { ...sub, burmese: value };
+        if (field === "thaiScript") return { ...sub, thaiScript: value };
 
         const tokens = value.split(/\s+/).filter(Boolean);
         if (tokens.length === sub.words.length && sub.words.length > 0) {
@@ -722,6 +945,32 @@ export default function App() {
     });
   };
 
+  const handleUpdateWordGloss = (
+    subId: string,
+    wordIndex: number,
+    burmeseGloss: string
+  ) => {
+    pushSubtitleUndo(`gloss:${subId}:${wordIndex}`);
+    const applyWordEdit = (list: SubtitleItem[]): SubtitleItem[] =>
+      list.map((sub) => {
+        if (sub.id !== subId) return sub;
+        const words = sub.words.map((w, wi) =>
+          wi === wordIndex ? { ...w, burmeseGloss } : w
+        );
+        return { ...sub, words };
+      });
+
+    if (timelineBaselineRef.current) {
+      timelineBaselineRef.current.subtitles = applyWordEdit(
+        timelineBaselineRef.current.subtitles
+      );
+    }
+
+    setProject((prev) =>
+      prev ? { ...prev, subtitles: applyWordEdit(prev.subtitles) } : prev
+    );
+  };
+
   const handleAddSubtitle = (input: {
     startTime: number;
     endTime: number;
@@ -730,6 +979,7 @@ export default function App() {
     originalSpokenText?: string;
   }) => {
     if (!project) return;
+    pushSubtitleUndo();
     const maxDur = Math.max(0.5, project.targetDurationSec || 10);
     const startTime = Number(Math.max(0, Math.min(maxDur - 0.2, input.startTime)).toFixed(2));
     const endTime = Number(Math.max(startTime + 0.2, Math.min(maxDur, input.endTime)).toFixed(2));
@@ -771,6 +1021,9 @@ export default function App() {
   };
 
   const handleDeleteSubtitle = (id: string) => {
+    if (project?.subtitles.some((s) => s.id === id)) {
+      pushSubtitleUndo();
+    }
     if (timelineBaselineRef.current) {
       timelineBaselineRef.current.subtitles = timelineBaselineRef.current.subtitles.filter(
         (sub) => sub.id !== id
@@ -785,8 +1038,78 @@ export default function App() {
     });
   };
 
+  const handleFindReplaceSubtitles = (opts: {
+    findText: string;
+    replaceText: string;
+    field: "all" | "burmese" | "thaiPhonetic" | "thaiScript";
+    caseSensitive?: boolean;
+  }): number => {
+    if (!project || !opts.findText) return 0;
+    const escapeRegExp = (str: string) => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const flags = opts.caseSensitive ? "g" : "gi";
+    const regex = new RegExp(escapeRegExp(opts.findText), flags);
+    let totalMatches = 0;
+
+    const replaceInText = (src: string): string => {
+      if (!src) return src;
+      const matches = src.match(regex);
+      if (matches && matches.length > 0) {
+        totalMatches += matches.length;
+        return src.replace(regex, opts.replaceText);
+      }
+      return src;
+    };
+
+    const replaceSilent = (src: string): string => (src ? src.replace(regex, opts.replaceText) : src);
+
+    const transformList = (list: SubtitleItem[], countMatches: boolean): SubtitleItem[] =>
+      list.map((sub) => {
+        const fn = countMatches ? replaceInText : replaceSilent;
+        const nextPhonetic =
+          opts.field === "all" || opts.field === "thaiPhonetic" ? fn(sub.thaiPhonetic) : sub.thaiPhonetic;
+        const nextThai =
+          opts.field === "all" || opts.field === "thaiScript" ? fn(sub.thaiScript) : sub.thaiScript;
+        const nextBurmese =
+          opts.field === "all" || opts.field === "burmese" ? fn(sub.burmese) : sub.burmese;
+        const nextWords = sub.words.map((w) => ({
+          ...w,
+          phonetic:
+            opts.field === "all" || opts.field === "thaiPhonetic"
+              ? replaceSilent(w.phonetic)
+              : w.phonetic,
+          burmeseGloss:
+            opts.field === "all" || opts.field === "burmese"
+              ? w.burmeseGloss
+                ? replaceSilent(w.burmeseGloss)
+                : w.burmeseGloss
+              : w.burmeseGloss,
+        }));
+        return {
+          ...sub,
+          thaiPhonetic: nextPhonetic,
+          thaiScript: nextThai,
+          burmese: nextBurmese,
+          words: nextWords,
+        };
+      });
+
+    const nextSubs = transformList(project.subtitles, true);
+    if (totalMatches === 0) return 0;
+
+    pushSubtitleUndo();
+    if (timelineBaselineRef.current) {
+      timelineBaselineRef.current.subtitles = transformList(
+        timelineBaselineRef.current.subtitles,
+        false
+      );
+    }
+    setProject((prev) => (prev ? { ...prev, subtitles: nextSubs } : prev));
+    return totalMatches;
+  };
+
   const handleUpdateSubtitleTiming = (id: string, nextStart: number, nextEnd: number) => {
     if (!project) return;
+    pushSubtitleUndo();
     const maxDur = Math.max(0.5, project.targetDurationSec || 10);
     const startTime = Number(Math.max(0, Math.min(maxDur - 0.2, nextStart)).toFixed(2));
     const endTime = Number(Math.max(startTime + 0.2, Math.min(maxDur, nextEnd)).toFixed(2));
@@ -825,6 +1148,710 @@ export default function App() {
     }
 
     setProject((prev) => (prev ? { ...prev, subtitles: updateList(prev.subtitles) } : prev));
+  };
+
+  const handleShiftAllSubtitles = (deltaSec: number) => {
+    if (!project || project.subtitles.length === 0 || !Number.isFinite(deltaSec)) return;
+    pushSubtitleUndo();
+    const maxDur = Math.max(0.5, project.targetDurationSec || 10);
+
+    const shiftList = (list: SubtitleItem[]): SubtitleItem[] =>
+      list
+        .map((sub) => {
+          const origDur = Math.max(0.2, sub.endTime - sub.startTime);
+          const nextStart = Number(
+            Math.max(0, Math.min(Math.max(0, maxDur - 0.2), sub.startTime + deltaSec)).toFixed(2)
+          );
+          const nextEnd = Number(
+            Math.max(nextStart + 0.2, Math.min(maxDur, nextStart + origDur)).toFixed(2)
+          );
+          const mappedStart = mapCutTimeToSource(project.scenes, nextStart);
+          const mappedEnd = mapCutTimeToSource(project.scenes, nextEnd);
+          return {
+            ...sub,
+            sceneIndex: mappedStart.sceneIndex,
+            startTime: nextStart,
+            endTime: nextEnd,
+            sourceStartSec: Number(mappedStart.sourceSec.toFixed(2)),
+            sourceEndSec: Number(mappedEnd.sourceSec.toFixed(2)),
+          };
+        })
+        .sort((a, b) => a.startTime - b.startTime);
+
+    if (timelineBaselineRef.current) {
+      timelineBaselineRef.current.subtitles = shiftList(timelineBaselineRef.current.subtitles);
+    }
+
+    setProject((prev) => (prev ? { ...prev, subtitles: shiftList(prev.subtitles) } : prev));
+  };
+
+  const handleSplitSubtitle = (id: string) => {
+    if (!project) return;
+    const targetCheck = project.subtitles.find((s) => s.id === id);
+    if (!targetCheck || targetCheck.endTime - targetCheck.startTime < 0.45) return;
+    pushSubtitleUndo();
+    const splitTextProportional = (text: string, ratio: number): [string, string] => {
+      const clean = text.trim();
+      if (!clean) return ["", ""];
+      const tokens = clean.split(/\s+/);
+      if (tokens.length >= 2) {
+        const cutIdx = Math.max(1, Math.min(tokens.length - 1, Math.round(tokens.length * ratio)));
+        return [tokens.slice(0, cutIdx).join(" "), tokens.slice(cutIdx).join(" ")];
+      }
+      const chars = Array.from(clean);
+      if (chars.length < 4) return [clean, clean];
+      const cutChar = Math.max(2, Math.min(chars.length - 2, Math.round(chars.length * ratio)));
+      return [chars.slice(0, cutChar).join("").trim(), chars.slice(cutChar).join("").trim()];
+    };
+
+    const splitInList = (list: SubtitleItem[]): SubtitleItem[] => {
+      const idx = list.findIndex((s) => s.id === id);
+      if (idx === -1) return list;
+      const target = list[idx];
+      const dur = target.endTime - target.startTime;
+      if (dur < 0.45) return list;
+
+      const curCut = cutTimeRef.current;
+      const usePlayhead =
+        curCut > target.startTime + 0.22 && curCut < target.endTime - 0.22;
+      let splitTime = usePlayhead ? curCut : target.startTime + dur * 0.5;
+      let ratio = Math.max(0.2, Math.min(0.8, (splitTime - target.startTime) / dur));
+
+      let words1: SubtitleWord[];
+      let words2: SubtitleWord[];
+      let phonetic1: string;
+      let phonetic2: string;
+
+      if (target.words.length >= 2) {
+        const targetLocal = splitTime - target.startTime;
+        let splitWordIdx = target.words.findIndex((w, wi) => wi > 0 && w.startOffsetSec >= targetLocal);
+        if (splitWordIdx === -1) {
+          splitWordIdx = Math.max(
+            1,
+            Math.min(target.words.length - 1, Math.round(target.words.length * ratio))
+          );
+        }
+        splitWordIdx = Math.max(1, Math.min(target.words.length - 1, splitWordIdx));
+
+        const boundaryLocal = target.words[splitWordIdx].startOffsetSec;
+        if (boundaryLocal >= 0.2 && dur - boundaryLocal >= 0.2) {
+          splitTime = target.startTime + boundaryLocal;
+        }
+        splitTime = Number(
+          Math.max(target.startTime + 0.2, Math.min(target.endTime - 0.2, splitTime)).toFixed(2)
+        );
+        const firstDur = Math.max(0.2, Number((splitTime - target.startTime).toFixed(2)));
+        const secondDur = Math.max(0.2, Number((target.endTime - splitTime).toFixed(2)));
+        ratio = Math.max(0.15, Math.min(0.85, firstDur / dur));
+
+        words1 = target.words.slice(0, splitWordIdx).map((w, wi, arr) => ({
+          ...w,
+          startOffsetSec: Number(Math.min(firstDur - 0.05, Math.max(0, w.startOffsetSec)).toFixed(2)),
+          endOffsetSec: Number(
+            (wi === arr.length - 1
+              ? firstDur
+              : Math.min(firstDur, Math.max(w.startOffsetSec + 0.04, w.endOffsetSec))
+            ).toFixed(2)
+          ),
+        }));
+        words2 = target.words.slice(splitWordIdx).map((w, wi, arr) => {
+          const s = Math.max(0, w.startOffsetSec - firstDur);
+          const e = Math.max(s + 0.04, w.endOffsetSec - firstDur);
+          return {
+            ...w,
+            startOffsetSec: Number(Math.min(secondDur - 0.05, s).toFixed(2)),
+            endOffsetSec: Number((wi === arr.length - 1 ? secondDur : Math.min(secondDur, e)).toFixed(2)),
+          };
+        });
+        phonetic1 = words1.map((w) => w.phonetic).join(" ");
+        phonetic2 = words2.map((w) => w.phonetic).join(" ");
+      } else {
+        splitTime = Number(splitTime.toFixed(2));
+        const firstDur = Math.max(0.2, Number((splitTime - target.startTime).toFixed(2)));
+        const secondDur = Math.max(0.2, Number((target.endTime - splitTime).toFixed(2)));
+        [phonetic1, phonetic2] = splitTextProportional(target.thaiPhonetic, ratio);
+        words1 = buildWordsFromPhonetic(phonetic1, 0, firstDur);
+        words2 = buildWordsFromPhonetic(phonetic2, 0, secondDur);
+      }
+
+      const [burmese1, burmese2] = splitTextProportional(target.burmese, ratio);
+      const [thaiScript1, thaiScript2] = splitTextProportional(target.thaiScript, ratio);
+      const [spoken1, spoken2] = splitTextProportional(target.originalSpokenText, ratio);
+
+      const mappedStart = mapCutTimeToSource(project.scenes, target.startTime);
+      const mappedSplit = mapCutTimeToSource(project.scenes, splitTime);
+      const mappedEnd = mapCutTimeToSource(project.scenes, target.endTime);
+
+      const firstItem: SubtitleItem = {
+        ...target,
+        endTime: splitTime,
+        sourceStartSec: Number(mappedStart.sourceSec.toFixed(2)),
+        sourceEndSec: Number(mappedSplit.sourceSec.toFixed(2)),
+        originalSpokenText: spoken1,
+        thaiScript: thaiScript1,
+        thaiPhonetic: phonetic1,
+        burmese: burmese1,
+        words: words1,
+      };
+      const secondItem: SubtitleItem = {
+        id: `${target.id}-sp-${Date.now().toString(36).slice(-4)}`,
+        sceneIndex: mappedSplit.sceneIndex,
+        startTime: splitTime,
+        endTime: target.endTime,
+        sourceStartSec: Number(mappedSplit.sourceSec.toFixed(2)),
+        sourceEndSec: Number(mappedEnd.sourceSec.toFixed(2)),
+        originalSpokenText: spoken2,
+        thaiScript: thaiScript2,
+        thaiPhonetic: phonetic2,
+        burmese: burmese2,
+        words: words2,
+      };
+
+      const next = [...list];
+      next.splice(idx, 1, firstItem, secondItem);
+      return next.sort((a, b) => a.startTime - b.startTime);
+    };
+
+    if (timelineBaselineRef.current) {
+      timelineBaselineRef.current.subtitles = splitInList(timelineBaselineRef.current.subtitles);
+    }
+
+    setProject((prev) => (prev ? { ...prev, subtitles: splitInList(prev.subtitles) } : prev));
+  };
+
+  const handleMergeSubtitleWithNext = (id: string) => {
+    if (!project) return;
+    const mergeInList = (list: SubtitleItem[]): SubtitleItem[] => {
+      const idx = list.findIndex((s) => s.id === id);
+      if (idx === -1 || idx + 1 >= list.length) return list;
+      const cur = list[idx];
+      const nxt = list[idx + 1];
+
+      const mergedStart = Math.min(cur.startTime, nxt.startTime);
+      const mergedEnd = Math.max(cur.endTime, nxt.endTime);
+      const offsetShift = Math.max(0, nxt.startTime - mergedStart);
+
+      const mergedWords: SubtitleWord[] = [
+        ...cur.words.map((w) => ({ ...w })),
+        ...nxt.words.map((w) => ({
+          ...w,
+          startOffsetSec: Number((w.startOffsetSec + offsetShift).toFixed(2)),
+          endOffsetSec: Number((w.endOffsetSec + offsetShift).toFixed(2)),
+        })),
+      ];
+
+      const mappedStart = mapCutTimeToSource(project.scenes, mergedStart);
+      const mappedEnd = mapCutTimeToSource(project.scenes, mergedEnd);
+
+      const mergedItem: SubtitleItem = {
+        ...cur,
+        startTime: Number(mergedStart.toFixed(2)),
+        endTime: Number(mergedEnd.toFixed(2)),
+        sourceStartSec: Number(mappedStart.sourceSec.toFixed(2)),
+        sourceEndSec: Number(mappedEnd.sourceSec.toFixed(2)),
+        originalSpokenText: [cur.originalSpokenText, nxt.originalSpokenText]
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .join(" "),
+        thaiScript: [cur.thaiScript, nxt.thaiScript]
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .join(" "),
+        thaiPhonetic: [cur.thaiPhonetic, nxt.thaiPhonetic]
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .join(" "),
+        burmese: [cur.burmese, nxt.burmese]
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .join(" "),
+        words: mergedWords,
+      };
+
+      const next = [...list];
+      next.splice(idx, 2, mergedItem);
+      return next;
+    };
+
+    if (loopingSubIdRef.current) setLoopingSubId(null);
+
+    const mergeIdx = project.subtitles.findIndex((s) => s.id === id);
+    if (mergeIdx !== -1 && mergeIdx + 1 < project.subtitles.length) {
+      pushSubtitleUndo();
+    }
+
+    if (timelineBaselineRef.current) {
+      timelineBaselineRef.current.subtitles = mergeInList(timelineBaselineRef.current.subtitles);
+    }
+
+    setProject((prev) => (prev ? { ...prev, subtitles: mergeInList(prev.subtitles) } : prev));
+  };
+
+  const handleCancelRegenerateSubtitle = useCallback((id: string) => {
+    const ctrl = regenAbortMapRef.current.get(id);
+    if (ctrl) {
+      ctrl.abort();
+      regenAbortMapRef.current.delete(id);
+    }
+    setRegeneratingSubIds((prev) => prev.filter((itemId) => itemId !== id));
+  }, []);
+
+  const handleRegenerateSubtitle = async (
+    id: string,
+    customHint?: string,
+    toneOverride?: TranslationTone
+  ) => {
+    if (!project) return;
+    const idx = project.subtitles.findIndex((s) => s.id === id);
+    if (idx === -1) return;
+    if (regeneratingSubIds.includes(id)) return;
+
+    const targetSub = project.subtitles[idx];
+    const prevSub = idx > 0 ? project.subtitles[idx - 1] : null;
+    const nextSub = idx + 1 < project.subtitles.length ? project.subtitles[idx + 1] : null;
+
+    const controller = new AbortController();
+    regenAbortMapRef.current.set(id, controller);
+    setSubtitleRegenError(null);
+    setRegeneratingSubIds((prev) => (prev.includes(id) ? prev : [...prev, id]));
+
+    try {
+      const resolvedUploadId = project.uploadId || localMedia?.uploadId;
+      const resp = await fetch("/api/regenerate-subtitle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({
+          sourceType: project.sourceType,
+          videoId: project.videoId,
+          uploadId: resolvedUploadId,
+          customHint: customHint?.trim() || undefined,
+          translationTone: toneOverride ?? videoEdit.translationTone,
+          subtitle: {
+            id: targetSub.id,
+            startTime: targetSub.startTime,
+            endTime: targetSub.endTime,
+            sourceStartSec: targetSub.sourceStartSec,
+            sourceEndSec: targetSub.sourceEndSec,
+            originalSpokenText: targetSub.originalSpokenText,
+            thaiScript: targetSub.thaiScript,
+            thaiPhonetic: targetSub.thaiPhonetic,
+            burmese: targetSub.burmese,
+          },
+          prevContext: prevSub
+            ? {
+                originalSpokenText: prevSub.originalSpokenText,
+                thaiScript: prevSub.thaiScript,
+                thaiPhonetic: prevSub.thaiPhonetic,
+                burmese: prevSub.burmese,
+              }
+            : null,
+          nextContext: nextSub
+            ? {
+                originalSpokenText: nextSub.originalSpokenText,
+                thaiScript: nextSub.thaiScript,
+                thaiPhonetic: nextSub.thaiPhonetic,
+                burmese: nextSub.burmese,
+              }
+            : null,
+        }),
+      });
+
+      const data = await safeReadJson<{
+        subtitle?: {
+          originalSpokenText: string;
+          thaiScript: string;
+          thaiPhonetic: string;
+          burmese: string;
+          words: SubtitleWord[];
+        };
+        error?: string;
+      }>(resp);
+
+      if (!resp.ok || !data.subtitle) {
+        throw new Error(data.error || "Failed to regenerate subtitle with AI.");
+      }
+      if (controller.signal.aborted) return;
+
+      const updatedFields = data.subtitle;
+      const applyRegen = (list: SubtitleItem[]): SubtitleItem[] =>
+        list.map((sub) =>
+          sub.id === id
+            ? {
+                ...sub,
+                originalSpokenText: updatedFields.originalSpokenText,
+                thaiScript: updatedFields.thaiScript,
+                thaiPhonetic: updatedFields.thaiPhonetic,
+                burmese: updatedFields.burmese,
+                words: Array.isArray(updatedFields.words) ? updatedFields.words : sub.words,
+              }
+            : sub
+        );
+
+      pushSubtitleUndo();
+
+      if (timelineBaselineRef.current) {
+        timelineBaselineRef.current.subtitles = applyRegen(
+          timelineBaselineRef.current.subtitles
+        );
+      }
+
+      setProject((prev) =>
+        prev ? { ...prev, subtitles: applyRegen(prev.subtitles) } : prev
+      );
+    } catch (err) {
+      if (
+        controller.signal.aborted ||
+        (err instanceof DOMException && err.name === "AbortError")
+      ) {
+        return;
+      }
+      setSubtitleRegenError(
+        err instanceof Error ? err.message : "Failed to regenerate subtitle with AI."
+      );
+    } finally {
+      if (regenAbortMapRef.current.get(id) === controller) {
+        regenAbortMapRef.current.delete(id);
+      }
+      setRegeneratingSubIds((prev) => prev.filter((itemId) => itemId !== id));
+    }
+  };
+
+  const handleCancelRetranslateAll = useCallback(() => {
+    retranslateAbortRef.current?.abort();
+    retranslateAbortRef.current = null;
+    setIsRetranslatingAll(false);
+  }, []);
+
+  const handleRetranslateAll = async (tone: TranslationTone) => {
+    if (!project || project.subtitles.length === 0 || isRetranslatingAll) return;
+    retranslateAbortRef.current?.abort();
+    const controller = new AbortController();
+    retranslateAbortRef.current = controller;
+
+    setSubtitleRegenError(null);
+    setIsRetranslatingAll(true);
+
+    try {
+      const resp = await fetch("/api/retranslate-subtitles", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({
+          translationTone: tone,
+          subtitles: project.subtitles.map((s) => ({
+            id: s.id,
+            startTime: s.startTime,
+            endTime: s.endTime,
+            originalSpokenText: s.originalSpokenText,
+            thaiScript: s.thaiScript,
+            thaiPhonetic: s.thaiPhonetic,
+            burmese: s.burmese,
+          })),
+        }),
+      });
+
+      const data = await safeReadJson<{
+        subtitles?: Array<{
+          id: string;
+          thaiScript: string;
+          thaiPhonetic: string;
+          burmese: string;
+          words: SubtitleWord[];
+        }>;
+        error?: string;
+      }>(resp);
+
+      if (!resp.ok || !Array.isArray(data.subtitles)) {
+        throw new Error(data.error || "Failed to re-translate subtitles.");
+      }
+      if (controller.signal.aborted) return;
+
+      const byId = new Map(data.subtitles.map((item) => [item.id, item]));
+      const applyBatch = (list: SubtitleItem[]): SubtitleItem[] =>
+        list.map((sub) => {
+          const patch = byId.get(sub.id);
+          if (!patch) return sub;
+          return {
+            ...sub,
+            thaiScript: patch.thaiScript || sub.thaiScript,
+            thaiPhonetic: patch.thaiPhonetic || sub.thaiPhonetic,
+            burmese: patch.burmese || sub.burmese,
+            words: Array.isArray(patch.words) && patch.words.length > 0 ? patch.words : sub.words,
+          };
+        });
+
+      pushSubtitleUndo();
+
+      if (timelineBaselineRef.current) {
+        timelineBaselineRef.current.subtitles = applyBatch(
+          timelineBaselineRef.current.subtitles
+        );
+      }
+
+      setProject((prev) =>
+        prev ? { ...prev, subtitles: applyBatch(prev.subtitles) } : prev
+      );
+    } catch (err) {
+      if (
+        controller.signal.aborted ||
+        (err instanceof DOMException && err.name === "AbortError")
+      ) {
+        return;
+      }
+      setSubtitleRegenError(
+        err instanceof Error ? err.message : "Failed to re-translate subtitles."
+      );
+    } finally {
+      if (retranslateAbortRef.current === controller) {
+        retranslateAbortRef.current = null;
+      }
+      setIsRetranslatingAll(false);
+    }
+  };
+
+  const applySyncedTimingsToList = (
+    list: SubtitleItem[],
+    timingById: Map<string, { startTime: number; endTime: number }>,
+    scenes: SpeakingScene[],
+    maxDur: number
+  ): SubtitleItem[] => {
+    return list
+      .map((sub) => {
+        const next = timingById.get(sub.id);
+        const rawStart = next ? next.startTime : sub.startTime;
+        const rawEnd = next ? next.endTime : sub.endTime;
+        const startTime = Number(Math.max(0, Math.min(maxDur - 0.25, rawStart)).toFixed(2));
+        const endTime = Number(Math.max(startTime + 0.25, Math.min(maxDur, rawEnd)).toFixed(2));
+        const newDur = Math.max(0.25, endTime - startTime);
+        const oldDur = Math.max(0.2, sub.endTime - sub.startTime);
+        const scale = newDur / oldDur;
+        const mappedStart = mapCutTimeToSource(scenes, startTime);
+        const mappedEnd = mapCutTimeToSource(scenes, endTime);
+
+        const words =
+          sub.words.length > 0
+            ? sub.words.map((w, wi, arr) => {
+                const sOff = Number(
+                  Math.max(0, Math.min(newDur - 0.04, w.startOffsetSec * scale)).toFixed(2)
+                );
+                const eOff = Number(
+                  (wi === arr.length - 1
+                    ? newDur
+                    : Math.max(sOff + 0.04, Math.min(newDur, w.endOffsetSec * scale))
+                  ).toFixed(2)
+                );
+                return { ...w, startOffsetSec: sOff, endOffsetSec: eOff };
+              })
+            : buildWordsFromPhonetic(sub.thaiPhonetic, 0, newDur);
+
+        return {
+          ...sub,
+          sceneIndex: mappedStart.sceneIndex,
+          startTime,
+          endTime,
+          sourceStartSec: Number(mappedStart.sourceSec.toFixed(2)),
+          sourceEndSec: Number(mappedEnd.sourceSec.toFixed(2)),
+          words,
+        };
+      })
+      .sort((a, b) => a.startTime - b.startTime);
+  };
+
+  const handleAutoFixSubtitleTimings = () => {
+    if (!project || project.subtitles.length === 0) return;
+    setSubtitleRegenError(null);
+    const maxDur = Math.max(0.5, project.targetDurationSec || 10);
+
+    const fixList = (list: SubtitleItem[]): SubtitleItem[] => {
+      if (list.length === 0) return list;
+      const sorted = cloneSubtitleList(list).sort(
+        (a, b) => a.startTime - b.startTime || a.endTime - b.endTime
+      );
+
+      // Step 1: Clamp each subtitle within [0, maxDur] and ensure minimum readable span
+      const cleaned = sorted.map((sub) => {
+        const s = Number(Math.max(0, Math.min(maxDur - 0.35, sub.startTime)).toFixed(2));
+        const desiredEnd = Math.max(s + 0.4, sub.endTime);
+        const e = Number(Math.min(maxDur, desiredEnd).toFixed(2));
+        return { ...sub, nextStart: s, nextEnd: e };
+      });
+
+      // Step 2: Eliminate overlaps cleanly & smooth micro-flicker gaps (< 0.14s)
+      for (let i = 1; i < cleaned.length; i++) {
+        const prev = cleaned[i - 1];
+        const curr = cleaned[i];
+        const minGap = 0.02;
+
+        if (curr.nextStart < prev.nextEnd + minGap) {
+          const totalAvailable = curr.nextEnd - prev.nextStart;
+          if (totalAvailable >= 0.72) {
+            const mid = (prev.nextEnd + curr.nextStart) / 2;
+            const prevEnd = Math.max(prev.nextStart + 0.35, Math.min(curr.nextEnd - 0.37, mid - 0.01));
+            prev.nextEnd = Number(prevEnd.toFixed(2));
+            curr.nextStart = Number((prev.nextEnd + minGap).toFixed(2));
+            curr.nextEnd = Number(Math.max(curr.nextStart + 0.35, Math.min(maxDur, curr.nextEnd)).toFixed(2));
+          } else {
+            const nextS = Math.min(maxDur - 0.35, prev.nextEnd + minGap);
+            if (nextS > prev.nextStart + 0.35) {
+              curr.nextStart = Number(nextS.toFixed(2));
+              curr.nextEnd = Number(Math.max(curr.nextStart + 0.35, Math.min(maxDur, curr.nextEnd)).toFixed(2));
+            }
+          }
+        } else {
+          const gap = curr.nextStart - prev.nextEnd;
+          if (gap > minGap && gap <= 0.14) {
+            prev.nextEnd = Number((curr.nextStart - minGap).toFixed(2));
+          }
+        }
+      }
+
+      const timingMap = new Map(
+        cleaned.map((item) => [item.id, { startTime: item.nextStart, endTime: item.nextEnd }])
+      );
+      return applySyncedTimingsToList(list, timingMap, project.scenes, maxDur);
+    };
+
+    pushSubtitleUndo();
+    if (timelineBaselineRef.current) {
+      timelineBaselineRef.current.subtitles = fixList(timelineBaselineRef.current.subtitles);
+    }
+    setProject((prev) => (prev ? { ...prev, subtitles: fixList(prev.subtitles) } : prev));
+  };
+
+  const handleCancelAiResync = useCallback(() => {
+    resyncAbortRef.current?.abort();
+    resyncAbortRef.current = null;
+    setIsResyncingTimings(false);
+  }, []);
+
+  const handleAiResyncSubtitles = async () => {
+    if (!project || project.subtitles.length === 0 || isResyncingTimings) return;
+    resyncAbortRef.current?.abort();
+    const controller = new AbortController();
+    resyncAbortRef.current = controller;
+
+    setSubtitleRegenError(null);
+    setIsResyncingTimings(true);
+
+    try {
+      let uploadId = project.uploadId || localMedia?.uploadId;
+      const localFile = project.localFile || localMedia?.localFile;
+
+      if (project.sourceType === "local" && !uploadId && localFile) {
+        uploadId = await uploadBlobInChunks(
+          localFile,
+          localFile.name,
+          controller.signal
+        );
+        if (controller.signal.aborted) return;
+        setLocalMedia((prev) => (prev ? { ...prev, uploadId } : prev));
+        setProject((prev) => (prev ? { ...prev, uploadId } : prev));
+      }
+
+      const payloadBody = (activeUploadId?: string) =>
+        JSON.stringify({
+          sourceType: project.sourceType,
+          videoId: project.videoId,
+          uploadId: activeUploadId,
+          scenes: project.scenes.map((sc) => ({
+            startSec: sc.startSec,
+            endSec: sc.endSec,
+            durationSec: sc.durationSec,
+          })),
+          subtitles: project.subtitles.map((s) => ({
+            id: s.id,
+            startTime: s.startTime,
+            endTime: s.endTime,
+            originalSpokenText: s.originalSpokenText,
+            thaiScript: s.thaiScript,
+            thaiPhonetic: s.thaiPhonetic,
+            burmese: s.burmese,
+          })),
+        });
+
+      let resp = await fetch("/api/resync-subtitles", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: payloadBody(uploadId),
+        signal: controller.signal,
+      });
+
+      if (resp.status === 404 && project.sourceType === "local" && localFile) {
+        uploadId = await uploadBlobInChunks(
+          localFile,
+          localFile.name,
+          controller.signal
+        );
+        if (controller.signal.aborted) return;
+        setLocalMedia((prev) => (prev ? { ...prev, uploadId } : prev));
+        setProject((prev) => (prev ? { ...prev, uploadId } : prev));
+        resp = await fetch("/api/resync-subtitles", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: payloadBody(uploadId),
+          signal: controller.signal,
+        });
+      }
+
+      const data = await safeReadJson<{
+        subtitles?: Array<{ id: string; startTime: number; endTime: number }>;
+        error?: string;
+      }>(resp);
+
+      if (!resp.ok || !Array.isArray(data.subtitles)) {
+        throw new Error(data.error || "Failed to auto-sync subtitle timings with AI.");
+      }
+      if (controller.signal.aborted) return;
+
+      const maxDur = Math.max(0.5, project.targetDurationSec || 10);
+      const timingById = new Map(
+        data.subtitles.map((item) => [
+          item.id,
+          { startTime: item.startTime, endTime: item.endTime },
+        ])
+      );
+
+      pushSubtitleUndo();
+
+      if (timelineBaselineRef.current) {
+        timelineBaselineRef.current.subtitles = applySyncedTimingsToList(
+          timelineBaselineRef.current.subtitles,
+          timingById,
+          project.scenes,
+          maxDur
+        );
+      }
+
+      setProject((prev) =>
+        prev
+          ? {
+              ...prev,
+              subtitles: applySyncedTimingsToList(
+                prev.subtitles,
+                timingById,
+                prev.scenes,
+                maxDur
+              ),
+            }
+          : prev
+      );
+    } catch (err) {
+      if (
+        controller.signal.aborted ||
+        (err instanceof DOMException && err.name === "AbortError")
+      ) {
+        return;
+      }
+      setSubtitleRegenError(
+        err instanceof Error ? err.message : "Failed to auto-sync subtitle timings with AI."
+      );
+    } finally {
+      if (resyncAbortRef.current === controller) {
+        resyncAbortRef.current = null;
+      }
+      setIsResyncingTimings(false);
+    }
   };
 
   const handleDownloadMp4 = async () => {
@@ -947,19 +1974,38 @@ export default function App() {
     ]
   );
 
-  // Support Ctrl+S / Cmd+S shortcut to save offline
+  // Support Ctrl+S / Cmd+S to save offline and Ctrl+Z / Ctrl+Shift+Z for subtitle Undo/Redo
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      const key = e.key.toLowerCase();
+      if (key === "s") {
         e.preventDefault();
         if (canSaveCurrent) {
           handleSaveProject(false);
+        }
+        return;
+      }
+
+      if (activeTab === "script" && projectRef.current) {
+        const target = e.target as HTMLElement | null;
+        const tag = target?.tagName;
+        const inTextField =
+          tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target?.isContentEditable;
+        if (inTextField) return;
+
+        if (key === "z" && !e.shiftKey) {
+          e.preventDefault();
+          handleUndoSubtitles();
+        } else if ((key === "z" && e.shiftKey) || key === "y") {
+          e.preventDefault();
+          handleRedoSubtitles();
         }
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [canSaveCurrent, handleSaveProject]);
+  }, [activeTab, canSaveCurrent, handleSaveProject, handleUndoSubtitles, handleRedoSubtitles]);
 
   const handleOpenSavedProject = async (record: SavedProjectRecord) => {
     activeRunIdRef.current++;
@@ -1159,7 +2205,9 @@ export default function App() {
   return (
     <div
       className={`${
-        activeTab === "edit" ? "h-[100dvh] overflow-hidden" : "min-h-screen lg:h-screen"
+        activeTab === "edit" || activeTab === "script"
+          ? "h-[100dvh] overflow-hidden"
+          : "min-h-screen lg:h-screen"
       } flex flex-col bg-white text-neutral-950 dark:bg-neutral-950 dark:text-neutral-50 transition-colors duration-150`}
     >
       {/* Minimal 3-Zone Top Bar */}
@@ -1291,9 +2339,24 @@ export default function App() {
 
       {/* Main Workspace */}
       {(() => {
-        const showStage = activeTab !== "videos" && activeTab !== "ytPreview";
-        const isEditFocus = activeTab === "edit";
-        const renderInlineStageInSidebar = showStage && isEditFocus && !isDesktop;
+        const showStage =
+          activeTab !== "videos" && activeTab !== "ytPreview" && activeTab !== "scenes";
+        const isStageFocus = activeTab === "edit" || activeTab === "script";
+        const renderInlineStageInSidebar = showStage && isStageFocus && !isDesktop;
+        const desktopSidebarCols = !showStage
+          ? "lg:col-span-12"
+          : isStageFocus && stagePreviewSize === "big"
+            ? "lg:col-span-6"
+            : isStageFocus && stagePreviewSize === "compact"
+              ? "lg:col-span-8"
+              : "lg:col-span-7";
+        const desktopStageCols =
+          isStageFocus && stagePreviewSize === "big"
+            ? "lg:col-span-6"
+            : isStageFocus && stagePreviewSize === "compact"
+              ? "lg:col-span-4"
+              : "lg:col-span-5";
+
         const stageNode = showStage ? (
           <Stage9x16
             project={project}
@@ -1309,24 +2372,24 @@ export default function App() {
             onTimeUpdate={handlePlayerTimeUpdate}
             onEnded={handlePlaybackEnded}
             onToggleMute={() => setMuted((m) => !m)}
-            compactMobile={isEditFocus}
+            compactMobile={isStageFocus}
+            previewSize={isStageFocus ? stagePreviewSize : "normal"}
+            onChangePreviewSize={isStageFocus ? setStagePreviewSize : undefined}
           />
         ) : null;
 
         return (
           <main
             className={`flex-1 min-h-0 max-w-[1440px] w-full mx-auto px-4 sm:px-6 py-4 ${
-              isEditFocus
+              isStageFocus
                 ? "flex flex-col lg:grid lg:grid-cols-12 gap-3 lg:gap-6 overflow-hidden"
                 : "grid grid-cols-1 lg:grid-cols-12 gap-6"
             }`}
           >
             {/* Left / Full: Video Picker, YouTube Preview, Watch & Custom Scene Selection, Subtitles, Voice, and Saved Projects */}
             <section
-              className={`${
-                showStage ? "lg:col-span-7" : "lg:col-span-12"
-              } ${
-                isEditFocus ? "flex-1 min-h-0" : "min-h-0"
+              className={`${desktopSidebarCols} ${
+                isStageFocus ? "flex-1 min-h-0" : "min-h-0"
               } flex flex-col`}
             >
           {processError && (
@@ -1394,6 +2457,7 @@ export default function App() {
               setYoutubeMedia((prev) => (prev ? { ...prev, durationSec: dur } : prev))
             }
             onGenerateSubtitles={handleGenerateSubtitles}
+            onCancelGenerateSubtitles={handleCancelGenerateSubtitles}
             onChangeVoiceSettings={setVoiceSettings}
             onChangeEditSettings={setVideoEdit}
             onUploadLocalVideo={handleUploadLocalVideo}
@@ -1406,9 +2470,32 @@ export default function App() {
             onRestoreProjectSnapshot={handleRestoreProjectSnapshot}
             onResetTimeline={handleResetTimeline}
             onUpdateSubtitle={handleUpdateSubtitle}
+            onUpdateWordGloss={handleUpdateWordGloss}
+            onFindReplaceSubtitles={handleFindReplaceSubtitles}
             onAddSubtitle={handleAddSubtitle}
             onDeleteSubtitle={handleDeleteSubtitle}
             onUpdateSubtitleTiming={handleUpdateSubtitleTiming}
+            onSplitSubtitle={handleSplitSubtitle}
+            onMergeSubtitleWithNext={handleMergeSubtitleWithNext}
+            onShiftAllSubtitles={handleShiftAllSubtitles}
+            loopingSubId={loopingSubId}
+            onToggleLoopSubtitle={handleToggleLoopSubtitle}
+            canUndoSubtitles={subUndoStack.length > 0}
+            canRedoSubtitles={subRedoStack.length > 0}
+            onUndoSubtitles={handleUndoSubtitles}
+            onRedoSubtitles={handleRedoSubtitles}
+            onAutoFixSubtitleTimings={handleAutoFixSubtitleTimings}
+            onAiResyncSubtitles={handleAiResyncSubtitles}
+            onCancelAiResync={handleCancelAiResync}
+            isResyncingTimings={isResyncingTimings}
+            onRegenerateSubtitle={handleRegenerateSubtitle}
+            onCancelRegenerateSubtitle={handleCancelRegenerateSubtitle}
+            onRetranslateAll={handleRetranslateAll}
+            onCancelRetranslateAll={handleCancelRetranslateAll}
+            regeneratingSubIds={regeneratingSubIds}
+            isRetranslatingAll={isRetranslatingAll}
+            subtitleRegenError={subtitleRegenError}
+            onClearSubtitleRegenError={() => setSubtitleRegenError(null)}
             onSaveProject={handleSaveProject}
             onOpenSavedProject={handleOpenSavedProject}
             onRenameSavedProject={handleRenameSavedProject}
@@ -1425,7 +2512,7 @@ export default function App() {
 
         {/* Right: Focused 9:16 Stage */}
         {showStage && !renderInlineStageInSidebar && (
-          <section className="lg:col-span-5 flex items-center justify-center min-h-0">
+          <section className={`${desktopStageCols} flex items-center justify-center min-h-0`}>
             {stageNode}
           </section>
         )}

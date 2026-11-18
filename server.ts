@@ -10,6 +10,7 @@ import { GoogleGenAI, Type, ThinkingLevel } from "@google/genai";
 import type {
   SpeakingScene,
   SubtitleItem,
+  TranslationTone,
   VoiceSettings,
   YouTubeLicenseFilter,
   YouTubeVideo,
@@ -233,7 +234,8 @@ async function withRetry<T>(fn: () => Promise<T>, maxAttempts = 2): Promise<T> {
 async function generateGroundedWithFailover(
   ai: GoogleGenAI,
   contents: Parameters<GoogleGenAI["models"]["generateContent"]>[0]["contents"],
-  schema: Record<string, unknown>
+  schema: Record<string, unknown>,
+  thinkingLevel: ThinkingLevel = ThinkingLevel.MEDIUM
 ) {
   try {
     return await withRetry(() =>
@@ -241,7 +243,7 @@ async function generateGroundedWithFailover(
         model: "gemini-4-hydrogen",
         contents,
         config: {
-          thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM },
+          thinkingConfig: { thinkingLevel },
           responseMimeType: "application/json",
           responseSchema: schema,
         },
@@ -1106,12 +1108,42 @@ interface RawSceneUtterances {
   }[];
 }
 
+function normalizeTranslationTone(raw?: unknown): TranslationTone {
+  if (raw === "formal" || raw === "dramatic" || raw === "literal") {
+    return raw;
+  }
+  return "casual";
+}
+
+function getTranslationToneInstruction(tone: TranslationTone): string {
+  switch (tone) {
+    case "formal":
+      return `TRANSLATION TONE (Polite / Educational Burmese):
+- Use polite, clear, courteous spoken/teaching Burmese (e.g. ကျွန်တော်/ကျွန်မ, ခင်ဗျား/ရှင်, ပါတယ်/ပါ, ခင်ဗျာ/ရှင့် when appropriate).
+- Avoid overly rough slang while remaining natural and easy to follow for learners.`;
+    case "dramatic":
+      return `TRANSLATION TONE (Expressive / Drama & Comedy Burmese):
+- Use vivid, expressive, emotionally punchy Burmese that captures excitement, teasing, surprise, or dramatic flair (e.g. ဟာ, တကယ်ကြီးလား, ဖြစ်ရလေ, အမလေး, etc. when matching the speaker's energy).
+- Match the speaker's emotional emphasis naturally.`;
+    case "literal":
+      return `TRANSLATION TONE (Literal / Learner Accuracy Burmese):
+- Translate faithfully and closely to the exact Thai words and grammatical structure so Thai learners can clearly see how each phrase maps to Burmese.
+- Keep "burmeseGloss" extra accurate and explicit for key content words.`;
+    case "casual":
+    default:
+      return `TRANSLATION TONE (Natural Spoken Burmese):
+- Use natural, everyday conversational Burmese (e.g. တယ်, လေ, နော်, ပေါ့, ငါ/မင်း/သူ where matching speaker familiarity) just like real people speak in daily life.
+- Prefer idiomatic spoken phrasing over stiff textbook prose.`;
+  }
+}
+
 function getClipPrompt(
   clipDurationSec: number,
   sourceStartSec: number,
   sourceEndSec: number,
   speechWindows?: { startSec: number; endSec: number }[],
-  isSlicedLocalAudio = false
+  isSlicedLocalAudio = false,
+  translationTone: TranslationTone = "casual"
 ): string {
   const scopeDesc = isSlicedLocalAudio
     ? `this ${clipDurationSec.toFixed(1)}-second audio clip`
@@ -1134,11 +1166,13 @@ CRITICAL GROUNDING & TIMING RULES:
 - NEVER round timestamps to whole seconds, and NEVER include leading or trailing silent pauses inside an utterance's startSec/endSec. Start right when the voice begins and end right when the voice stops.
 - Utterances must be strictly chronological and non-overlapping.
 
+${getTranslationToneInstruction(translationTone)}
+
 For each spoken sentence/utterance in this clip:
 - "originalSpokenText": Exact verbatim words spoken in the audio.
 - "thaiScript": Verbatim Thai if spoken in Thai, otherwise accurate natural Thai translation of what was spoken.
 - "thaiPhonetic": Clear, easy-to-read English phonetic spelling of the Thai pronunciation (e.g. "Sa-wat-dee khrap").
-- "burmese": Accurate Burmese translation (မြန်မာဘာသာပြန်) matching what was spoken.
+- "burmese": Accurate Burmese translation (မြန်မာဘာသာပြန်) matching what was spoken and following the translation tone above.
 - "words": Split "thaiPhonetic" into space-separated word tokens in exact spoken order (each item's "phonetic" must match each token in "thaiPhonetic"), with matching Thai word, a 1-2 word Burmese gloss for key content words (empty string for particles), AND exact "startSec" and "endSec" timestamps (relative to 0.0s clip start) matching when each word is actually spoken.`;
 }
 
@@ -1862,7 +1896,8 @@ async function extractEmbeddedSubtitles(
 
 function getEmbeddedSubtitlesPrompt(
   clipDurationSec: number,
-  cues: EmbeddedCue[]
+  cues: EmbeddedCue[],
+  translationTone: TranslationTone = "casual"
 ): string {
   const cuePayload = cues.map((c, idx) => ({
     index: idx,
@@ -1875,12 +1910,14 @@ function getEmbeddedSubtitlesPrompt(
 EMBEDDED SUBTITLE CUES (JSON):
 ${JSON.stringify(cuePayload)}
 
+${getTranslationToneInstruction(translationTone)}
+
 CRITICAL RULES FOR EMBEDDED SUBTITLES:
 - You MUST set "hasDialogue": true and return EXACTLY ${cues.length} items in "utterances", one for each embedded cue in the exact same order (index 0 to ${cues.length - 1}).
 - For each utterance, KEEP the exact "startSec", "endSec", and "originalSpokenText" from the corresponding embedded cue.
 - "thaiScript": Exact Thai script of the cue (keep verbatim if already Thai, or natural Thai translation if another language).
 - "thaiPhonetic": Clear English phonetic pronunciation of the Thai speech (e.g. "Sa-wat-dee khrap").
-- "burmese": Accurate Burmese translation (မြန်မာဘာသာပြန်) of the cue.
+- "burmese": Accurate Burmese translation (မြန်မာဘာသာပြန်) of the cue following the translation tone above.
 - "words": Split "thaiPhonetic" into space-separated word tokens in exact spoken order, with matching Thai word, 1-2 word Burmese gloss for key content words (empty string for particles), AND word-level "startSec" and "endSec" aligned within that cue's [startSec, endSec] range matching the audio.`;
 }
 
@@ -1940,7 +1977,8 @@ async function processUploadedVideo(
   uploadId: string,
   title: string,
   durationSec: number,
-  parsedScenes: { startSec: number; endSec: number }[]
+  parsedScenes: { startSec: number; endSec: number }[],
+  translationTone: TranslationTone = "casual"
 ) {
   const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "upload-vid-"));
   try {
@@ -2005,7 +2043,9 @@ async function processUploadedVideo(
             const audioBuf = await fs.promises.readFile(segAudioPath);
             parts.push({ inlineData: { mimeType: "audio/mp3", data: audioBuf.toString("base64") } });
           }
-          parts.push({ text: getEmbeddedSubtitlesPrompt(sc.durationSec, sceneCues) });
+          parts.push({
+            text: getEmbeddedSubtitlesPrompt(sc.durationSec, sceneCues, translationTone),
+          });
 
           const resp = await generateGroundedWithFailover(
             ai,
@@ -2097,7 +2137,14 @@ async function processUploadedVideo(
                 parts: [
                   { inlineData: { mimeType: "audio/wav", data: wavBuf.toString("base64") } },
                   {
-                    text: getClipPrompt(chDur, absStart, absStart + chDur, chWindows, true),
+                    text: getClipPrompt(
+                      chDur,
+                      absStart,
+                      absStart + chDur,
+                      chWindows,
+                      true,
+                      translationTone
+                    ),
                   },
                 ],
               },
@@ -2356,11 +2403,13 @@ app.post("/api/process-upload", async (req, res) => {
       title = "Uploaded Video",
       durationSec = 120,
       selectedScenes = [],
+      translationTone,
     } = req.body as {
       uploadId?: string;
       title?: string;
       durationSec?: number;
       selectedScenes?: { startSec: number; endSec: number }[];
+      translationTone?: TranslationTone;
     };
 
     if (!uploadId) {
@@ -2368,6 +2417,7 @@ app.post("/api/process-upload", async (req, res) => {
       return;
     }
 
+    const tone = normalizeTranslationTone(translationTone);
     const lockedResult = await withUploadSessionLock(
       uploadId,
       async (persistentPath) =>
@@ -2376,7 +2426,8 @@ app.post("/api/process-upload", async (req, res) => {
           uploadId,
           title,
           Math.max(5, Number(durationSec) || 120),
-          selectedScenes
+          selectedScenes,
+          tone
         ),
       { markFinalized: true }
     );
@@ -2448,6 +2499,7 @@ app.post(
       const durationSec = Math.max(5, Number(req.headers["x-video-duration"]) || 120);
       const rawScenesHeader = String(req.headers["x-selected-scenes"] || "[]");
       const parsedScenes = JSON.parse(rawScenesHeader) as { startSec: number; endSec: number }[];
+      const tone = normalizeTranslationTone(req.headers["x-translation-tone"]);
 
       const uploadId = crypto.randomUUID();
       const ext = sanitizeVideoExtension(title);
@@ -2460,7 +2512,7 @@ app.post(
       });
 
       const lockedResult = await withUploadSessionLock(uploadId, async (lockedPath) =>
-        processUploadedVideo(lockedPath, uploadId, title, durationSec, parsedScenes)
+        processUploadedVideo(lockedPath, uploadId, title, durationSec, parsedScenes, tone)
       );
       if (!lockedResult) {
         res.status(500).json({ error: "Uploaded session unexpectedly expired." });
@@ -2485,12 +2537,14 @@ app.post("/api/process-video", async (req, res) => {
       channel,
       durationSec = 180,
       selectedScenes = [],
+      translationTone,
     } = req.body as {
       videoId?: string;
       title?: string;
       channel?: string;
       durationSec?: number;
       selectedScenes?: { startSec: number; endSec: number }[];
+      translationTone?: TranslationTone;
     };
 
     if (!videoId) {
@@ -2498,6 +2552,7 @@ app.post("/api/process-video", async (req, res) => {
       return;
     }
 
+    const tone = normalizeTranslationTone(translationTone);
     const scenes = normalizeSelectedScenes(selectedScenes, Math.max(10, Number(durationSec) || 600));
     if (scenes.length === 0) {
       res.status(400).json({ error: "Please select at least one scene before generating subtitles." });
@@ -2525,7 +2580,16 @@ app.post("/api/process-video", async (req, res) => {
                     fps: 0.5,
                   },
                 },
-                { text: getClipPrompt(sc.durationSec, sc.startSec, sc.endSec) },
+                {
+                  text: getClipPrompt(
+                    sc.durationSec,
+                    sc.startSec,
+                    sc.endSec,
+                    undefined,
+                    false,
+                    tone
+                  ),
+                },
               ],
             },
           ],
@@ -2567,6 +2631,770 @@ app.post("/api/process-video", async (req, res) => {
     res.status(500).json({
       error: err instanceof Error ? err.message : "Failed to transcribe selected scenes.",
     });
+  }
+});
+
+const singleSubtitleSchema = {
+  type: Type.OBJECT,
+  properties: {
+    originalSpokenText: {
+      type: Type.STRING,
+      description: "Exact verbatim spoken words heard in this subtitle segment.",
+    },
+    thaiScript: {
+      type: Type.STRING,
+      description: "Accurate Thai script for this line.",
+    },
+    thaiPhonetic: {
+      type: Type.STRING,
+      description:
+        "Clear, accurate English phonetic pronunciation of the Thai speech (e.g. 'Sa-wat-dee khrap').",
+    },
+    burmese: {
+      type: Type.STRING,
+      description:
+        "Natural, accurate Burmese translation (မြန်မာဘာသာပြန်) matching the spoken meaning and dialogue context.",
+    },
+    words: {
+      type: Type.ARRAY,
+      description:
+        "Word-by-word breakdown matching space-separated tokens in thaiPhonetic with Thai word, short Burmese gloss, and word offsets relative to 0.0 start of this line.",
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          phonetic: { type: Type.STRING },
+          thai: { type: Type.STRING },
+          burmeseGloss: { type: Type.STRING },
+          startSec: { type: Type.NUMBER },
+          endSec: { type: Type.NUMBER },
+        },
+        required: ["phonetic", "thai", "burmeseGloss", "startSec", "endSec"],
+      },
+    },
+  },
+  required: ["originalSpokenText", "thaiScript", "thaiPhonetic", "burmese", "words"],
+};
+
+interface RegenerateContextLine {
+  originalSpokenText?: string;
+  thaiScript?: string;
+  thaiPhonetic?: string;
+  burmese?: string;
+}
+
+app.post("/api/regenerate-subtitle", async (req, res) => {
+  const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "thai-regen-sub-"));
+  try {
+    const {
+      sourceType,
+      videoId,
+      uploadId,
+      subtitle,
+      prevContext,
+      nextContext,
+      customHint,
+      translationTone,
+    } = (req.body || {}) as {
+      sourceType?: "local" | "youtube";
+      videoId?: string;
+      uploadId?: string;
+      subtitle?: {
+        id?: string;
+        startTime?: number;
+        endTime?: number;
+        sourceStartSec?: number;
+        sourceEndSec?: number;
+        originalSpokenText?: string;
+        thaiScript?: string;
+        thaiPhonetic?: string;
+        burmese?: string;
+      };
+      prevContext?: RegenerateContextLine | null;
+      nextContext?: RegenerateContextLine | null;
+      customHint?: string;
+      translationTone?: TranslationTone;
+    };
+
+    if (!subtitle) {
+      res.status(400).json({ error: "Missing subtitle payload." });
+      return;
+    }
+
+    const tone = normalizeTranslationTone(translationTone);
+    const trimmedHint = typeof customHint === "string" ? customHint.trim().slice(0, 400) : "";
+
+    const startTime = Number(subtitle.startTime) || 0;
+    const endTime = Math.max(startTime + 0.35, Number(subtitle.endTime) || startTime + 1.5);
+    const lineDur = Math.max(0.35, endTime - startTime);
+    const srcStart = Math.max(0, Number(subtitle.sourceStartSec ?? startTime) || 0);
+    const srcEnd = Math.max(srcStart + 0.35, Number(subtitle.sourceEndSec ?? srcStart + lineDur) || srcStart + lineDur);
+
+    const contextLines: string[] = [];
+    if (prevContext && (prevContext.originalSpokenText || prevContext.burmese)) {
+      contextLines.push(
+        `Previous line: spoken="${prevContext.originalSpokenText || ""}" | thai="${prevContext.thaiScript || ""}" | burmese="${prevContext.burmese || ""}"`
+      );
+    }
+    if (nextContext && (nextContext.originalSpokenText || nextContext.burmese)) {
+      contextLines.push(
+        `Next line: spoken="${nextContext.originalSpokenText || ""}" | thai="${nextContext.thaiScript || ""}" | burmese="${nextContext.burmese || ""}"`
+      );
+    }
+    const contextBlock =
+      contextLines.length > 0
+        ? `\nSURROUNDING DIALOGUE CONTEXT:\n${contextLines.join("\n")}\n`
+        : "";
+
+    const userHintBlock = trimmedHint
+      ? `\nUSER CORRECTION HINT / INSTRUCTION (HIGH PRIORITY — follow this guidance closely):\n"${trimmedHint}"\n`
+      : "";
+
+    const prevAttemptBlock = `PREVIOUSLY GENERATED SUBTITLE (flagged by the user for regeneration/refinement — re-evaluate carefully):
+- originalSpokenText: ${subtitle.originalSpokenText || "(none)"}
+- thaiScript: ${subtitle.thaiScript || "(none)"}
+- thaiPhonetic: ${subtitle.thaiPhonetic || "(none)"}
+- burmese: ${subtitle.burmese || "(none)"}`;
+
+    let audioBase64: string | null = null;
+    if (sourceType === "local" && uploadId) {
+      audioBase64 = await withUploadSessionLock(uploadId, async (uploadedPath) => {
+        const clipStart = Math.max(0, srcStart - 0.18);
+        const clipDur = Math.max(0.5, srcEnd - clipStart + 0.18);
+        const wavPath = path.join(tmpDir, "line.wav");
+        try {
+          await execFileAsync(
+            "ffmpeg",
+            [
+              "-y",
+              "-vn",
+              "-ss",
+              clipStart.toFixed(3),
+              "-t",
+              clipDur.toFixed(3),
+              "-i",
+              uploadedPath,
+              "-ac",
+              "1",
+              "-ar",
+              "16000",
+              wavPath,
+            ],
+            FFMPEG_EXEC_OPTS
+          );
+          if (fs.existsSync(wavPath) && fs.statSync(wavPath).size > 44) {
+            const buf = await fs.promises.readFile(wavPath);
+            return buf.toString("base64");
+          }
+        } catch {
+          // Fall back cleanly if segment audio extraction fails
+        }
+        return null;
+      });
+    }
+
+    const useYouTubeAudio = sourceType === "youtube" && Boolean(videoId);
+    const hasAudio = Boolean(audioBase64) || useYouTubeAudio;
+
+    const promptText = `${
+      hasAudio
+        ? `Listen very carefully to the SPOKEN AUDIO of this single ${lineDur.toFixed(2)}-second dialogue line.`
+        : `Re-transcribe/correct and accurately translate this single ${lineDur.toFixed(2)}-second dialogue line using the spoken text and surrounding dialogue context.`
+    }
+${contextBlock}${userHintBlock}
+${getTranslationToneInstruction(tone)}
+
+${prevAttemptBlock}
+
+TASK:
+1. ${
+      hasAudio
+        ? "Re-listen to the audio carefully to catch every spoken syllable, slang, particle, or idiom accurately (do NOT blindly copy mistakes from the previous attempt)."
+        : "Carefully fix any mistranslation, awkward phrasing, or mis-segmented words in the previous attempt."
+    }${trimmedHint ? "\n   Respect the USER CORRECTION HINT above as primary guidance for meaning, names, or phrasing." : ""}
+2. Output natural, accurate, idiomatic Burmese translation (မြန်မာဘာသာပြန်) matching the chosen tone and conversational context.
+3. Provide accurate "thaiScript", clear English "thaiPhonetic" pronunciation (e.g. "Sa-wat-dee khrap"), and a matching word-by-word "words" breakdown aligned within [0.0, ${lineDur.toFixed(2)}] seconds (each word having "phonetic", "thai", 1-2 word "burmeseGloss" for content words or "" for particles, "startSec", and "endSec").`;
+
+    const ai = getGeminiClient();
+    let contents: Parameters<typeof generateGroundedWithFailover>[1];
+    if (audioBase64) {
+      contents = {
+        parts: [
+          { inlineData: { mimeType: "audio/wav", data: audioBase64 } },
+          { text: promptText },
+        ],
+      };
+    } else if (useYouTubeAudio && videoId) {
+      const metaStart = Math.max(0, Math.floor(srcStart - 0.8));
+      const metaEnd = Math.max(metaStart + 2, Math.ceil(srcEnd + 0.8));
+      contents = [
+        {
+          role: "user",
+          parts: [
+            {
+              fileData: {
+                fileUri: `https://www.youtube.com/watch?v=${videoId}`,
+              },
+              videoMetadata: {
+                startOffset: `${metaStart}s`,
+                endOffset: `${metaEnd}s`,
+                fps: 0.5,
+              },
+            },
+            { text: promptText },
+          ],
+        },
+      ];
+    } else {
+      contents = promptText;
+    }
+
+    const resp = await generateGroundedWithFailover(
+      ai,
+      contents,
+      singleSubtitleSchema,
+      ThinkingLevel.HIGH
+    );
+
+    const raw = JSON.parse((resp.text || "{}").trim()) as {
+      originalSpokenText?: string;
+      thaiScript?: string;
+      thaiPhonetic?: string;
+      burmese?: string;
+      words?: RawSceneWord[];
+    };
+
+    const thaiPhonetic = (raw.thaiPhonetic || "").trim() || subtitle.thaiPhonetic || "";
+    const rawWords: RawSceneWord[] =
+      Array.isArray(raw.words) && raw.words.length > 0
+        ? raw.words
+        : thaiPhonetic
+            .split(/\s+/)
+            .filter(Boolean)
+            .map((w) => ({ phonetic: w, thai: w, burmeseGloss: "" }));
+
+    const words = buildAlignedWords(rawWords, 0, lineDur, false, 0);
+
+    res.json({
+      usedAudio: hasAudio,
+      subtitle: {
+        originalSpokenText:
+          (raw.originalSpokenText || "").trim() || subtitle.originalSpokenText || "",
+        thaiScript: (raw.thaiScript || "").trim() || subtitle.thaiScript || thaiPhonetic,
+        thaiPhonetic,
+        burmese: (raw.burmese || "").trim() || subtitle.burmese || "",
+        words,
+      },
+    });
+  } catch (err) {
+    console.error("Regenerate subtitle error:", err);
+    res.status(500).json({
+      error: err instanceof Error ? err.message : "Failed to regenerate subtitle with AI.",
+    });
+  } finally {
+    await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
+const batchRetranslateSchema = {
+  type: Type.OBJECT,
+  properties: {
+    items: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          id: { type: Type.STRING },
+          thaiScript: { type: Type.STRING },
+          thaiPhonetic: { type: Type.STRING },
+          burmese: { type: Type.STRING },
+          words: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                phonetic: { type: Type.STRING },
+                thai: { type: Type.STRING },
+                burmeseGloss: { type: Type.STRING },
+              },
+              required: ["phonetic", "thai", "burmeseGloss"],
+            },
+          },
+        },
+        required: ["id", "thaiScript", "thaiPhonetic", "burmese", "words"],
+      },
+    },
+  },
+  required: ["items"],
+};
+
+app.post("/api/retranslate-subtitles", async (req, res) => {
+  try {
+    const { subtitles, translationTone } = (req.body || {}) as {
+      subtitles?: Array<{
+        id: string;
+        startTime?: number;
+        endTime?: number;
+        originalSpokenText?: string;
+        thaiScript?: string;
+        thaiPhonetic?: string;
+        burmese?: string;
+      }>;
+      translationTone?: TranslationTone;
+    };
+
+    if (!Array.isArray(subtitles) || subtitles.length === 0) {
+      res.status(400).json({ error: "No subtitles provided to re-translate." });
+      return;
+    }
+
+    const tone = normalizeTranslationTone(translationTone);
+    const ai = getGeminiClient();
+
+    // Process in chunks of 25 lines so prompts stay fast and strictly aligned
+    const chunkSize = 25;
+    const updatesById = new Map<
+      string,
+      {
+        thaiScript: string;
+        thaiPhonetic: string;
+        burmese: string;
+        words: RawSceneWord[];
+      }
+    >();
+
+    for (let i = 0; i < subtitles.length; i += chunkSize) {
+      const slice = subtitles.slice(i, i + chunkSize);
+      const compactLines = slice.map((s) => ({
+        id: s.id,
+        spoken: s.originalSpokenText || "",
+        thaiScript: s.thaiScript || "",
+        thaiPhonetic: s.thaiPhonetic || "",
+        burmese: s.burmese || "",
+      }));
+
+      const prompt = `Re-translate and polish the Burmese subtitles (and word-by-word Burmese glosses) for the dialogue sequence below so they match the selected tone and read cohesively across the whole conversation.
+
+${getTranslationToneInstruction(tone)}
+
+INPUT SUBTITLE LINES (JSON):
+${JSON.stringify(compactLines)}
+
+RULES:
+- Return an item for EVERY input line with its exact matching "id".
+- Keep "thaiScript" and "thaiPhonetic" accurate to the spoken Thai dialogue (fix any obvious phonetic/script issues if found, otherwise keep faithful).
+- Rewrite "burmese" (မြန်မာဘာသာပြန်) to match the requested translation tone while keeping dialogue meaning accurate and consistent across lines.
+- Return "words" matching each space-separated token of "thaiPhonetic" with "phonetic", "thai", and a 1-2 word "burmeseGloss" for content words ("" for particles).`;
+
+      const resp = await generateGroundedWithFailover(
+        ai,
+        prompt,
+        batchRetranslateSchema,
+        ThinkingLevel.MEDIUM
+      );
+
+      const parsed = JSON.parse((resp.text || "{}").trim()) as {
+        items?: Array<{
+          id?: string;
+          thaiScript?: string;
+          thaiPhonetic?: string;
+          burmese?: string;
+          words?: RawSceneWord[];
+        }>;
+      };
+
+      for (const item of Array.isArray(parsed.items) ? parsed.items : []) {
+        if (!item?.id) continue;
+        updatesById.set(item.id, {
+          thaiScript: (item.thaiScript || "").trim(),
+          thaiPhonetic: (item.thaiPhonetic || "").trim(),
+          burmese: (item.burmese || "").trim(),
+          words: Array.isArray(item.words) ? item.words : [],
+        });
+      }
+    }
+
+    const updated = subtitles.map((sub) => {
+      const patch = updatesById.get(sub.id);
+      if (!patch) return null;
+      const startTime = Number(sub.startTime) || 0;
+      const endTime = Math.max(startTime + 0.2, Number(sub.endTime) || startTime + 1.5);
+      const lineDur = Math.max(0.2, endTime - startTime);
+      const thaiPhonetic = patch.thaiPhonetic || sub.thaiPhonetic || "";
+      const rawWords =
+        patch.words.length > 0
+          ? patch.words
+          : thaiPhonetic
+              .split(/\s+/)
+              .filter(Boolean)
+              .map((w) => ({ phonetic: w, thai: w, burmeseGloss: "" }));
+      const alignedWords = buildAlignedWords(rawWords, 0, lineDur, false, 0);
+      return {
+        id: sub.id,
+        thaiScript: patch.thaiScript || sub.thaiScript || thaiPhonetic,
+        thaiPhonetic,
+        burmese: patch.burmese || sub.burmese || "",
+        words: alignedWords,
+      };
+    }).filter((x): x is NonNullable<typeof x> => Boolean(x));
+
+    res.json({ subtitles: updated });
+  } catch (err) {
+    console.error("Batch retranslate error:", err);
+    res.status(500).json({
+      error: err instanceof Error ? err.message : "Failed to re-translate subtitles.",
+    });
+  }
+});
+
+const resyncSubtitlesSchema = {
+  type: Type.OBJECT,
+  properties: {
+    items: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          id: { type: Type.STRING },
+          startTime: { type: Type.NUMBER },
+          endTime: { type: Type.NUMBER },
+        },
+        required: ["id", "startTime", "endTime"],
+      },
+    },
+  },
+  required: ["items"],
+};
+
+app.post("/api/resync-subtitles", async (req, res) => {
+  const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "thai-resync-"));
+  try {
+    const {
+      sourceType,
+      videoId,
+      uploadId,
+      scenes = [],
+      subtitles = [],
+    } = (req.body || {}) as {
+      sourceType?: "local" | "youtube";
+      videoId?: string;
+      uploadId?: string;
+      scenes?: { startSec: number; endSec: number; durationSec?: number }[];
+      subtitles?: Array<{
+        id: string;
+        startTime: number;
+        endTime: number;
+        originalSpokenText?: string;
+        thaiScript?: string;
+        thaiPhonetic?: string;
+        burmese?: string;
+      }>;
+    };
+
+    if (!Array.isArray(subtitles) || subtitles.length === 0) {
+      res.status(400).json({ error: "No subtitles provided to resync." });
+      return;
+    }
+
+    const normalizedScenes = (Array.isArray(scenes) ? scenes : [])
+      .map((sc) => {
+        const s = Math.max(0, Number(sc.startSec) || 0);
+        const e = Math.max(s + 0.2, Number(sc.endSec) || s + 1);
+        return { startSec: s, endSec: e, durationSec: Number((e - s).toFixed(2)) };
+      })
+      .filter((sc) => sc.durationSec >= 0.2);
+
+    const totalCutDur = Math.max(
+      1,
+      normalizedScenes.reduce((acc, sc) => acc + sc.durationSec, 0) ||
+        Math.max(...subtitles.map((s) => Number(s.endTime) || 1), 1)
+    );
+
+    const compactSubs = subtitles.map((s, idx) => ({
+      index: idx,
+      id: s.id,
+      currentStartTime: Number((Number(s.startTime) || 0).toFixed(2)),
+      currentEndTime: Number((Number(s.endTime) || 0).toFixed(2)),
+      spoken: s.originalSpokenText || "",
+      thaiScript: s.thaiScript || "",
+      thaiPhonetic: s.thaiPhonetic || "",
+      burmese: s.burmese || "",
+    }));
+
+    const ai = getGeminiClient();
+
+    if (sourceType === "local") {
+      if (!uploadId) {
+        res.status(404).json({ error: "Uploaded video session not found." });
+        return;
+      }
+
+      const audioPrep = await withUploadSessionLock(uploadId, async (uploadedPath) => {
+        const pcmBuffers: Buffer[] = [];
+        const sceneList =
+          normalizedScenes.length > 0
+            ? normalizedScenes
+            : [{ startSec: 0, endSec: totalCutDur, durationSec: totalCutDur }];
+
+        for (let i = 0; i < sceneList.length; i++) {
+          const sc = sceneList[i];
+          const scPcmPath = path.join(tmpDir, `sc-${i}.pcm`);
+          try {
+            await execFileAsync(
+              "ffmpeg",
+              [
+                "-y",
+                "-vn",
+                "-i",
+                uploadedPath,
+                "-ss",
+                sc.startSec.toFixed(3),
+                "-t",
+                sc.durationSec.toFixed(3),
+                "-f",
+                "s16le",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                scPcmPath,
+              ],
+              FFMPEG_EXEC_OPTS
+            );
+            if (fs.existsSync(scPcmPath)) {
+              pcmBuffers.push(await fs.promises.readFile(scPcmPath));
+            }
+          } catch {
+            // Append silent frame buffer matching scene duration if audio track is missing in segment
+            const silentBytes = Math.max(320, Math.round(sc.durationSec * 16000) * 2);
+            pcmBuffers.push(Buffer.alloc(silentBytes));
+          }
+        }
+
+        const cutPcm = Buffer.concat(pcmBuffers);
+        if (cutPcm.length < 640) {
+          return null;
+        }
+
+        const cutPcmPath = path.join(tmpDir, "cut-all.pcm");
+        const cutMp3Path = path.join(tmpDir, "cut-all.mp3");
+        await fs.promises.writeFile(cutPcmPath, cutPcm);
+        await execFileAsync(
+          "ffmpeg",
+          [
+            "-y",
+            "-f",
+            "s16le",
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            "-i",
+            cutPcmPath,
+            "-b:a",
+            "32k",
+            cutMp3Path,
+          ],
+          FFMPEG_EXEC_OPTS
+        );
+
+        const mp3Buf = await fs.promises.readFile(cutMp3Path);
+        const rms = computeRmsEnvelope10ms(cutPcm);
+        const speechWindows = detectSpeechSegments10ms(rms, totalCutDur);
+        return {
+          mp3Base64: mp3Buf.toString("base64"),
+          rms,
+          speechWindows,
+        };
+      });
+
+      if (!audioPrep) {
+        res.status(404).json({ error: "Uploaded video session not found." });
+        return;
+      }
+
+      const windowsBlock =
+        audioPrep.speechWindows.length > 0
+          ? `SPEECH ACTIVITY WINDOWS (10ms-precise RMS on [0, ${totalCutDur.toFixed(2)}s]):\n${audioPrep.speechWindows
+              .map((w) => `- ${w.startSec.toFixed(2)}s -> ${w.endSec.toFixed(2)}s`)
+              .join("\n")}\n`
+          : "";
+
+      const prompt = `Listen to this ${totalCutDur.toFixed(2)}-second cut-timeline audio track and re-align the startTime and endTime of EVERY subtitle line below so it matches EXACTLY when that line is spoken in the audio.
+
+${windowsBlock}
+EXISTING SUBTITLE LINES (in chronological order, keep EVERY "id" intact):
+${JSON.stringify(compactSubs)}
+
+CRITICAL RULES:
+- Return an item for EVERY single subtitle "id" in the input list — do NOT drop, merge, or skip any line.
+- Keep timestamps strictly on the [0.00, ${totalCutDur.toFixed(2)}] audio timeline, monotonically increasing, with NO overlaps between consecutive lines.
+- Snap each line cleanly onto the start and end of its actual spoken voice in the audio and SPEECH ACTIVITY WINDOWS (give 0.05s onset lead and hold briefly through final syllable).`;
+
+      const resp = await generateGroundedWithFailover(
+        ai,
+        {
+          parts: [
+            { inlineData: { mimeType: "audio/mp3", data: audioPrep.mp3Base64 } },
+            { text: prompt },
+          ],
+        },
+        resyncSubtitlesSchema,
+        ThinkingLevel.MEDIUM
+      );
+
+      const parsed = JSON.parse((resp.text || "{}").trim()) as {
+        items?: Array<{ id?: string; startTime?: number; endTime?: number }>;
+      };
+
+      const rawMap = new Map<string, { startTime: number; endTime: number }>();
+      for (const item of Array.isArray(parsed.items) ? parsed.items : []) {
+        if (!item?.id) continue;
+        const s = Math.max(0, Math.min(totalCutDur - 0.25, Number(item.startTime) || 0));
+        const e = Math.max(s + 0.25, Math.min(totalCutDur, Number(item.endTime) || s + 1));
+        rawMap.set(item.id, { startTime: s, endTime: e });
+      }
+
+      const preRefineUtts = subtitles.map((sub) => {
+        const hit = rawMap.get(sub.id);
+        const startSec = hit ? hit.startTime : Math.max(0, Math.min(totalCutDur - 0.25, sub.startTime));
+        const endSec = hit
+          ? hit.endTime
+          : Math.max(startSec + 0.25, Math.min(totalCutDur, sub.endTime));
+        return {
+          startSec,
+          endSec,
+          originalSpokenText: sub.id,
+          thaiScript: sub.thaiScript || "",
+          thaiPhonetic: sub.thaiPhonetic || "",
+          burmese: sub.burmese || "",
+          words: [],
+        };
+      });
+
+      const refinedRes = refineUtterancesWithEnvelope(
+        { hasDialogue: true, summary: "Resync", utterances: preRefineUtts },
+        audioPrep.rms,
+        totalCutDur,
+        audioPrep.speechWindows
+      );
+
+      const synced = (refinedRes.utterances || preRefineUtts)
+        .map((u) => ({
+          id: u.originalSpokenText,
+          startTime: Number(Math.max(0, Math.min(totalCutDur - 0.2, u.startSec)).toFixed(2)),
+          endTime: Number(Math.max(u.startSec + 0.25, Math.min(totalCutDur, u.endSec)).toFixed(2)),
+        }))
+        .sort((a, b) => a.startTime - b.startTime);
+
+      for (let i = 1; i < synced.length; i++) {
+        if (synced[i].startTime < synced[i - 1].endTime + 0.02) {
+          const mid = (synced[i - 1].endTime + synced[i].startTime) / 2;
+          synced[i - 1].endTime = Number(Math.max(synced[i - 1].startTime + 0.25, mid - 0.01).toFixed(2));
+          synced[i].startTime = Number(Math.max(synced[i - 1].endTime + 0.02, synced[i].startTime).toFixed(2));
+          synced[i].endTime = Number(Math.max(synced[i].startTime + 0.25, Math.min(totalCutDur, synced[i].endTime)).toFixed(2));
+        }
+      }
+
+      res.json({ subtitles: synced, usedAudio: true });
+      return;
+    }
+
+    if (sourceType === "youtube" && videoId) {
+      let cutCursor = 0;
+      const sceneTable = normalizedScenes.map((sc, idx) => {
+        const entry = {
+          sceneIndex: idx,
+          youtubeStartSec: sc.startSec,
+          youtubeEndSec: sc.endSec,
+          cutStartSec: Number(cutCursor.toFixed(2)),
+          cutEndSec: Number((cutCursor + sc.durationSec).toFixed(2)),
+        };
+        cutCursor += sc.durationSec;
+        return entry;
+      });
+      const minYt = sceneTable.length > 0 ? Math.max(0, Math.floor(Math.min(...sceneTable.map((s) => s.youtubeStartSec)))) : 0;
+      const maxYt = sceneTable.length > 0 ? Math.ceil(Math.max(...sceneTable.map((s) => s.youtubeEndSec))) : Math.ceil(totalCutDur);
+
+      const prompt = `Listen to the spoken dialogue in this YouTube video clip and re-align the cut-timeline "startTime" and "endTime" (in seconds from 0.00 to ${totalCutDur.toFixed(2)}) for EVERY subtitle line below so each line accurately matches when it is spoken.
+
+SCENE CUT TIMELINE MAPPING (YouTube time -> Cut Timeline seconds):
+${JSON.stringify(sceneTable)}
+
+EXISTING SUBTITLE LINES (keep EVERY "id" intact):
+${JSON.stringify(compactSubs)}
+
+RULES:
+- Return an item for EVERY single subtitle "id" in the input list.
+- All returned "startTime" and "endTime" MUST be in cut-timeline seconds [0.00, ${totalCutDur.toFixed(2)}], monotonically increasing, with NO overlaps.`;
+
+      const resp = await generateGroundedWithFailover(
+        ai,
+        [
+          {
+            role: "user",
+            parts: [
+              {
+                fileData: { fileUri: `https://www.youtube.com/watch?v=${videoId}` },
+                videoMetadata: {
+                  startOffset: `${minYt}s`,
+                  endOffset: `${Math.max(minYt + 2, maxYt)}s`,
+                  fps: 0.5,
+                },
+              },
+              { text: prompt },
+            ],
+          },
+        ],
+        resyncSubtitlesSchema,
+        ThinkingLevel.MEDIUM
+      );
+
+      const parsed = JSON.parse((resp.text || "{}").trim()) as {
+        items?: Array<{ id?: string; startTime?: number; endTime?: number }>;
+      };
+
+      const rawMap = new Map<string, { startTime: number; endTime: number }>();
+      for (const item of Array.isArray(parsed.items) ? parsed.items : []) {
+        if (!item?.id) continue;
+        const s = Math.max(0, Math.min(totalCutDur - 0.25, Number(item.startTime) || 0));
+        const e = Math.max(s + 0.25, Math.min(totalCutDur, Number(item.endTime) || s + 1));
+        rawMap.set(item.id, { startTime: s, endTime: e });
+      }
+
+      const synced = subtitles
+        .map((sub) => {
+          const hit = rawMap.get(sub.id);
+          const s = hit ? hit.startTime : Math.max(0, Math.min(totalCutDur - 0.25, sub.startTime));
+          const e = hit ? hit.endTime : Math.max(s + 0.25, Math.min(totalCutDur, sub.endTime));
+          return {
+            id: sub.id,
+            startTime: Number(s.toFixed(2)),
+            endTime: Number(e.toFixed(2)),
+          };
+        })
+        .sort((a, b) => a.startTime - b.startTime);
+
+      for (let i = 1; i < synced.length; i++) {
+        if (synced[i].startTime < synced[i - 1].endTime + 0.02) {
+          const mid = (synced[i - 1].endTime + synced[i].startTime) / 2;
+          synced[i - 1].endTime = Number(Math.max(synced[i - 1].startTime + 0.25, mid - 0.01).toFixed(2));
+          synced[i].startTime = Number(Math.max(synced[i - 1].endTime + 0.02, synced[i].startTime).toFixed(2));
+          synced[i].endTime = Number(Math.max(synced[i].startTime + 0.25, Math.min(totalCutDur, synced[i].endTime)).toFixed(2));
+        }
+      }
+
+      res.json({ subtitles: synced, usedAudio: true });
+      return;
+    }
+
+    res.status(400).json({ error: "No audio or video source available to AI-resync subtitles." });
+  } catch (err) {
+    console.error("Resync subtitles error:", err);
+    res.status(500).json({
+      error: err instanceof Error ? err.message : "Failed to resync subtitle timings with AI.",
+    });
+  } finally {
+    await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   }
 });
 
@@ -2766,6 +3594,21 @@ function buildVoiceAudioFilters(voiceSettings?: VoiceSettings): string[] {
   let hasNonCleanEffect = false;
 
   if (voiceSettings) {
+    // Vocal Isolation & Background Suppression — applied first on original stereo signal
+    if (voiceSettings.vocalIsolation) {
+      hasNonCleanEffect = true;
+      const isoAmt = Math.max(
+        0.1,
+        Math.min(1, (Number(voiceSettings.vocalIsolationStrength) || 65) / 100)
+      );
+      const sideLevel = Math.max(0.12, 1 - isoAmt * 0.85).toFixed(2);
+      const nrDb = Math.round(6 + isoAmt * 22);
+      const nfDb = Math.round(-44 + isoAmt * 18);
+      audioFilters.push(`stereotools=mlev=1.0:slev=${sideLevel}`);
+      audioFilters.push("highpass=f=95");
+      audioFilters.push(`afftdn=nr=${nrDb}:nf=${nfDb}`);
+    }
+
     const pitchSemi = Math.max(-12, Math.min(12, Number(voiceSettings.pitchSemitones) || 0));
     const pitchFactor = Math.pow(2, pitchSemi / 12);
     const speed = Math.max(0.25, Math.min(2.5, Number(voiceSettings.speed) || 1));
@@ -2811,6 +3654,33 @@ function buildVoiceAudioFilters(voiceSettings?: VoiceSettings): string[] {
       const k4 = k3 * fb;
       audioFilters.push(
         `aecho=1.0:1.0:${d1}|${d2}|${d3}|${d4}:${k1.toFixed(3)}|${k2.toFixed(3)}|${k3.toFixed(3)}|${k4.toFixed(3)}`
+      );
+    }
+
+    // Spectral Phase Shifting — 6-band cascaded all-pass filters matched to webAudioVoice.ts
+    if (voiceSettings.spectralPhaseShift) {
+      hasNonCleanEffect = true;
+      const phaseAmt = Math.max(
+        0.1,
+        Math.min(1, (Number(voiceSettings.spectralPhaseStrength) || 50) / 100)
+      );
+      const qVal = (0.6 + phaseAmt * 3.4).toFixed(2);
+      const freqScale = 0.88 + phaseAmt * 0.24;
+      for (const baseFreq of [260, 620, 1280, 2450, 4400, 7600]) {
+        const scaledFreq = Math.round(baseFreq * freqScale);
+        audioFilters.push(`allpass=f=${scaledFreq}:t=q:w=${qVal}`);
+      }
+    }
+
+    // Audio Adversarial Perturbations — subtle micro-phase dispersion + speech-masked high-frequency spectral perturbation
+    if (voiceSettings.adversarialNoise) {
+      hasNonCleanEffect = true;
+      const advAmt = Math.max(0.05, Math.min(1, (Number(voiceSettings.adversarialStrength) || 35) / 100));
+      const vibratoDepth = (0.015 + advAmt * 0.045).toFixed(3);
+      const eps = (advAmt * 0.024).toFixed(5);
+      audioFilters.push(`vibrato=f=13:d=${vibratoDepth}`);
+      audioFilters.push(
+        `aeval='val(0)+(${eps}*(0.14+min(0.86,abs(val(0))*2.1)))*(0.45*sin(2*PI*6840*t)+0.35*sin(2*PI*11230*t)+0.2*sin(2*PI*14750*t+sin(2*PI*37*t))):c=same'`
       );
     }
 

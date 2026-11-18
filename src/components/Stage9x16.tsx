@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
-import { Pause, Play, Volume2, VolumeX } from "lucide-react";
+import { Pause, Play, Volume2, VolumeX, ZoomIn, ZoomOut } from "lucide-react";
 import type { SubtitleItem, VideoEditSettings, VideoProject, VoiceSettings } from "../types";
 import { YouTubeScenePlayer, type YouTubeScenePlayerHandle } from "./YouTubeScenePlayer";
 import { getEffectivePlaybackSpeed } from "../utils/voicePresets";
 import { findActiveSubtitle, getScrollAnchorSubtitle } from "../utils/projectTimeline";
+
+export type StagePreviewSize = "compact" | "normal" | "big";
 
 interface Stage9x16Props {
   project: VideoProject | null;
@@ -21,6 +23,8 @@ interface Stage9x16Props {
   onEnded: () => void;
   onToggleMute: () => void;
   compactMobile?: boolean;
+  previewSize?: StagePreviewSize;
+  onChangePreviewSize?: (size: StagePreviewSize) => void;
 }
 
 function formatSec(sec: number): string {
@@ -45,6 +49,8 @@ export function Stage9x16({
   onEnded,
   onToggleMute,
   compactMobile = false,
+  previewSize = "normal",
+  onChangePreviewSize,
 }: Stage9x16Props) {
   const playerRef = useRef<YouTubeScenePlayerHandle | null>(null);
   const stageFrameRef = useRef<HTMLDivElement | null>(null);
@@ -107,6 +113,26 @@ export function Stage9x16({
   const displayTotalDuration = totalDuration / effectiveSpeed;
   const progressPct = totalDuration > 0 ? Math.min(100, (cutTime / totalDuration) * 100) : 0;
 
+  const frameSizeClass =
+    previewSize === "compact"
+      ? compactMobile
+        ? "h-[min(28dvh,250px)] min-h-[160px] lg:h-[min(calc(100dvh-310px),460px)] lg:min-h-[260px]"
+        : "h-[min(calc(100dvh-310px),460px)] min-h-[260px]"
+      : previewSize === "big"
+        ? compactMobile
+          ? "h-[min(56dvh,500px)] min-h-[280px] lg:h-[min(calc(100dvh-148px),840px)] lg:min-h-[420px]"
+          : "h-[min(calc(100dvh-148px),840px)] min-h-[420px]"
+        : compactMobile
+          ? "h-[min(42dvh,380px)] min-h-[220px] lg:h-[min(calc(100dvh-180px),675px)] lg:min-h-[360px]"
+          : "h-[min(calc(100dvh-180px),675px)] min-h-[360px]";
+
+  const transportWidthClass =
+    previewSize === "big"
+      ? "max-w-[460px]"
+      : previewSize === "compact"
+        ? "max-w-[300px]"
+        : "max-w-[380px]";
+
   return (
     <div
       className={`flex flex-col items-center justify-center w-full ${
@@ -116,11 +142,7 @@ export function Stage9x16({
       {/* Strictly 9:16 Vertical Video Frame */}
       <div
         ref={stageFrameRef}
-        className={`relative max-w-full aspect-[9/16] rounded-2xl overflow-hidden border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 flex flex-col shadow-sm ${
-          compactMobile
-            ? "h-[min(46dvh,420px)] min-h-[240px] lg:h-[min(calc(100dvh-180px),675px)] lg:min-h-[360px]"
-            : "h-[min(calc(100dvh-180px),675px)] min-h-[360px]"
-        }`}
+        className={`relative max-w-full aspect-[9/16] rounded-2xl overflow-hidden border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 flex flex-col shadow-sm transition-all duration-150 ${frameSizeClass}`}
       >
         {!project ? (
           <div
@@ -191,7 +213,159 @@ export function Stage9x16({
             </div>
 
             {/* Bottom Scrolling List Item View (when subtitles exist, scaled proportionally to preview width) */}
-            {project.subtitles.length > 0 && (
+            {project.subtitles.length > 0 && (() => {
+              const fontMultiplier =
+                editSettings.subtitleFontScale === "sm"
+                  ? 0.86
+                  : editSettings.subtitleFontScale === "lg"
+                    ? 1.16
+                    : 1;
+              const fScale = uiScale * fontMultiplier;
+              const theme = editSettings.subtitleTheme || "auto";
+              const hl = editSettings.subtitleHighlightColor || "amber";
+              const showGloss = editSettings.showWordGloss !== false;
+              const showBurmese = editSettings.showBurmeseLine !== false;
+
+              const containerThemeClass =
+                theme === "light"
+                  ? "bg-slate-50"
+                  : theme === "dark"
+                    ? "bg-[#0b1120]"
+                    : theme === "warm"
+                      ? "bg-[#fbf7ef]"
+                      : "bg-slate-50 dark:bg-[#0b1120]";
+
+              const getCardThemeClass = (isActive: boolean) => {
+                if (theme === "light") {
+                  return isActive
+                    ? "bg-white border border-indigo-200/90 shadow-sm shadow-indigo-950/5"
+                    : "bg-white/65 border border-slate-200/70 opacity-70 hover:opacity-95 hover:border-indigo-200/60";
+                }
+                if (theme === "dark") {
+                  return isActive
+                    ? "bg-[#131c31] border border-indigo-500/40 shadow-sm shadow-black/20"
+                    : "bg-slate-900/45 border border-slate-800/70 opacity-70 hover:opacity-95 hover:border-indigo-500/30";
+                }
+                if (theme === "warm") {
+                  return isActive
+                    ? "bg-[#fffdf8] border border-amber-300/80 shadow-sm shadow-amber-950/5"
+                    : "bg-[#f4ede0]/70 border border-[#e5dac6] opacity-75 hover:opacity-95 hover:border-amber-300/70";
+                }
+                return isActive
+                  ? "bg-white dark:bg-[#131c31] border border-indigo-200/90 dark:border-indigo-500/40 shadow-sm shadow-indigo-950/5"
+                  : "bg-white/65 dark:bg-slate-900/45 border border-slate-200/70 dark:border-slate-800/70 opacity-70 hover:opacity-95 hover:border-indigo-200/60 dark:hover:border-indigo-500/30";
+              };
+
+              const getAccentBarClass = (isActive: boolean) => {
+                if (theme === "warm") {
+                  return isActive ? "bg-amber-600" : "bg-[#dfd3be]";
+                }
+                if (theme === "light") {
+                  return isActive ? "bg-indigo-600" : "bg-slate-200";
+                }
+                if (theme === "dark") {
+                  return isActive ? "bg-indigo-400" : "bg-slate-800";
+                }
+                return isActive
+                  ? "bg-indigo-600 dark:bg-indigo-400"
+                  : "bg-slate-200 dark:bg-slate-800";
+              };
+
+              const spokenPillClass =
+                hl === "emerald"
+                  ? "bg-emerald-300 text-slate-950 ring-1 ring-emerald-400/80 shadow-xs"
+                  : hl === "indigo"
+                    ? "bg-indigo-500 text-white ring-1 ring-indigo-400/80 shadow-xs"
+                    : hl === "rose"
+                      ? "bg-rose-300 text-slate-950 ring-1 ring-rose-400/80 shadow-xs"
+                      : "bg-amber-300 text-slate-950 ring-1 ring-amber-400/80 shadow-xs";
+
+              const getWordClass = (isWordSpoken: boolean, isActive: boolean, wasWordSpoken: boolean) => {
+                if (isWordSpoken) return spokenPillClass;
+                if (isActive) {
+                  if (wasWordSpoken) {
+                    if (theme === "dark") return "text-indigo-300";
+                    if (theme === "warm") return "text-amber-800";
+                    if (theme === "light") return "text-indigo-700";
+                    return "text-indigo-700 dark:text-indigo-300";
+                  }
+                  if (theme === "dark") return "text-slate-300";
+                  if (theme === "warm") return "text-stone-800";
+                  if (theme === "light") return "text-slate-700";
+                  return "text-slate-700 dark:text-slate-300";
+                }
+                if (theme === "dark") return "text-slate-400";
+                if (theme === "warm") return "text-stone-500";
+                if (theme === "light") return "text-slate-500";
+                return "text-slate-500 dark:text-slate-400";
+              };
+
+              const getGlossClass = (isWordSpoken: boolean, isActive: boolean) => {
+                if (isWordSpoken) {
+                  if (hl === "emerald") return theme === "dark" ? "text-emerald-300 font-semibold" : "text-emerald-700 font-semibold";
+                  if (hl === "indigo") return theme === "dark" ? "text-indigo-300 font-semibold" : "text-indigo-700 font-semibold";
+                  if (hl === "rose") return theme === "dark" ? "text-rose-300 font-semibold" : "text-rose-700 font-semibold";
+                  return theme === "dark" ? "text-amber-300 font-semibold" : "text-amber-700 dark:text-amber-300 font-semibold";
+                }
+                if (isActive) {
+                  if (theme === "dark") return "text-teal-300 font-medium";
+                  if (theme === "light" || theme === "warm") return "text-teal-700 font-medium";
+                  return "text-teal-700 dark:text-teal-300 font-medium";
+                }
+                if (theme === "dark") return "text-slate-500";
+                if (theme === "warm") return "text-stone-400";
+                if (theme === "light") return "text-slate-400";
+                return "text-slate-400 dark:text-slate-500";
+              };
+
+              const getThaiScriptClass = (isActive: boolean) => {
+                if (isActive) {
+                  if (theme === "dark") return "text-slate-200 font-medium";
+                  if (theme === "warm") return "text-stone-700 font-medium";
+                  if (theme === "light") return "text-slate-700 font-medium";
+                  return "text-slate-700 dark:text-slate-200 font-medium";
+                }
+                if (theme === "warm") return "text-stone-500";
+                return "text-slate-500 dark:text-slate-400";
+              };
+
+              const getDividerClass = (isActive: boolean) => {
+                if (theme === "warm") {
+                  return isActive ? "border-amber-200/80" : "border-[#e7dcc8]/80";
+                }
+                if (theme === "dark") {
+                  return isActive ? "border-indigo-500/20" : "border-slate-800/70";
+                }
+                if (theme === "light") {
+                  return isActive ? "border-indigo-100" : "border-slate-100";
+                }
+                return isActive
+                  ? "border-indigo-100 dark:border-indigo-500/20"
+                  : "border-slate-100 dark:border-slate-800/70";
+              };
+
+              const getIndexClass = (isActive: boolean) => {
+                if (isActive) {
+                  if (theme === "warm") return "text-amber-700";
+                  if (theme === "dark") return "text-indigo-400";
+                  if (theme === "light") return "text-indigo-500";
+                  return "text-indigo-500 dark:text-indigo-400";
+                }
+                if (theme === "warm") return "text-stone-400";
+                return "text-slate-400 dark:text-slate-500";
+              };
+
+              const getBurmeseClass = (isActive: boolean) => {
+                if (isActive) {
+                  if (theme === "dark") return "text-teal-200 font-medium";
+                  if (theme === "light" || theme === "warm") return "text-teal-800 font-medium";
+                  return "text-teal-800 dark:text-teal-200 font-medium";
+                }
+                if (theme === "warm") return "text-stone-600";
+                return "text-slate-500 dark:text-slate-400";
+              };
+
+              return (
               <div
                 ref={listContainerRef}
                 style={{
@@ -201,7 +375,7 @@ export function Stage9x16({
                   )}px`,
                   gap: `${Math.max(3, Math.round(10 * uiScale))}px`,
                 }}
-                className="relative flex-1 flex flex-col overflow-y-auto overflow-x-hidden no-scrollbar bg-slate-50 dark:bg-[#0b1120]"
+                className={`relative flex-1 flex flex-col overflow-y-auto overflow-x-hidden no-scrollbar ${containerThemeClass}`}
               >
                 {project.subtitles.map((sub, subIdx) => {
                   const isActive = activeSub?.id === sub.id;
@@ -225,11 +399,9 @@ export function Stage9x16({
                           Math.round(15 * uiScale)
                         )}px`,
                       }}
-                      className={`relative w-full text-left shrink-0 overflow-hidden transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 dark:focus-visible:ring-indigo-400 ${
+                      className={`relative w-full text-left shrink-0 overflow-hidden transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 dark:focus-visible:ring-indigo-400 ${getCardThemeClass(
                         isActive
-                          ? "bg-white dark:bg-[#131c31] border border-indigo-200/90 dark:border-indigo-500/40 shadow-sm shadow-indigo-950/5"
-                          : "bg-white/65 dark:bg-slate-900/45 border border-slate-200/70 dark:border-slate-800/70 opacity-70 hover:opacity-95 hover:border-indigo-200/60 dark:hover:border-indigo-500/30"
-                      }`}
+                      )}`}
                     >
                       {/* Educational Left Accent Bar */}
                       <span
@@ -240,14 +412,12 @@ export function Stage9x16({
                           bottom: `${Math.max(4, Math.round(11 * uiScale))}px`,
                           width: `${Math.max(2, Math.round(4 * uiScale))}px`,
                         }}
-                        className={`absolute rounded-full transition-colors ${
+                        className={`absolute rounded-full transition-colors ${getAccentBarClass(
                           isActive
-                            ? "bg-indigo-600 dark:bg-indigo-400"
-                            : "bg-slate-200 dark:bg-slate-800"
-                        }`}
+                        )}`}
                       />
 
-                      {/* Line 1: Thai in English phonetics with warm Amber study-highlighter word sync */}
+                      {/* Line 1: Thai in English phonetics with word-by-word sync */}
                       <div
                         style={{
                           columnGap: `${Math.max(2, Math.round(6 * uiScale))}px`,
@@ -285,7 +455,7 @@ export function Stage9x16({
                                 }
                                 transition={{ duration: 0.05, ease: [0.16, 1, 0.3, 1] }}
                                 style={{
-                                  fontSize: `${Math.max(7.5, Number((15 * uiScale).toFixed(1)))}px`,
+                                  fontSize: `${Math.max(7, Number((15 * fScale).toFixed(1)))}px`,
                                   padding: `${Math.max(1, Math.round(2 * uiScale))}px ${Math.max(
                                     2,
                                     Math.round(6 * uiScale)
@@ -293,34 +463,27 @@ export function Stage9x16({
                                   borderRadius: `${Math.max(3, Math.round(6 * uiScale))}px`,
                                   lineHeight: 1.2,
                                 }}
-                                className={`font-semibold tracking-tight max-w-full break-words ${
-                                  isWordSpoken
-                                    ? "bg-amber-300 text-slate-950 ring-1 ring-amber-400/80 dark:bg-amber-400 dark:text-slate-950 dark:ring-amber-300/70 shadow-xs"
-                                    : isActive
-                                      ? wasWordSpoken
-                                        ? "text-indigo-700 dark:text-indigo-300"
-                                        : "text-slate-700 dark:text-slate-300"
-                                      : "text-slate-500 dark:text-slate-400"
-                                }`}
+                                className={`font-semibold tracking-tight max-w-full break-words ${getWordClass(
+                                  isWordSpoken,
+                                  isActive,
+                                  wasWordSpoken
+                                )}`}
                               >
                                 {word.phonetic}
                               </motion.span>
-                              {word.burmeseGloss && (
+                              {showGloss && word.burmeseGloss && (
                                 <span
                                   style={{
                                     fontSize: `${Math.max(
-                                      6,
-                                      Number((10 * uiScale).toFixed(1))
+                                      5.5,
+                                      Number((10 * fScale).toFixed(1))
                                     )}px`,
                                     marginTop: `${Math.max(1, Math.round(2 * uiScale))}px`,
                                   }}
-                                  className={`font-myanmar leading-tight max-w-full break-words ${
-                                    isWordSpoken
-                                      ? "text-amber-700 dark:text-amber-300 font-semibold"
-                                      : isActive
-                                        ? "text-teal-700 dark:text-teal-300 font-medium"
-                                        : "text-slate-400 dark:text-slate-500"
-                                  }`}
+                                  className={`font-myanmar leading-tight max-w-full break-words ${getGlossClass(
+                                    isWordSpoken,
+                                    isActive
+                                  )}`}
                                 >
                                   {word.burmeseGloss}
                                 </span>
@@ -330,48 +493,56 @@ export function Stage9x16({
                         })}
                       </div>
 
-                      {/* Line 2: Burmese translation */}
-                      <div
-                        style={{
-                          marginTop: `${Math.max(3, Math.round(8 * uiScale))}px`,
-                          paddingTop: `${Math.max(3, Math.round(8 * uiScale))}px`,
-                          gap: `${Math.max(3, Math.round(8 * uiScale))}px`,
-                        }}
-                        className={`border-t flex items-baseline ${
-                          isActive
-                            ? "border-indigo-100 dark:border-indigo-500/20"
-                            : "border-slate-100 dark:border-slate-800/70"
-                        }`}
-                      >
-                        <span
-                          style={{
-                            fontSize: `${Math.max(6, Number((10 * uiScale).toFixed(1)))}px`,
-                          }}
-                          className={`font-mono-tabular font-semibold shrink-0 ${
-                            isActive
-                              ? "text-indigo-500 dark:text-indigo-400"
-                              : "text-slate-400 dark:text-slate-500"
-                          }`}
-                        >
-                          {String(subIdx + 1).padStart(2, "0")}
-                        </span>
+                      {/* Optional Thai Script Line */}
+                      {editSettings.showThaiScript && sub.thaiScript && (
                         <p
                           style={{
-                            fontSize: `${Math.max(
-                              7,
-                              Number((13.5 * uiScale).toFixed(1))
-                            )}px`,
-                            lineHeight: 1.45,
+                            marginTop: `${Math.max(3, Math.round(6 * uiScale))}px`,
+                            fontSize: `${Math.max(6.5, Number((12.5 * fScale).toFixed(1)))}px`,
+                            lineHeight: 1.4,
                           }}
-                          className={`font-myanmar min-w-0 break-words ${
-                            isActive
-                              ? "text-teal-800 dark:text-teal-200 font-medium"
-                              : "text-slate-500 dark:text-slate-400"
-                          }`}
+                          className={`min-w-0 break-words ${getThaiScriptClass(isActive)}`}
                         >
-                          {sub.burmese}
+                          {sub.thaiScript}
                         </p>
-                      </div>
+                      )}
+
+                      {/* Line 2: Burmese translation */}
+                      {showBurmese && (
+                        <div
+                          style={{
+                            marginTop: `${Math.max(3, Math.round(8 * uiScale))}px`,
+                            paddingTop: `${Math.max(3, Math.round(8 * uiScale))}px`,
+                            gap: `${Math.max(3, Math.round(8 * uiScale))}px`,
+                          }}
+                          className={`border-t flex items-baseline ${getDividerClass(isActive)}`}
+                        >
+                          <span
+                            style={{
+                              fontSize: `${Math.max(6, Number((10 * fScale).toFixed(1)))}px`,
+                            }}
+                            className={`font-mono-tabular font-semibold shrink-0 ${getIndexClass(
+                              isActive
+                            )}`}
+                          >
+                            {String(subIdx + 1).padStart(2, "0")}
+                          </span>
+                          <p
+                            style={{
+                              fontSize: `${Math.max(
+                                6.5,
+                                Number((13.5 * fScale).toFixed(1))
+                              )}px`,
+                              lineHeight: 1.45,
+                            }}
+                            className={`font-myanmar min-w-0 break-words ${getBurmeseClass(
+                              isActive
+                            )}`}
+                          >
+                            {sub.burmese}
+                          </p>
+                        </div>
+                      )}
                     </button>
                   );
                 })}
@@ -381,7 +552,8 @@ export function Stage9x16({
                   aria-hidden="true"
                 />
               </div>
-            )}
+              );
+            })()}
           </>
         )}
       </div>
@@ -389,7 +561,7 @@ export function Stage9x16({
       {/* Minimal Transport Controls below 9:16 Stage */}
       {project && project.scenes.length > 0 && (
         <div
-          className={`w-full max-w-[380px] flex items-center ${
+          className={`w-full ${transportWidthClass} flex items-center ${
             compactMobile ? "gap-2 lg:gap-3" : "gap-3"
           }`}
         >
@@ -440,6 +612,46 @@ export function Stage9x16({
           >
             {muted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
           </button>
+
+          {onChangePreviewSize && (() => {
+            const steps: StagePreviewSize[] = ["compact", "normal", "big"];
+            const idx = Math.max(0, steps.indexOf(previewSize));
+            const canZoomOut = idx > 0;
+            const canZoomIn = idx < steps.length - 1;
+            const btnSize = compactMobile ? "w-8 h-8 lg:w-9 lg:h-10" : "w-9 h-10";
+            return (
+              <div
+                role="group"
+                aria-label="Preview size controls"
+                className="inline-flex items-center rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 overflow-hidden shrink-0"
+              >
+                <button
+                  type="button"
+                  disabled={!canZoomOut}
+                  onClick={() => {
+                    if (canZoomOut) onChangePreviewSize(steps[idx - 1]);
+                  }}
+                  title="Zoom out preview (Compact ← Normal ← Big)"
+                  aria-label="Shrink 9:16 preview size"
+                  className={`${btnSize} flex items-center justify-center text-neutral-700 dark:text-neutral-200 hover:bg-neutral-100 dark:hover:bg-neutral-900 disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors`}
+                >
+                  <ZoomOut className="w-4 h-4" />
+                </button>
+                <button
+                  type="button"
+                  disabled={!canZoomIn}
+                  onClick={() => {
+                    if (canZoomIn) onChangePreviewSize(steps[idx + 1]);
+                  }}
+                  title="Zoom in preview (Compact → Normal → Big)"
+                  aria-label="Enlarge 9:16 preview size"
+                  className={`${btnSize} border-l border-neutral-200 dark:border-neutral-800 flex items-center justify-center text-neutral-700 dark:text-neutral-200 hover:bg-neutral-100 dark:hover:bg-neutral-900 disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors`}
+                >
+                  <ZoomIn className="w-4 h-4" />
+                </button>
+              </div>
+            );
+          })()}
         </div>
       )}
     </div>

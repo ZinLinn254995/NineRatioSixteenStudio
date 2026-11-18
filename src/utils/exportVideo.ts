@@ -76,6 +76,8 @@ interface MeasuredCard {
     startTime: number;
     endTime: number;
   }[];
+  thaiLines: string[];
+  thaiStartY: number;
   burmeseLines: string[];
   burmeseStartY: number;
 }
@@ -83,20 +85,36 @@ interface MeasuredCard {
 function measureSubtitleList(
   ctx: CanvasRenderingContext2D,
   subtitles: SubtitleItem[],
-  width: number
+  width: number,
+  opts: {
+    showThaiScript?: boolean;
+    showWordGloss?: boolean;
+    showBurmeseLine?: boolean;
+    fontScale?: number;
+  } = {}
 ): { cards: MeasuredCard[]; totalHeight: number } {
+  const showThaiScript = Boolean(opts.showThaiScript);
+  const showWordGloss = opts.showWordGloss !== false;
+  const showBurmeseLine = opts.showBurmeseLine !== false;
+  const fs = opts.fontScale ?? 1;
   const padX = 40;
   const maxInnerW = width - padX * 2 - 28;
   let cursorY = 34;
   const cards: MeasuredCard[] = [];
 
+  const phoneticFontPx = Math.round(28 * fs);
+  const thaiFontPx = Math.round(20 * fs);
+  const burmeseFontPx = Math.round(22 * fs);
+  const thaiLineH = Math.round(28 * fs);
+  const burmeseLineH = Math.round(34 * fs);
+
   for (const sub of subtitles) {
     const cardTop = cursorY;
     let y = 28;
 
-    ctx.font = "600 28px 'Plus Jakarta Sans', sans-serif";
+    ctx.font = `600 ${phoneticFontPx}px 'Plus Jakarta Sans', sans-serif`;
     let lineX = 0;
-    const rowGap = 56;
+    const rowGap = showWordGloss ? Math.round(56 * fs) : Math.round(42 * fs);
     const wordLayouts: MeasuredCard["wordLayouts"] = [];
 
     for (const w of sub.words) {
@@ -107,28 +125,49 @@ function measureSubtitleList(
       }
       wordLayouts.push({
         phonetic: w.phonetic,
-        gloss: w.burmeseGloss || "",
+        gloss: showWordGloss ? w.burmeseGloss || "" : "",
         x: padX + 18 + lineX,
         y: cardTop + y,
         w: tokenWidth,
-        h: 36,
+        h: Math.round(36 * fs),
         startTime: sub.startTime + w.startOffsetSec,
         endTime: sub.startTime + w.endOffsetSec,
       });
       lineX += tokenWidth + 8;
     }
 
-    y += sub.words.length > 0 ? 66 : 16;
-    ctx.font = "500 22px 'Noto Sans Myanmar', 'Plus Jakarta Sans', sans-serif";
-    const burmeseLines = wrapTextLines(ctx, sub.burmese, maxInnerW - 34);
-    const burmeseStartY = cardTop + y;
-    y += burmeseLines.length * 34 + 22;
+    y += sub.words.length > 0 ? (showWordGloss ? Math.round(48 * fs) : Math.round(34 * fs)) : 12;
+
+    let thaiLines: string[] = [];
+    let thaiStartY = cardTop + y;
+    if (showThaiScript && sub.thaiScript && sub.thaiScript.trim()) {
+      ctx.font = `500 ${thaiFontPx}px 'Noto Sans Thai', 'Plus Jakarta Sans', sans-serif`;
+      thaiLines = wrapTextLines(ctx, sub.thaiScript.trim(), maxInnerW - 10);
+      y += 4;
+      thaiStartY = cardTop + y;
+      y += thaiLines.length * thaiLineH + 14;
+    } else if (showBurmeseLine) {
+      y += 14;
+    }
+
+    let burmeseLines: string[] = [];
+    let burmeseStartY = cardTop + y;
+    if (showBurmeseLine) {
+      ctx.font = `500 ${burmeseFontPx}px 'Noto Sans Myanmar', 'Plus Jakarta Sans', sans-serif`;
+      burmeseLines = wrapTextLines(ctx, sub.burmese, maxInnerW - 34);
+      burmeseStartY = cardTop + y;
+      y += burmeseLines.length * burmeseLineH + 22;
+    } else {
+      y += 14;
+    }
 
     cards.push({
       sub,
       topY: cardTop,
       height: y,
       wordLayouts,
+      thaiLines,
+      thaiStartY,
       burmeseLines,
       burmeseStartY,
     });
@@ -445,7 +484,32 @@ export async function exportProjectToMp4(
       }
     }
 
-    const { cards } = measureSubtitleList(ctx, project.subtitles, width);
+    const subFontScale =
+      editSettings.subtitleFontScale === "sm"
+        ? 0.86
+        : editSettings.subtitleFontScale === "lg"
+          ? 1.16
+          : 1;
+    const subTheme: "light" | "dark" | "warm" =
+      editSettings.subtitleTheme === "warm"
+        ? "warm"
+        : editSettings.subtitleTheme === "light"
+          ? "light"
+          : editSettings.subtitleTheme === "dark"
+            ? "dark"
+            : darkMode
+              ? "dark"
+              : "light";
+    const subHl = editSettings.subtitleHighlightColor || "amber";
+    const showWordGloss = editSettings.showWordGloss !== false;
+    const showBurmeseLine = editSettings.showBurmeseLine !== false;
+
+    const { cards } = measureSubtitleList(ctx, project.subtitles, width, {
+      showThaiScript: Boolean(editSettings.showThaiScript),
+      showWordGloss,
+      showBurmeseLine,
+      fontScale: subFontScale,
+    });
 
     const getActiveCardIndex = (t: number): number => {
       let idx = -1;
@@ -474,8 +538,9 @@ export async function exportProjectToMp4(
     let currentScrollY = 0;
 
     const renderFrameAtTime = async (t: number, frameIdx = 0) => {
-      // 1. Background (warm study paper in light mode, deep study slate in dark mode)
-      ctx.fillStyle = darkMode ? "#0b1120" : "#f8fafc";
+      // 1. Background (matched to active subtitle theme)
+      ctx.fillStyle =
+        subTheme === "dark" ? "#0b1120" : subTheme === "warm" ? "#fbf7ef" : "#f8fafc";
       ctx.fillRect(0, 0, width, height);
 
       // 2. Top 9:16 Video Frame with Transform, Filter & Vignette
@@ -599,7 +664,9 @@ export async function exportProjectToMp4(
       ctx.restore();
 
       if (hasSubtitles) {
-        ctx.fillStyle = darkMode ? "#1e293b" : "#cbd5e1";
+        const isDarkPanel = subTheme === "dark";
+        const isWarmPanel = subTheme === "warm";
+        ctx.fillStyle = isDarkPanel ? "#1e293b" : isWarmPanel ? "#e7dcc8" : "#cbd5e1";
         ctx.fillRect(0, topVideoH, width, 1);
 
         const ht = Math.min(sourceTotalDuration, t + 0.06);
@@ -613,6 +680,24 @@ export async function exportProjectToMp4(
         ctx.translate(0, topVideoH - currentScrollY);
 
         const activeCardIdx = getActiveCardIndex(ht);
+        const phoneticPx = Math.round(28 * subFontScale);
+        const glossPx = Math.round(13 * subFontScale);
+        const thaiPx = Math.round(20 * subFontScale);
+        const thaiLineH = Math.round(28 * subFontScale);
+        const idxPx = Math.round(15 * subFontScale);
+        const burmesePx = Math.round(22 * subFontScale);
+        const burmeseLineH = Math.round(34 * subFontScale);
+        const pillFill =
+          subHl === "emerald"
+            ? "#6ee7b7"
+            : subHl === "indigo"
+              ? "#6366f1"
+              : subHl === "rose"
+                ? "#fda4af"
+                : isDarkPanel
+                  ? "#fbbf24"
+                  : "#fde047";
+        const pillTextFill = subHl === "indigo" ? "#ffffff" : "#0f172a";
 
         for (let ci = 0; ci < cards.length; ci++) {
           const card = cards[ci];
@@ -622,31 +707,43 @@ export async function exportProjectToMp4(
           const isActive = ci === activeCardIdx;
 
           ctx.fillStyle = isActive
-            ? darkMode
+            ? isDarkPanel
               ? "#131c31"
-              : "#ffffff"
-            : darkMode
+              : isWarmPanel
+                ? "#fffdf8"
+                : "#ffffff"
+            : isDarkPanel
               ? "rgba(15, 23, 42, 0.55)"
-              : "rgba(255, 255, 255, 0.72)";
+              : isWarmPanel
+                ? "rgba(244, 237, 224, 0.72)"
+                : "rgba(255, 255, 255, 0.72)";
           drawRoundedRect(ctx, 22, card.topY, width - 44, card.height, 18);
           ctx.fill();
           ctx.strokeStyle = isActive
-            ? darkMode
+            ? isDarkPanel
               ? "rgba(99, 102, 241, 0.45)"
-              : "#c7d2fe"
-            : darkMode
+              : isWarmPanel
+                ? "#fcd34d"
+                : "#c7d2fe"
+            : isDarkPanel
               ? "#1e293b"
-              : "#e2e8f0";
+              : isWarmPanel
+                ? "#e5dac6"
+                : "#e2e8f0";
           ctx.lineWidth = isActive ? 1.75 : 1;
           ctx.stroke();
 
           ctx.fillStyle = isActive
-            ? darkMode
+            ? isDarkPanel
               ? "#818cf8"
-              : "#4f46e5"
-            : darkMode
+              : isWarmPanel
+                ? "#d97706"
+                : "#4f46e5"
+            : isDarkPanel
               ? "#1e293b"
-              : "#e2e8f0";
+              : isWarmPanel
+                ? "#dfd3be"
+                : "#e2e8f0";
           drawRoundedRect(ctx, 32, card.topY + 18, 5, Math.max(24, card.height - 36), 3);
           ctx.fill();
 
@@ -660,80 +757,129 @@ export async function exportProjectToMp4(
             const wasSpoken = isActive && (isLastWord ? ht > wl.endTime : ht >= wl.endTime);
 
             if (isSpoken) {
-              ctx.fillStyle = darkMode ? "#fbbf24" : "#fde047";
-              drawRoundedRect(ctx, wl.x - 4, wl.y - 26, wl.w + 2, 38, 9);
+              const pillH = Math.round(38 * subFontScale);
+              ctx.fillStyle = pillFill;
+              drawRoundedRect(
+                ctx,
+                wl.x - 4,
+                wl.y - Math.round(26 * subFontScale),
+                wl.w + 2,
+                pillH,
+                9
+              );
               ctx.fill();
-              if (!darkMode) {
-                ctx.strokeStyle = "#facc15";
-                ctx.lineWidth = 1;
-                ctx.stroke();
-              }
             }
 
-            ctx.font = "600 28px 'Plus Jakarta Sans', sans-serif";
+            ctx.font = `600 ${phoneticPx}px 'Plus Jakarta Sans', sans-serif`;
             if (isSpoken) {
-              ctx.fillStyle = "#0f172a";
+              ctx.fillStyle = pillTextFill;
             } else if (isActive) {
-              ctx.fillStyle = darkMode
+              ctx.fillStyle = isDarkPanel
                 ? wasSpoken
                   ? "#a5b4fc"
                   : "#cbd5e1"
-                : wasSpoken
-                  ? "#4338ca"
-                  : "#334155";
+                : isWarmPanel
+                  ? wasSpoken
+                    ? "#92400e"
+                    : "#292524"
+                  : wasSpoken
+                    ? "#4338ca"
+                    : "#334155";
             } else {
-              ctx.fillStyle = "#64748b";
+              ctx.fillStyle = isWarmPanel ? "#78716c" : "#64748b";
             }
             ctx.fillText(wl.phonetic, wl.x + 5, wl.y);
 
             if (wl.gloss) {
-              ctx.font = "500 13px 'Noto Sans Myanmar', sans-serif";
+              ctx.font = `500 ${glossPx}px 'Noto Sans Myanmar', sans-serif`;
               ctx.fillStyle = isSpoken
-                ? darkMode
-                  ? "#fcd34d"
-                  : "#b45309"
+                ? subHl === "emerald"
+                  ? isDarkPanel
+                    ? "#6ee7b7"
+                    : "#047857"
+                  : subHl === "indigo"
+                    ? isDarkPanel
+                      ? "#a5b4fc"
+                      : "#4338ca"
+                    : subHl === "rose"
+                      ? isDarkPanel
+                        ? "#fda4af"
+                        : "#be123c"
+                      : isDarkPanel
+                        ? "#fcd34d"
+                        : "#b45309"
                 : isActive
-                  ? darkMode
+                  ? isDarkPanel
                     ? "#5eead4"
                     : "#0f766e"
-                  : darkMode
+                  : isDarkPanel
                     ? "#475569"
-                    : "#94a3b8";
-              ctx.fillText(wl.gloss, wl.x + 5, wl.y + 22);
+                    : isWarmPanel
+                      ? "#a8a29e"
+                      : "#94a3b8";
+              ctx.fillText(wl.gloss, wl.x + 5, wl.y + Math.round(22 * subFontScale));
             }
           }
 
-          if (card.wordLayouts.length > 0) {
-            const dividerY = card.burmeseStartY - 30;
+          if (card.thaiLines.length > 0) {
+            ctx.font = `500 ${thaiPx}px 'Noto Sans Thai', 'Plus Jakarta Sans', sans-serif`;
             ctx.fillStyle = isActive
-              ? darkMode
-                ? "rgba(99, 102, 241, 0.22)"
-                : "#e0e7ff"
-              : darkMode
-                ? "#1e293b"
-                : "#f1f5f9";
-            ctx.fillRect(54, dividerY, width - 96, 1);
+              ? isDarkPanel
+                ? "#e2e8f0"
+                : isWarmPanel
+                  ? "#44403c"
+                  : "#334155"
+              : isWarmPanel
+                ? "#78716c"
+                : "#64748b";
+            card.thaiLines.forEach((line, li) => {
+              ctx.fillText(line, 58, card.thaiStartY + li * thaiLineH);
+            });
           }
 
-          ctx.font = "600 15px 'JetBrains Mono', monospace";
-          ctx.fillStyle = isActive
-            ? darkMode
-              ? "#818cf8"
-              : "#6366f1"
-            : darkMode
-              ? "#475569"
-              : "#94a3b8";
-          ctx.fillText(String(ci + 1).padStart(2, "0"), 54, card.burmeseStartY - 1);
+          if (showBurmeseLine) {
+            if (card.wordLayouts.length > 0 || card.thaiLines.length > 0) {
+              const dividerY = card.burmeseStartY - 30;
+              ctx.fillStyle = isActive
+                ? isDarkPanel
+                  ? "rgba(99, 102, 241, 0.22)"
+                  : isWarmPanel
+                    ? "#fde68a"
+                    : "#e0e7ff"
+                : isDarkPanel
+                  ? "#1e293b"
+                  : isWarmPanel
+                    ? "#e7dcc8"
+                    : "#f1f5f9";
+              ctx.fillRect(54, dividerY, width - 96, 1);
+            }
 
-          ctx.font = "500 22px 'Noto Sans Myanmar', 'Plus Jakarta Sans', sans-serif";
-          ctx.fillStyle = isActive
-            ? darkMode
-              ? "#99f6e4"
-              : "#115e59"
-            : "#64748b";
-          card.burmeseLines.forEach((line, li) => {
-            ctx.fillText(line, 86, card.burmeseStartY + li * 34);
-          });
+            ctx.font = `600 ${idxPx}px 'JetBrains Mono', monospace`;
+            ctx.fillStyle = isActive
+              ? isDarkPanel
+                ? "#818cf8"
+                : isWarmPanel
+                  ? "#b45309"
+                  : "#6366f1"
+              : isDarkPanel
+                ? "#475569"
+                : isWarmPanel
+                  ? "#a8a29e"
+                  : "#94a3b8";
+            ctx.fillText(String(ci + 1).padStart(2, "0"), 54, card.burmeseStartY - 1);
+
+            ctx.font = `500 ${burmesePx}px 'Noto Sans Myanmar', 'Plus Jakarta Sans', sans-serif`;
+            ctx.fillStyle = isActive
+              ? isDarkPanel
+                ? "#99f6e4"
+                : "#115e59"
+              : isWarmPanel
+                ? "#57534e"
+                : "#64748b";
+            card.burmeseLines.forEach((line, li) => {
+              ctx.fillText(line, 86, card.burmeseStartY + li * burmeseLineH);
+            });
+          }
         }
 
         ctx.restore();

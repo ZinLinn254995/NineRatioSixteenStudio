@@ -42,7 +42,8 @@ async function abortUploadSession(uploadId: string): Promise<void> {
 
 export async function uploadBlobInChunks(
   blob: Blob,
-  fileName = "video.mp4"
+  fileName = "video.mp4",
+  signal?: AbortSignal
 ): Promise<string> {
   if (!blob || blob.size <= 0) {
     throw new Error("Selected video file is empty or unreadable.");
@@ -50,11 +51,15 @@ export async function uploadBlobInChunks(
   if (blob.size > MAX_UPLOAD_BYTES) {
     throw new Error("Video file exceeds the 500 MB upload limit.");
   }
+  if (signal?.aborted) {
+    throw new DOMException("Aborted", "AbortError");
+  }
 
   const initResp = await fetch("/api/upload-init", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ fileName, totalSize: blob.size }),
+    signal,
   });
   const initData = await safeReadJson<{ uploadId?: string; error?: string }>(initResp);
   if (!initResp.ok || !initData.uploadId) {
@@ -64,11 +69,17 @@ export async function uploadBlobInChunks(
   const uploadId = initData.uploadId;
   try {
     for (let offset = 0; offset < blob.size; offset += CHUNK_SIZE_BYTES) {
+      if (signal?.aborted) {
+        throw new DOMException("Aborted", "AbortError");
+      }
       const chunk = blob.slice(offset, Math.min(blob.size, offset + CHUNK_SIZE_BYTES));
       let chunkUploaded = false;
       let lastErr: unknown = null;
 
       for (let attempt = 0; attempt < 3; attempt++) {
+        if (signal?.aborted) {
+          throw new DOMException("Aborted", "AbortError");
+        }
         try {
           const chunkResp = await fetch("/api/upload-chunk", {
             method: "POST",
@@ -78,6 +89,7 @@ export async function uploadBlobInChunks(
               "x-chunk-offset": String(offset),
             },
             body: chunk,
+            signal,
           });
           const chunkData = await safeReadJson<{ ok?: boolean; error?: string }>(chunkResp);
           if (chunkResp.ok) {
@@ -91,6 +103,9 @@ export async function uploadBlobInChunks(
             throw lastErr;
           }
         } catch (err) {
+          if (signal?.aborted || (err instanceof DOMException && err.name === "AbortError")) {
+            throw err;
+          }
           lastErr = err;
           if (attempt === 2) throw err;
         }

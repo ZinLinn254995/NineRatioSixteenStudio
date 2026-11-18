@@ -180,6 +180,36 @@ function sanitizeVoiceSettings(raw: unknown): VoiceSettings {
     tone: clampFinite(rec.tone, -10, 10, DEFAULT_VOICE_SETTINGS.tone),
     echo: clampFinite(rec.echo, 0, 100, DEFAULT_VOICE_SETTINGS.echo),
     robot: clampFinite(rec.robot, 0, 100, DEFAULT_VOICE_SETTINGS.robot),
+    adversarialNoise:
+      typeof rec.adversarialNoise === "boolean"
+        ? rec.adversarialNoise
+        : DEFAULT_VOICE_SETTINGS.adversarialNoise,
+    adversarialStrength: clampFinite(
+      rec.adversarialStrength,
+      5,
+      100,
+      DEFAULT_VOICE_SETTINGS.adversarialStrength
+    ),
+    spectralPhaseShift:
+      typeof rec.spectralPhaseShift === "boolean"
+        ? rec.spectralPhaseShift
+        : DEFAULT_VOICE_SETTINGS.spectralPhaseShift,
+    spectralPhaseStrength: clampFinite(
+      rec.spectralPhaseStrength,
+      10,
+      100,
+      DEFAULT_VOICE_SETTINGS.spectralPhaseStrength
+    ),
+    vocalIsolation:
+      typeof rec.vocalIsolation === "boolean"
+        ? rec.vocalIsolation
+        : DEFAULT_VOICE_SETTINGS.vocalIsolation,
+    vocalIsolationStrength: clampFinite(
+      rec.vocalIsolationStrength,
+      10,
+      100,
+      DEFAULT_VOICE_SETTINGS.vocalIsolationStrength
+    ),
   };
 }
 
@@ -214,6 +244,45 @@ function sanitizeEditSettings(raw: unknown): VideoEditSettings {
       32,
       DEFAULT_VIDEO_EDIT.adversarialStrength
     ),
+    showThaiScript:
+      typeof rec.showThaiScript === "boolean"
+        ? rec.showThaiScript
+        : DEFAULT_VIDEO_EDIT.showThaiScript,
+    translationTone:
+      rec.translationTone === "casual" ||
+      rec.translationTone === "formal" ||
+      rec.translationTone === "dramatic" ||
+      rec.translationTone === "literal"
+        ? rec.translationTone
+        : DEFAULT_VIDEO_EDIT.translationTone,
+    subtitleFontScale:
+      rec.subtitleFontScale === "sm" ||
+      rec.subtitleFontScale === "md" ||
+      rec.subtitleFontScale === "lg"
+        ? rec.subtitleFontScale
+        : DEFAULT_VIDEO_EDIT.subtitleFontScale,
+    subtitleTheme:
+      rec.subtitleTheme === "auto" ||
+      rec.subtitleTheme === "light" ||
+      rec.subtitleTheme === "dark" ||
+      rec.subtitleTheme === "warm"
+        ? rec.subtitleTheme
+        : DEFAULT_VIDEO_EDIT.subtitleTheme,
+    subtitleHighlightColor:
+      rec.subtitleHighlightColor === "amber" ||
+      rec.subtitleHighlightColor === "emerald" ||
+      rec.subtitleHighlightColor === "indigo" ||
+      rec.subtitleHighlightColor === "rose"
+        ? rec.subtitleHighlightColor
+        : DEFAULT_VIDEO_EDIT.subtitleHighlightColor,
+    showWordGloss:
+      typeof rec.showWordGloss === "boolean"
+        ? rec.showWordGloss
+        : DEFAULT_VIDEO_EDIT.showWordGloss,
+    showBurmeseLine:
+      typeof rec.showBurmeseLine === "boolean"
+        ? rec.showBurmeseLine
+        : DEFAULT_VIDEO_EDIT.showBurmeseLine,
   };
 }
 

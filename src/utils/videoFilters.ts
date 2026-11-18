@@ -21,6 +21,13 @@ export const DEFAULT_VIDEO_EDIT: VideoEditSettings = {
   vignette: 0,
   adversarialNoise: false,
   adversarialStrength: 12,
+  showThaiScript: false,
+  translationTone: "casual",
+  subtitleFontScale: "md",
+  subtitleTheme: "auto",
+  subtitleHighlightColor: "amber",
+  showWordGloss: true,
+  showBurmeseLine: true,
 };
 
 export interface VideoFilterPresetOption {

@@ -93,6 +93,12 @@ export interface VoiceSettings {
   tone: number;
   echo: number;
   robot: number;
+  adversarialNoise: boolean;
+  adversarialStrength: number;
+  spectralPhaseShift: boolean;
+  spectralPhaseStrength: number;
+  vocalIsolation: boolean;
+  vocalIsolationStrength: number;
 }
 
 export type VideoFilterPresetId =
@@ -104,6 +110,11 @@ export type VideoFilterPresetId =
   | "vintage"
   | "dramatic"
   | "soft";
+
+export type TranslationTone = "casual" | "formal" | "dramatic" | "literal";
+export type SubtitleFontScale = "sm" | "md" | "lg";
+export type SubtitleTheme = "auto" | "light" | "dark" | "warm";
+export type SubtitleHighlightColor = "amber" | "emerald" | "indigo" | "rose";
 
 export interface VideoEditSettings {
   filterPreset: VideoFilterPresetId | "custom";
@@ -126,6 +137,13 @@ export interface VideoEditSettings {
   vignette: number;
   adversarialNoise: boolean;
   adversarialStrength: number;
+  showThaiScript: boolean;
+  translationTone: TranslationTone;
+  subtitleFontScale: SubtitleFontScale;
+  subtitleTheme: SubtitleTheme;
+  subtitleHighlightColor: SubtitleHighlightColor;
+  showWordGloss: boolean;
+  showBurmeseLine: boolean;
 }
 
 export interface SavedProjectRecord {

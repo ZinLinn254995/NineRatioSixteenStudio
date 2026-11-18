@@ -45,6 +45,7 @@ interface VideoEditPanelProps {
   onSeek: (sec: number) => void;
   onPlayFromTime: (sec: number) => void;
   onUpdateProjectScenes: (nextScenes: SpeakingScene[]) => void;
+  onUpdateSubtitleTiming?: (id: string, startTime: number, endTime: number) => void;
   onRestoreProjectSnapshot: (scenes: SpeakingScene[], subtitles?: SubtitleItem[]) => void;
   onResetTimeline: () => void;
   onGoToScenes?: () => void;
@@ -81,6 +82,7 @@ export function VideoEditPanel({
   onSeek,
   onPlayFromTime,
   onUpdateProjectScenes,
+  onUpdateSubtitleTiming,
   onRestoreProjectSnapshot,
   onResetTimeline,
   onGoToScenes,
@@ -105,18 +107,13 @@ export function VideoEditPanel({
     Math.abs(voiceSettings.speed - DEFAULT_VOICE_SETTINGS.speed) > 0.01 ||
     voiceSettings.tone !== DEFAULT_VOICE_SETTINGS.tone ||
     voiceSettings.echo !== DEFAULT_VOICE_SETTINGS.echo ||
-    voiceSettings.robot !== DEFAULT_VOICE_SETTINGS.robot;
-
-  const isModified =
-    JSON.stringify(settings) !== JSON.stringify(DEFAULT_VIDEO_EDIT) || voiceDirty;
-  const isYoutube = sourceType === "youtube";
-  const effectiveSpeed = getEffectivePlaybackSpeed(
-    sourceType,
-    settings.playbackSpeed,
-    voiceSettings.speed
-  );
-  const scaledDurationSec =
-    sourceDurationSec && sourceDurationSec > 0 ? sourceDurationSec / effectiveSpeed : null;
+    voiceSettings.robot !== DEFAULT_VOICE_SETTINGS.robot ||
+    voiceSettings.adversarialNoise !== DEFAULT_VOICE_SETTINGS.adversarialNoise ||
+    voiceSettings.adversarialStrength !== DEFAULT_VOICE_SETTINGS.adversarialStrength ||
+    voiceSettings.spectralPhaseShift !== DEFAULT_VOICE_SETTINGS.spectralPhaseShift ||
+    voiceSettings.spectralPhaseStrength !== DEFAULT_VOICE_SETTINGS.spectralPhaseStrength ||
+    voiceSettings.vocalIsolation !== DEFAULT_VOICE_SETTINGS.vocalIsolation ||
+    voiceSettings.vocalIsolationStrength !== DEFAULT_VOICE_SETTINGS.vocalIsolationStrength;
 
   const speedDirty = Math.abs(settings.playbackSpeed - DEFAULT_VIDEO_EDIT.playbackSpeed) > 0.01;
   const framingDirty =
@@ -136,7 +133,20 @@ export function VideoEditPanel({
     settings.hueDeg !== DEFAULT_VIDEO_EDIT.hueDeg ||
     settings.blurPx !== DEFAULT_VIDEO_EDIT.blurPx ||
     settings.vignette !== DEFAULT_VIDEO_EDIT.vignette;
-  const noiseDirty = settings.adversarialNoise !== DEFAULT_VIDEO_EDIT.adversarialNoise;
+  const noiseDirty =
+    settings.adversarialNoise !== DEFAULT_VIDEO_EDIT.adversarialNoise ||
+    settings.adversarialStrength !== DEFAULT_VIDEO_EDIT.adversarialStrength;
+
+  const isModified =
+    speedDirty || framingDirty || filtersDirty || colorDirty || noiseDirty || voiceDirty;
+  const isYoutube = sourceType === "youtube";
+  const effectiveSpeed = getEffectivePlaybackSpeed(
+    sourceType,
+    settings.playbackSpeed,
+    voiceSettings.speed
+  );
+  const scaledDurationSec =
+    sourceDurationSec && sourceDurationSec > 0 ? sourceDurationSec / effectiveSpeed : null;
 
   const sections: {
     id: EditSectionId;
@@ -195,7 +205,16 @@ export function VideoEditPanel({
           <button
             type="button"
             onClick={() => {
-              onChange({ ...DEFAULT_VIDEO_EDIT });
+              onChange({
+                ...DEFAULT_VIDEO_EDIT,
+                showThaiScript: settings.showThaiScript,
+                translationTone: settings.translationTone,
+                subtitleFontScale: settings.subtitleFontScale,
+                subtitleTheme: settings.subtitleTheme,
+                subtitleHighlightColor: settings.subtitleHighlightColor,
+                showWordGloss: settings.showWordGloss,
+                showBurmeseLine: settings.showBurmeseLine,
+              });
               onChangeVoiceSettings({ ...DEFAULT_VOICE_SETTINGS });
             }}
             className="text-xs text-neutral-600 dark:text-neutral-300 hover:text-neutral-950 dark:hover:text-white flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer"
@@ -218,6 +237,7 @@ export function VideoEditPanel({
           onSeek={onSeek}
           onPlayFromTime={onPlayFromTime}
           onUpdateScenes={onUpdateProjectScenes}
+          onUpdateSubtitleTiming={onUpdateSubtitleTiming}
           onRestoreSnapshot={onRestoreProjectSnapshot}
           onResetTimeline={onResetTimeline}
           onGoToScenes={onGoToScenes}
