@@ -9,22 +9,11 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import type {
-  ActiveMediaSource,
-  SceneSelection,
-  VideoEditSettings,
-  VoiceSettings,
-} from "../types";
-import { buildCssFilterString, buildCssTransformString } from "../utils/videoFilters";
-import { getEffectivePlaybackSpeed } from "../utils/voicePresets";
-import { applyVoiceEffectsToVideoElement, resumeAllVoiceContexts } from "../utils/webAudioVoice";
-import { AdversarialNoiseOverlay } from "./AdversarialNoiseOverlay";
+import type { ActiveMediaSource, SceneSelection } from "../types";
 
 interface LocalVideoTimelineEditorProps {
   media: ActiveMediaSource;
   scenes: SceneSelection[];
-  voiceSettings: VoiceSettings;
-  editSettings: VideoEditSettings;
   onUpdateScene: (id: string, startSec: number, endSec: number) => void;
   onRemoveScene: (id: string) => void;
   onReplaceScenes?: (scenes: SceneSelection[]) => void;
@@ -92,8 +81,6 @@ function clampZoom(z: number): number {
 export function LocalVideoTimelineEditor({
   media,
   scenes,
-  voiceSettings,
-  editSettings,
   onUpdateScene,
   onRemoveScene,
   onReplaceScenes,
@@ -313,31 +300,6 @@ export function LocalVideoTimelineEditor({
     };
   }, [media.localUrl, sourceDuration]);
 
-  // Voice & speed sync (only attach WebAudio graph when effects are active)
-  const hasVoiceEffects =
-    Math.abs(voiceSettings.pitchSemitones) >= 0.08 ||
-    Math.abs(voiceSettings.tone) > 0 ||
-    voiceSettings.echo > 0 ||
-    voiceSettings.robot > 0;
-  const voiceAttachedRef = useRef(false);
-
-  useEffect(() => {
-    const vid = videoRef.current;
-    if (!vid) return;
-    const speed = getEffectivePlaybackSpeed(
-      "local",
-      editSettings.playbackSpeed,
-      voiceSettings.speed
-    );
-    vid.preservesPitch = true;
-    (vid as unknown as { webkitPreservesPitch?: boolean }).webkitPreservesPitch = true;
-    vid.playbackRate = speed;
-    if (hasVoiceEffects || voiceAttachedRef.current) {
-      voiceAttachedRef.current = true;
-      applyVoiceEffectsToVideoElement(vid, voiceSettings, isPlaying);
-    }
-  }, [voiceSettings, editSettings.playbackSpeed, isPlaying, hasVoiceEffects]);
-
   // Coalesce rapid drag seeks so the HTML5 video decoder never stalls on queued seeks
   const scheduleSourcePreviewSeek = useCallback(
     (sourceSec: number) => {
@@ -448,9 +410,6 @@ export function LocalVideoTimelineEditor({
 
       setPlayError(null);
       vid.muted = false;
-      if (hasVoiceEffects || voiceAttachedRef.current) {
-        resumeAllVoiceContexts();
-      }
 
       const maxCut = totalCutDurationRef.current;
       const startCut =
@@ -504,7 +463,7 @@ export function LocalVideoTimelineEditor({
         setIsPlaying(!vid.paused);
       }
     },
-    [hasVoiceEffects, mapCutTimeToSource, sourceDuration]
+    [mapCutTimeToSource, sourceDuration]
   );
 
   const togglePlay = useCallback(() => {
@@ -948,116 +907,81 @@ export function LocalVideoTimelineEditor({
         className="relative w-full aspect-video rounded-xl overflow-hidden bg-neutral-950 border border-neutral-200 dark:border-neutral-800 cursor-pointer group"
       >
         {media.localUrl ? (
-          (() => {
-            const transformCss = buildCssTransformString(editSettings);
-            const filterCss = buildCssFilterString(editSettings);
-            return (
-              <video
-                key={media.localUrl}
-                ref={videoRef}
-                src={media.localUrl}
-                preload="auto"
-                playsInline
-                onLoadedData={() => setPlayError(null)}
-                onLoadedMetadata={(e) => {
-                  setPlayError(null);
-                  const vidEl = e.currentTarget;
-                  const d = vidEl.duration;
-                  if (Number.isFinite(d) && d > 0) {
-                    setSourceDuration(d);
-                    onDetectedDuration?.(roundTenth(d));
-                    // Sync full-video initial clip endSec to exact metadata duration if untouched
-                    if (
-                      scenes.length === 1 &&
-                      scenes[0].startSec === 0 &&
-                      Math.abs(scenes[0].endSec - (media.durationSec || d)) < 0.25 &&
-                      Math.abs(scenes[0].endSec - roundTenth(d)) > 0.05
-                    ) {
-                      onUpdateScene(scenes[0].id, 0, roundTenth(d));
-                    }
-                  }
-                  if (pendingSeekSecRef.current !== null) {
-                    const maxSeek = Number.isFinite(d) && d > 0 ? Math.max(0, d - 0.02) : pendingSeekSecRef.current;
-                    const target = Math.max(0, Math.min(maxSeek, pendingSeekSecRef.current));
-                    pendingSeekSecRef.current = null;
-                    if (Math.abs(vidEl.currentTime - target) > 0.04) {
-                      vidEl.currentTime = target;
-                    }
-                  }
-                }}
-                onCanPlay={(e) => {
-                  setPlayError(null);
-                  const vidEl = e.currentTarget;
-                  if (pendingSeekSecRef.current !== null) {
-                    const d = vidEl.duration;
-                    const maxSeek = Number.isFinite(d) && d > 0 ? Math.max(0, d - 0.02) : pendingSeekSecRef.current;
-                    const target = Math.max(0, Math.min(maxSeek, pendingSeekSecRef.current));
-                    pendingSeekSecRef.current = null;
-                    if (Math.abs(vidEl.currentTime - target) > 0.04) {
-                      vidEl.currentTime = target;
-                    }
-                  }
-                }}
-                onEnded={() => setIsPlaying(false)}
-                onSeeked={(e) => {
-                  const next = pendingSeekSecRef.current;
-                  if (next !== null && Math.abs(e.currentTarget.currentTime - next) > 0.04) {
-                    pendingSeekSecRef.current = null;
-                    e.currentTarget.currentTime = next;
-                  }
-                }}
-                onPlay={(e) => {
-                  setPlayError(null);
-                  if (hasVoiceEffects || voiceAttachedRef.current) {
-                    resumeAllVoiceContexts();
-                    voiceAttachedRef.current = true;
-                    applyVoiceEffectsToVideoElement(e.currentTarget, voiceSettings, true);
-                  }
-                  e.currentTarget.preservesPitch = true;
-                  e.currentTarget.playbackRate = getEffectivePlaybackSpeed(
-                    "local",
-                    editSettings.playbackSpeed,
-                    voiceSettings.speed
-                  );
-                  setIsPlaying(true);
-                }}
-                onPause={() => setIsPlaying(false)}
-                onError={() => {
-                  setIsPlaying(false);
-                  setPlayError("Could not load or play this local video file.");
-                }}
-                style={{
-                  ...(transformCss !== "none" ? { transform: transformCss } : {}),
-                  ...(filterCss !== "none" ? { filter: filterCss } : {}),
-                }}
-                className="w-full h-full object-contain bg-black origin-center transition-transform duration-75"
-              />
-            );
-          })()
+          <video
+            key={media.localUrl}
+            ref={videoRef}
+            src={media.localUrl}
+            preload="auto"
+            playsInline
+            onLoadedData={() => setPlayError(null)}
+            onLoadedMetadata={(e) => {
+              setPlayError(null);
+              const vidEl = e.currentTarget;
+              const d = vidEl.duration;
+              if (Number.isFinite(d) && d > 0) {
+                setSourceDuration(d);
+                onDetectedDuration?.(roundTenth(d));
+                // Sync full-video initial clip endSec to exact metadata duration if untouched
+                if (
+                  scenes.length === 1 &&
+                  scenes[0].startSec === 0 &&
+                  Math.abs(scenes[0].endSec - (media.durationSec || d)) < 0.25 &&
+                  Math.abs(scenes[0].endSec - roundTenth(d)) > 0.05
+                ) {
+                  onUpdateScene(scenes[0].id, 0, roundTenth(d));
+                }
+              }
+              if (pendingSeekSecRef.current !== null) {
+                const maxSeek =
+                  Number.isFinite(d) && d > 0 ? Math.max(0, d - 0.02) : pendingSeekSecRef.current;
+                const target = Math.max(0, Math.min(maxSeek, pendingSeekSecRef.current));
+                pendingSeekSecRef.current = null;
+                if (Math.abs(vidEl.currentTime - target) > 0.04) {
+                  vidEl.currentTime = target;
+                }
+              }
+            }}
+            onCanPlay={(e) => {
+              setPlayError(null);
+              const vidEl = e.currentTarget;
+              if (pendingSeekSecRef.current !== null) {
+                const d = vidEl.duration;
+                const maxSeek =
+                  Number.isFinite(d) && d > 0 ? Math.max(0, d - 0.02) : pendingSeekSecRef.current;
+                const target = Math.max(0, Math.min(maxSeek, pendingSeekSecRef.current));
+                pendingSeekSecRef.current = null;
+                if (Math.abs(vidEl.currentTime - target) > 0.04) {
+                  vidEl.currentTime = target;
+                }
+              }
+            }}
+            onEnded={() => setIsPlaying(false)}
+            onSeeked={(e) => {
+              const next = pendingSeekSecRef.current;
+              if (next !== null && Math.abs(e.currentTarget.currentTime - next) > 0.04) {
+                pendingSeekSecRef.current = null;
+                e.currentTarget.currentTime = next;
+              }
+            }}
+            onPlay={(e) => {
+              setPlayError(null);
+              e.currentTarget.preservesPitch = true;
+              e.currentTarget.playbackRate = 1;
+              setIsPlaying(true);
+            }}
+            onPause={() => setIsPlaying(false)}
+            onError={() => {
+              setIsPlaying(false);
+              setPlayError("Could not load or play this local video file.");
+            }}
+            className="w-full h-full object-contain bg-black"
+          />
         ) : (
           <div className="w-full h-full flex items-center justify-center p-4 text-center">
             <p className="text-xs text-neutral-300">
               Local video is not linked. Link or re-upload the video file to preview.
             </p>
           </div>
-        )}
-
-        <AdversarialNoiseOverlay
-          enabled={editSettings.adversarialNoise}
-          strength={editSettings.adversarialStrength}
-          animate={isPlaying}
-        />
-
-        {editSettings.vignette > 0 && (
-          <div
-            aria-hidden="true"
-            className="absolute inset-0 pointer-events-none"
-            style={{
-              background: `radial-gradient(circle, transparent 42%, rgba(0,0,0,${(
-                (editSettings.vignette / 100) * 0.85
-              ).toFixed(2)}) 100%)`,
-            }}
-          />
         )}
 
         {!isPlaying && media.localUrl && (

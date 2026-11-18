@@ -4,6 +4,7 @@ import { Pause, Play, Volume2, VolumeX } from "lucide-react";
 import type { SubtitleItem, VideoEditSettings, VideoProject, VoiceSettings } from "../types";
 import { YouTubeScenePlayer, type YouTubeScenePlayerHandle } from "./YouTubeScenePlayer";
 import { getEffectivePlaybackSpeed } from "../utils/voicePresets";
+import { findActiveSubtitle, getScrollAnchorSubtitle } from "../utils/projectTimeline";
 
 interface Stage9x16Props {
   project: VideoProject | null;
@@ -83,12 +84,9 @@ export function Stage9x16({
         )
       : cutTime;
 
-  // Keep the current subtitle selected across silent gaps until the next subtitle starts
-  const activeSub: SubtitleItem | undefined = project?.subtitles.reduce<
-    SubtitleItem | undefined
-  >((acc, s) => (highlightTime >= s.startTime ? s : acc), undefined);
-
-  const scrollTargetSub: SubtitleItem | undefined = activeSub ?? project?.subtitles[0];
+  const subtitles = project?.subtitles ?? [];
+  const activeSub: SubtitleItem | undefined = findActiveSubtitle(subtitles, highlightTime);
+  const scrollTargetSub: SubtitleItem | undefined = getScrollAnchorSubtitle(subtitles, highlightTime);
 
   // Auto-scroll the active list item smoothly inside the 9:16 list view
   useEffect(() => {

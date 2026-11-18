@@ -7,6 +7,7 @@ import {
 } from "./videoFilters";
 import { uploadBlobInChunks } from "./uploadFile";
 import { getEffectivePlaybackSpeed } from "./voicePresets";
+import { getSceneDurationSec } from "./projectTimeline";
 
 export interface ExportProgress {
   phase: "preparing" | "rendering" | "muxing";
@@ -195,10 +196,11 @@ function mapCutTimeToSourceTime(project: VideoProject, cutTime: number): number 
   let acc = 0;
   for (let i = 0; i < project.scenes.length; i++) {
     const scene = project.scenes[i];
-    if (cutTime <= acc + scene.durationSec || i === project.scenes.length - 1) {
+    const dur = getSceneDurationSec(scene);
+    if (cutTime <= acc + dur || i === project.scenes.length - 1) {
       return Math.min(scene.endSec, scene.startSec + Math.max(0, cutTime - acc));
     }
-    acc += scene.durationSec;
+    acc += dur;
   }
   return 0;
 }
@@ -281,7 +283,7 @@ export async function exportProjectToMp4(
     editSettings.playbackSpeed,
     voiceSettings.speed
   );
-  const scenesDuration = project.scenes.reduce((acc, sc) => acc + Math.max(0, sc.durationSec), 0);
+  const scenesDuration = project.scenes.reduce((acc, sc) => acc + getSceneDurationSec(sc), 0);
   const sourceTotalDuration = Math.max(0.5, scenesDuration || project.targetDurationSec || 10);
   const totalDuration = sourceTotalDuration / speed;
   const totalFrames = Math.max(1, Math.ceil(totalDuration * fps));
@@ -448,15 +450,22 @@ export async function exportProjectToMp4(
     const getActiveCardIndex = (t: number): number => {
       let idx = -1;
       for (let i = 0; i < cards.length; i++) {
-        if (t >= cards[i].sub.startTime) idx = i;
-        else break;
+        if (t >= cards[i].sub.startTime && t <= cards[i].sub.endTime) {
+          idx = i;
+        }
       }
       return idx;
     };
 
     const getScrollYForTime = (t: number): number => {
-      const activeIdx = Math.max(0, getActiveCardIndex(t));
-      const active = cards[activeIdx];
+      let anchorIdx = getActiveCardIndex(t);
+      if (anchorIdx < 0) {
+        for (let i = 0; i < cards.length; i++) {
+          if (t >= cards[i].sub.startTime) anchorIdx = i;
+          else break;
+        }
+      }
+      const active = cards[Math.max(0, anchorIdx)];
       if (!active) return 0;
       const desiredCenter = active.topY + active.height * 0.5 - listH * 0.42;
       return Math.max(0, desiredCenter);
@@ -859,58 +868,129 @@ export async function exportProjectToMp4(
     }
 
     let videoFormat: "mp4" | "webm" = "mp4";
+    let forceCfrFromFrames = false;
+    let recordedDurationSec: number | undefined;
 
     if (!videoBytes) {
-      // Fallback: MediaRecorder WebM capture (render frame 0 before starting so no blank initial frame)
-      videoFormat = "webm";
+      if (typeof MediaRecorder === "undefined" || typeof canvas.captureStream !== "function") {
+        throw new Error(
+          "This browser does not support client-side video export. Please try Chrome, Edge, or Safari 17+."
+        );
+      }
+
+      // Render frame 0 before starting stream capture so no blank initial frame is recorded
       currentScrollY = 0;
       await renderFrameAtTime(0, 0);
 
-      const stream = canvas.captureStream(fps);
-      const track = stream.getVideoTracks()[0] as
+      // Probe whether manual frame capture (captureStream(0) + requestFrame) is supported
+      const probeStream = canvas.captureStream(0);
+      const probeTrack = probeStream.getVideoTracks()[0] as
         | (MediaStreamTrack & { requestFrame?: () => void })
         | undefined;
+      const useManualCapture = typeof probeTrack?.requestFrame === "function";
+      let stream: MediaStream = probeStream;
+      let track = probeTrack;
+      if (!useManualCapture) {
+        probeStream.getTracks().forEach((tr) => tr.stop());
+        stream = canvas.captureStream(fps);
+        track = stream.getVideoTracks()[0] as
+          | (MediaStreamTrack & { requestFrame?: () => void })
+          | undefined;
+      }
 
-      const mimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
-        ? "video/webm;codecs=vp9"
-        : MediaRecorder.isTypeSupported("video/webm;codecs=vp8")
-          ? "video/webm;codecs=vp8"
-          : "video/webm";
+      const candidates: { mime: string; format: "webm" | "mp4" }[] = [
+        { mime: "video/webm;codecs=vp9", format: "webm" },
+        { mime: "video/webm;codecs=vp8", format: "webm" },
+        { mime: "video/webm", format: "webm" },
+        { mime: "video/mp4;codecs=avc1", format: "mp4" },
+        { mime: "video/mp4", format: "mp4" },
+      ];
+      const chosen = candidates.find(
+        (c) => typeof MediaRecorder.isTypeSupported === "function" && MediaRecorder.isTypeSupported(c.mime)
+      );
+      videoFormat = chosen?.format ?? "webm";
 
-      const recorder = new MediaRecorder(stream, {
-        mimeType,
-        videoBitsPerSecond: 2_600_000,
-      });
+      let recorder: MediaRecorder;
+      try {
+        recorder = chosen
+          ? new MediaRecorder(stream, {
+              mimeType: chosen.mime,
+              videoBitsPerSecond: 2_600_000,
+            })
+          : new MediaRecorder(stream, { videoBitsPerSecond: 2_600_000 });
+        if (!chosen && recorder.mimeType.includes("mp4")) {
+          videoFormat = "mp4";
+        }
+      } catch (err) {
+        stream.getTracks().forEach((tr) => tr.stop());
+        throw new Error(
+          err instanceof Error
+            ? `Video export recording is not supported on this browser: ${err.message}`
+            : "Video export recording is not supported on this browser."
+        );
+      }
+
       const chunks: BlobPart[] = [];
       recorder.ondataavailable = (e) => {
         if (e.data.size > 0) chunks.push(e.data);
       };
-      const donePromise = new Promise<Uint8Array>((resolve) => {
+      const donePromise = new Promise<Uint8Array>((resolve, reject) => {
+        recorder.onerror = () => {
+          reject(new Error("Video recording failed during export."));
+        };
         recorder.onstop = async () => {
-          const blob = new Blob(chunks, { type: "video/webm" });
-          resolve(new Uint8Array(await blob.arrayBuffer()));
+          try {
+            const blob = new Blob(chunks, {
+              type: chosen?.mime || (videoFormat === "mp4" ? "video/mp4" : "video/webm"),
+            });
+            resolve(new Uint8Array(await blob.arrayBuffer()));
+          } catch (e) {
+            reject(e instanceof Error ? e : new Error("Failed to read recorded video."));
+          }
         };
       });
 
+      const recStartMs = performance.now();
       recorder.start(250);
-      const frameIntervalMs = 1000 / fps;
-      for (let frameIdx = 0; frameIdx < totalFrames; frameIdx++) {
-        const frameStart = performance.now();
-        const t = (frameIdx / fps) * speed;
-        await renderFrameAtTime(t, frameIdx);
-        track?.requestFrame?.();
-        if (frameIdx % 12 === 0) {
-          onProgress({
-            phase: "rendering",
-            percent: 10 + Math.round((frameIdx / totalFrames) * 75),
-          });
+      try {
+        const frameIntervalMs = 1000 / fps;
+        for (let frameIdx = 0; frameIdx < totalFrames; frameIdx++) {
+          const frameStart = performance.now();
+          const t = (frameIdx / fps) * speed;
+          await renderFrameAtTime(t, frameIdx);
+          if (useManualCapture) {
+            track?.requestFrame?.();
+            if (frameIdx % 4 === 0) {
+              await new Promise((r) => setTimeout(r, 0));
+            }
+          } else {
+            const elapsed = performance.now() - frameStart;
+            const waitMs = Math.max(4, frameIntervalMs - elapsed);
+            await new Promise((r) => setTimeout(r, waitMs));
+          }
+          if (frameIdx % 12 === 0) {
+            onProgress({
+              phase: "rendering",
+              percent: 10 + Math.round((frameIdx / totalFrames) * 75),
+            });
+          }
         }
-        const elapsed = performance.now() - frameStart;
-        const waitMs = Math.max(4, frameIntervalMs - elapsed);
-        await new Promise((r) => setTimeout(r, waitMs));
+      } finally {
+        if (recorder.state !== "inactive") {
+          recorder.stop();
+        }
+        recordedDurationSec = Math.max(0.1, (performance.now() - recStartMs) / 1000);
+        try {
+          videoBytes = await donePromise;
+        } finally {
+          stream.getTracks().forEach((tr) => tr.stop());
+        }
       }
-      recorder.stop();
-      videoBytes = await donePromise;
+      forceCfrFromFrames = useManualCapture;
+    }
+
+    if (!videoBytes || videoBytes.byteLength < 512) {
+      throw new Error("Rendered video stream was empty. Please try exporting again.");
     }
 
     onProgress({ phase: "muxing", percent: 90 });
@@ -936,12 +1016,23 @@ export async function exportProjectToMp4(
         uploadId: resolvedUploadId,
         scenes: project.scenes,
         voiceSettings: { ...voiceSettings, speed },
+        targetDurationSec: totalDuration,
+        expectedFrameCount: totalFrames,
+        forceCfrFromFrames,
+        recordedDurationSec,
       }),
     });
 
     if (!resp.ok) {
       const errText = await resp.text();
-      throw new Error(errText || "Failed to finalize MP4 download.");
+      let errMsg = errText;
+      try {
+        const parsed = JSON.parse(errText) as { error?: string };
+        if (parsed?.error) errMsg = parsed.error;
+      } catch {
+        // Keep plain text
+      }
+      throw new Error(errMsg || "Failed to finalize MP4 download.");
     }
 
     onProgress({ phase: "muxing", percent: 100 });

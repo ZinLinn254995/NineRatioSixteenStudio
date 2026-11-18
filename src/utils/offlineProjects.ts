@@ -2,6 +2,9 @@ import type {
   ActiveMediaSource,
   SavedProjectRecord,
   SceneSelection,
+  SpeakingScene,
+  SubtitleItem,
+  SubtitleWord,
   VideoEditSettings,
   VideoProject,
   VoiceSettings,
@@ -19,6 +22,7 @@ interface MediaBlobEntry {
   blob: Blob;
   fileName: string;
   fileType: string;
+  contentFingerprint?: string;
   updatedAt: number;
 }
 
@@ -112,6 +116,107 @@ async function verifyStoredBlob(blob?: Blob | null): Promise<boolean> {
   }
 }
 
+export async function computeBlobFingerprint(blob: Blob): Promise<string> {
+  const size = blob.size;
+  const sampleLen = 64 * 1024;
+  const slices: ArrayBuffer[] = [];
+  slices.push(await blob.slice(0, Math.min(size, sampleLen)).arrayBuffer());
+  if (size > sampleLen * 2) {
+    const midStart = Math.floor((size - sampleLen) / 2);
+    slices.push(await blob.slice(midStart, midStart + sampleLen).arrayBuffer());
+  }
+  if (size > sampleLen) {
+    const tailStart = Math.max(sampleLen, size - sampleLen);
+    slices.push(await blob.slice(tailStart, size).arrayBuffer());
+  }
+
+  const sizeTrailer = new ArrayBuffer(8);
+  new DataView(sizeTrailer).setFloat64(0, size);
+  slices.push(sizeTrailer);
+
+  const totalBytes = slices.reduce((acc, s) => acc + s.byteLength, 0);
+  const combined = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const s of slices) {
+    combined.set(new Uint8Array(s), offset);
+    offset += s.byteLength;
+  }
+
+  if (typeof crypto !== "undefined" && crypto.subtle?.digest) {
+    try {
+      const digest = await crypto.subtle.digest("SHA-256", combined);
+      const hex = Array.from(new Uint8Array(digest))
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
+      return `${size}:${hex}`;
+    } catch {
+      // Fallback below
+    }
+  }
+
+  let h1 = 0x811c9dc5;
+  let h2 = 0x9e3779b9;
+  for (let i = 0; i < combined.length; i++) {
+    h1 ^= combined[i];
+    h1 = Math.imul(h1, 0x01000193);
+    h2 ^= combined[i] + ((i & 0xff) << 1);
+    h2 = Math.imul(h2, 0x85ebca6b);
+  }
+  return `${size}:${(h1 >>> 0).toString(16).padStart(8, "0")}${(h2 >>> 0).toString(16).padStart(8, "0")}`;
+}
+
+function clampFinite(value: unknown, min: number, max: number, fallback: number): number {
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
+function sanitizeVoiceSettings(raw: unknown): VoiceSettings {
+  const rec = raw && typeof raw === "object" ? (raw as Partial<VoiceSettings>) : {};
+  return {
+    presetId: typeof rec.presetId === "string" ? rec.presetId : DEFAULT_VOICE_SETTINGS.presetId,
+    pitchSemitones: clampFinite(rec.pitchSemitones, -12, 12, DEFAULT_VOICE_SETTINGS.pitchSemitones),
+    speed: clampFinite(rec.speed, 0.25, 2.5, DEFAULT_VOICE_SETTINGS.speed),
+    tone: clampFinite(rec.tone, -10, 10, DEFAULT_VOICE_SETTINGS.tone),
+    echo: clampFinite(rec.echo, 0, 100, DEFAULT_VOICE_SETTINGS.echo),
+    robot: clampFinite(rec.robot, 0, 100, DEFAULT_VOICE_SETTINGS.robot),
+  };
+}
+
+function sanitizeEditSettings(raw: unknown): VideoEditSettings {
+  const rec = raw && typeof raw === "object" ? (raw as Partial<VideoEditSettings>) : {};
+  return {
+    filterPreset: typeof rec.filterPreset === "string" ? rec.filterPreset : DEFAULT_VIDEO_EDIT.filterPreset,
+    playbackSpeed: clampFinite(rec.playbackSpeed, 0.25, 2.5, DEFAULT_VIDEO_EDIT.playbackSpeed),
+    zoom: clampFinite(rec.zoom, 0.5, 3, DEFAULT_VIDEO_EDIT.zoom),
+    panX: clampFinite(rec.panX, -50, 50, DEFAULT_VIDEO_EDIT.panX),
+    panY: clampFinite(rec.panY, -50, 50, DEFAULT_VIDEO_EDIT.panY),
+    rotateDeg: clampFinite(rec.rotateDeg, -180, 180, DEFAULT_VIDEO_EDIT.rotateDeg),
+    flipH: typeof rec.flipH === "boolean" ? rec.flipH : DEFAULT_VIDEO_EDIT.flipH,
+    flipV: typeof rec.flipV === "boolean" ? rec.flipV : DEFAULT_VIDEO_EDIT.flipV,
+    fitMode: rec.fitMode === "contain" || rec.fitMode === "cover" ? rec.fitMode : DEFAULT_VIDEO_EDIT.fitMode,
+    videoHeightPct: clampFinite(rec.videoHeightPct, 26, 52, DEFAULT_VIDEO_EDIT.videoHeightPct),
+    brightness: clampFinite(rec.brightness, 20, 200, DEFAULT_VIDEO_EDIT.brightness),
+    contrast: clampFinite(rec.contrast, 20, 200, DEFAULT_VIDEO_EDIT.contrast),
+    saturation: clampFinite(rec.saturation, 0, 250, DEFAULT_VIDEO_EDIT.saturation),
+    hueDeg: clampFinite(rec.hueDeg, -180, 180, DEFAULT_VIDEO_EDIT.hueDeg),
+    sepia: clampFinite(rec.sepia, 0, 100, DEFAULT_VIDEO_EDIT.sepia),
+    grayscale: clampFinite(rec.grayscale, 0, 100, DEFAULT_VIDEO_EDIT.grayscale),
+    blurPx: clampFinite(rec.blurPx, 0, 20, DEFAULT_VIDEO_EDIT.blurPx),
+    vignette: clampFinite(rec.vignette, 0, 100, DEFAULT_VIDEO_EDIT.vignette),
+    adversarialNoise:
+      typeof rec.adversarialNoise === "boolean"
+        ? rec.adversarialNoise
+        : DEFAULT_VIDEO_EDIT.adversarialNoise,
+    adversarialStrength: clampFinite(
+      rec.adversarialStrength,
+      1,
+      32,
+      DEFAULT_VIDEO_EDIT.adversarialStrength
+    ),
+  };
+}
+
 export async function captureLocalVideoThumbnail(localUrl: string): Promise<string | undefined> {
   if (typeof document === "undefined" || !localUrl) return undefined;
   return new Promise((resolve) => {
@@ -191,8 +296,17 @@ export async function listSavedProjects(): Promise<SavedProjectRecord[]> {
     return items
       .map((item) => ({
         ...item,
-        voiceSettings: { ...DEFAULT_VOICE_SETTINGS, ...item.voiceSettings },
-        editSettings: { ...DEFAULT_VIDEO_EDIT, ...item.editSettings },
+        scenes: Array.isArray(item.scenes) ? item.scenes : [],
+        selectedScenes: Array.isArray(item.selectedScenes) ? item.selectedScenes : [],
+        subtitles: Array.isArray(item.subtitles)
+          ? item.subtitles.map((sub) => ({
+              ...sub,
+              words: Array.isArray(sub.words) ? sub.words : [],
+            }))
+          : [],
+        keyframeUrls: Array.isArray(item.keyframeUrls) ? item.keyframeUrls : [],
+        voiceSettings: sanitizeVoiceSettings(item.voiceSettings),
+        editSettings: sanitizeEditSettings(item.editSettings),
       }))
       .sort((a, b) => b.updatedAt - a.updatedAt);
   } finally {
@@ -276,15 +390,38 @@ export async function saveOfflineProject(
       await txDone(tx);
     }
 
+    const localFile = project.localFile ?? activeMedia?.localFile;
+    const resolvedMimeType = localFile
+      ? inferVideoMimeType(localFile.name, localFile.type)
+      : existingRecord?.localFileType;
+
+    const existingBlobValid =
+      project.sourceType === "local" && existingBlobEntry?.blob
+        ? await verifyStoredBlob(existingBlobEntry.blob)
+        : false;
+
+    const fileFingerprint =
+      project.sourceType === "local" && localFile
+        ? await computeBlobFingerprint(localFile)
+        : undefined;
+
+    const fileChangedFromExisting = Boolean(
+      localFile &&
+        (!existingBlobEntry ||
+          existingBlobEntry.fileName !== localFile.name ||
+          existingBlobEntry.blob.size !== localFile.size ||
+          !existingBlobEntry.contentFingerprint ||
+          existingBlobEntry.contentFingerprint !== fileFingerprint)
+    );
+
     let thumbnail =
       activeMedia?.thumbnail ||
       project.keyframeUrls[0] ||
-      existingRecord?.thumbnail;
+      (fileChangedFromExisting ? undefined : existingRecord?.thumbnail);
 
     if (!thumbnail && project.sourceType === "youtube" && project.videoId) {
       thumbnail = `https://i.ytimg.com/vi/${project.videoId}/hqdefault.jpg`;
     }
-    const localFile = project.localFile ?? activeMedia?.localFile;
     if (!thumbnail && project.sourceType === "local") {
       if (localFile) {
         const tempThumbUrl = URL.createObjectURL(localFile);
@@ -307,15 +444,6 @@ export async function saveOfflineProject(
             endSec: sc.endSec,
           }));
 
-    const resolvedMimeType = localFile
-      ? inferVideoMimeType(localFile.name, localFile.type)
-      : existingRecord?.localFileType;
-
-    const existingBlobValid =
-      project.sourceType === "local" && existingBlobEntry?.blob
-        ? await verifyStoredBlob(existingBlobEntry.blob)
-        : false;
-
     const baseRecord: SavedProjectRecord = {
       id,
       title: (input.title ?? project.title).trim() || "Untitled Project",
@@ -329,11 +457,11 @@ export async function saveOfflineProject(
       scenes: project.scenes.map((s) => ({ ...s })),
       subtitles: project.subtitles.map((sub) => ({
         ...sub,
-        words: sub.words.map((w) => ({ ...w })),
+        words: (Array.isArray(sub.words) ? sub.words : []).map((w) => ({ ...w })),
       })),
       keyframeUrls: [...project.keyframeUrls],
-      voiceSettings: { ...DEFAULT_VOICE_SETTINGS, ...voiceSettings },
-      editSettings: { ...DEFAULT_VIDEO_EDIT, ...editSettings },
+      voiceSettings: sanitizeVoiceSettings(voiceSettings),
+      editSettings: sanitizeEditSettings(editSettings),
       hasLocalVideoBlob: Boolean((project.sourceType === "local" && localFile) || existingBlobValid),
       localFileName: localFile?.name || existingRecord?.localFileName,
       localFileType: resolvedMimeType,
@@ -344,13 +472,9 @@ export async function saveOfflineProject(
 
     let blobSaved = true;
 
-    // Save materialized byte-backed Blob if missing, unreadable, or file changed
+    // Save materialized byte-backed Blob if missing, unreadable, or content/fingerprint changed
     if (project.sourceType === "local" && localFile) {
-      const shouldWriteBlob =
-        !existingBlobValid ||
-        !existingBlobEntry ||
-        existingBlobEntry.fileName !== localFile.name ||
-        existingBlobEntry.blob.size !== localFile.size;
+      const shouldWriteBlob = !existingBlobValid || fileChangedFromExisting;
 
       if (shouldWriteBlob) {
         try {
@@ -364,6 +488,7 @@ export async function saveOfflineProject(
             blob: byteBackedBlob,
             fileName: localFile.name,
             fileType: resolvedMimeType || "",
+            contentFingerprint: fileFingerprint,
             updatedAt: now,
           } satisfies MediaBlobEntry);
           await txDone(blobTx);
@@ -380,8 +505,8 @@ export async function saveOfflineProject(
           }
         } catch {
           blobSaved = false;
-          baseRecord.hasLocalVideoBlob = existingBlobValid;
-          if (!existingBlobValid) {
+          baseRecord.hasLocalVideoBlob = existingBlobValid && !fileChangedFromExisting;
+          if (!existingBlobValid || fileChangedFromExisting) {
             try {
               const delTx = db.transaction(STORE_BLOBS, "readwrite");
               delTx.objectStore(STORE_BLOBS).delete(id);
@@ -447,15 +572,15 @@ export async function attachLocalVideoToSavedProject(
     if (!existing) return { record: null, blobSaved: false };
 
     const resolvedMime = inferVideoMimeType(file.name, file.type);
+    const fingerprint = await computeBlobFingerprint(file);
     const tempUrl = URL.createObjectURL(file);
-    let thumbnail = existing.thumbnail;
+    let thumbnail: string | undefined;
     try {
-      if (!thumbnail) {
-        thumbnail = await captureLocalVideoThumbnail(tempUrl);
-      }
+      thumbnail = await captureLocalVideoThumbnail(tempUrl);
     } finally {
       URL.revokeObjectURL(tempUrl);
     }
+    thumbnail = thumbnail || existing.thumbnail;
 
     let blobSaved = true;
     try {
@@ -466,6 +591,7 @@ export async function attachLocalVideoToSavedProject(
         blob: byteBackedBlob,
         fileName: file.name,
         fileType: resolvedMime,
+        contentFingerprint: fingerprint,
         updatedAt: Date.now(),
       } satisfies MediaBlobEntry);
       await txDone(blobTx);
@@ -550,33 +676,191 @@ export async function importProjectFromJsonText(
     throw new Error("This file is not a valid 9:16 Studio project.");
   }
 
+  const validatedScenes: SpeakingScene[] = raw.scenes.map((sc, idx) => {
+    if (!sc || typeof sc !== "object") {
+      throw new Error(`Invalid scene entry at index ${idx + 1}.`);
+    }
+    const startSec = Number((sc as Partial<SpeakingScene>).startSec);
+    const endSec = Number((sc as Partial<SpeakingScene>).endSec);
+    if (!Number.isFinite(startSec) || !Number.isFinite(endSec) || startSec < 0 || endSec <= startSec) {
+      throw new Error(`Scene ${idx + 1} has invalid or out-of-order timing values.`);
+    }
+    return {
+      id:
+        typeof (sc as Partial<SpeakingScene>).id === "string" && (sc as Partial<SpeakingScene>).id!.trim()
+          ? (sc as Partial<SpeakingScene>).id
+          : `proj-sc-${idx}-${Math.round(startSec * 10)}-${Math.round(endSec * 10)}`,
+      index: idx,
+      startSec: Number(startSec.toFixed(2)),
+      endSec: Number(endSec.toFixed(2)),
+      durationSec: Number(Math.max(0.1, endSec - startSec).toFixed(2)),
+      summary:
+        typeof (sc as Partial<SpeakingScene>).summary === "string"
+          ? (sc as Partial<SpeakingScene>).summary!
+          : `Scene ${idx + 1}`,
+    };
+  });
+
+  if (raw.selectedScenes !== undefined && !Array.isArray(raw.selectedScenes)) {
+    throw new Error("Project file contains invalid selectedScenes data.");
+  }
+
+  const validatedSelectedScenes: SceneSelection[] = Array.isArray(raw.selectedScenes)
+    ? raw.selectedScenes.map((sel, idx) => {
+        if (!sel || typeof sel !== "object") {
+          throw new Error(`Invalid selected scene at index ${idx + 1}.`);
+        }
+        const startSec = Number((sel as Partial<SceneSelection>).startSec);
+        const endSec = Number((sel as Partial<SceneSelection>).endSec);
+        if (
+          !Number.isFinite(startSec) ||
+          !Number.isFinite(endSec) ||
+          startSec < 0 ||
+          endSec <= startSec
+        ) {
+          throw new Error(`Selected scene ${idx + 1} has invalid timing values.`);
+        }
+        return {
+          id:
+            typeof (sel as Partial<SceneSelection>).id === "string" &&
+            (sel as Partial<SceneSelection>).id!.trim()
+              ? (sel as Partial<SceneSelection>).id!
+              : `sc-${idx}-${Math.round(startSec * 10)}-${Math.round(endSec * 10)}`,
+          startSec: Number(startSec.toFixed(2)),
+          endSec: Number(endSec.toFixed(2)),
+        };
+      })
+    : validatedScenes.map((sc, idx) => ({
+        id: sc.id || `sc-${idx}-${Math.round(sc.startSec * 10)}-${Math.round(sc.endSec * 10)}`,
+        startSec: sc.startSec,
+        endSec: sc.endSec,
+      }));
+
+  const computedTargetDur = validatedScenes.reduce(
+    (acc, sc) => acc + Math.max(0.1, sc.endSec - sc.startSec),
+    0
+  );
+
+  const validatedSubtitles: SubtitleItem[] = raw.subtitles.map((sub, idx) => {
+    if (!sub || typeof sub !== "object") {
+      throw new Error(`Invalid subtitle entry at index ${idx + 1}.`);
+    }
+    const s = sub as Partial<SubtitleItem>;
+    const startTime = Number(s.startTime);
+    const endTime = Number(s.endTime);
+    if (
+      !Number.isFinite(startTime) ||
+      !Number.isFinite(endTime) ||
+      startTime < 0 ||
+      endTime <= startTime
+    ) {
+      throw new Error(`Subtitle ${idx + 1} has invalid or out-of-order timing values.`);
+    }
+    if (!Array.isArray(s.words)) {
+      throw new Error(`Subtitle ${idx + 1} is missing a valid words array.`);
+    }
+    if (typeof s.thaiPhonetic !== "string" && typeof s.burmese !== "string") {
+      throw new Error(`Subtitle ${idx + 1} is missing subtitle text.`);
+    }
+
+    const subDur = Math.max(0.1, endTime - startTime);
+    const validatedWords: SubtitleWord[] = s.words.map((w, wi) => {
+      if (!w || typeof w !== "object" || typeof (w as Partial<SubtitleWord>).phonetic !== "string") {
+        throw new Error(`Subtitle ${idx + 1}, word ${wi + 1} is missing required fields.`);
+      }
+      const ww = w as Partial<SubtitleWord>;
+      const wStart = Number(ww.startOffsetSec);
+      const wEnd = Number(ww.endOffsetSec);
+      if (!Number.isFinite(wStart) || !Number.isFinite(wEnd) || wStart < 0 || wEnd < wStart) {
+        throw new Error(`Subtitle ${idx + 1}, word ${wi + 1} has invalid timing values.`);
+      }
+      return {
+        phonetic: ww.phonetic!,
+        thai: typeof ww.thai === "string" ? ww.thai : ww.phonetic!,
+        burmeseGloss: typeof ww.burmeseGloss === "string" ? ww.burmeseGloss : "",
+        startOffsetSec: Number(Math.min(subDur, Math.max(0, wStart)).toFixed(2)),
+        endOffsetSec: Number(Math.min(subDur, Math.max(wStart, wEnd)).toFixed(2)),
+      };
+    });
+
+    const rawSrcStart = Number(s.sourceStartSec);
+    const rawSrcEnd = Number(s.sourceEndSec);
+    const sourceStartSec =
+      Number.isFinite(rawSrcStart) && rawSrcStart >= 0 ? rawSrcStart : startTime;
+    const sourceEndSec =
+      Number.isFinite(rawSrcEnd) && rawSrcEnd > sourceStartSec
+        ? rawSrcEnd
+        : sourceStartSec + subDur;
+
+    const rawSceneIndex = Number(s.sceneIndex);
+    const sceneIndex =
+      Number.isInteger(rawSceneIndex) && rawSceneIndex >= 0 ? rawSceneIndex : 0;
+
+    return {
+      id: typeof s.id === "string" && s.id.trim() ? s.id : `sub-${idx + 1}`,
+      sceneIndex,
+      startTime: Number(startTime.toFixed(2)),
+      endTime: Number(endTime.toFixed(2)),
+      sourceStartSec: Number(sourceStartSec.toFixed(2)),
+      sourceEndSec: Number(sourceEndSec.toFixed(2)),
+      originalSpokenText: typeof s.originalSpokenText === "string" ? s.originalSpokenText : "",
+      thaiPhonetic: typeof s.thaiPhonetic === "string" ? s.thaiPhonetic : "",
+      thaiScript: typeof s.thaiScript === "string" ? s.thaiScript : "",
+      burmese: typeof s.burmese === "string" ? s.burmese : "",
+      words: validatedWords,
+    };
+  });
+
   const now = Date.now();
   const id = `proj-${now}-${Math.random().toString(36).slice(2, 8)}`;
+
+  const parsedSourceDur = Number(raw.sourceDurationSec);
+  const parsedTargetDur = Number(raw.targetDurationSec);
 
   const record: SavedProjectRecord = {
     id,
     title: raw.title.trim() || "Imported Project",
     sourceType: raw.sourceType,
-    videoId: raw.videoId,
-    channel: raw.channel || (raw.sourceType === "local" ? "Local Video" : "YouTube"),
+    videoId: typeof raw.videoId === "string" ? raw.videoId : undefined,
+    channel:
+      typeof raw.channel === "string" && raw.channel.trim()
+        ? raw.channel
+        : raw.sourceType === "local"
+          ? "Local Video"
+          : "YouTube",
     thumbnail:
-      raw.thumbnail ||
-      (raw.sourceType === "youtube" && raw.videoId
-        ? `https://i.ytimg.com/vi/${raw.videoId}/hqdefault.jpg`
-        : undefined),
-    sourceDurationSec: Number(raw.sourceDurationSec) || 0,
-    targetDurationSec: Number(raw.targetDurationSec) || 0,
-    selectedScenes: Array.isArray(raw.selectedScenes) ? raw.selectedScenes : [],
-    scenes: raw.scenes,
-    subtitles: raw.subtitles,
-    keyframeUrls: Array.isArray(raw.keyframeUrls) ? raw.keyframeUrls : [],
-    voiceSettings: { ...DEFAULT_VOICE_SETTINGS, ...(raw.voiceSettings || {}) },
-    editSettings: { ...DEFAULT_VIDEO_EDIT, ...(raw.editSettings || {}) },
+      typeof raw.thumbnail === "string"
+        ? raw.thumbnail
+        : raw.sourceType === "youtube" && typeof raw.videoId === "string"
+          ? `https://i.ytimg.com/vi/${raw.videoId}/hqdefault.jpg`
+          : undefined,
+    sourceDurationSec:
+      Number.isFinite(parsedSourceDur) && parsedSourceDur > 0
+        ? parsedSourceDur
+        : Math.max(computedTargetDur, 0),
+    targetDurationSec:
+      Number.isFinite(parsedTargetDur) && parsedTargetDur > 0
+        ? parsedTargetDur
+        : Number(computedTargetDur.toFixed(2)),
+    selectedScenes: validatedSelectedScenes,
+    scenes: validatedScenes,
+    subtitles: validatedSubtitles.sort((a, b) => a.startTime - b.startTime),
+    keyframeUrls: Array.isArray(raw.keyframeUrls)
+      ? raw.keyframeUrls.filter((u): u is string => typeof u === "string")
+      : [],
+    voiceSettings: sanitizeVoiceSettings(raw.voiceSettings),
+    editSettings: sanitizeEditSettings(raw.editSettings),
     hasLocalVideoBlob: false,
-    localFileName: raw.localFileName,
-    localFileType: raw.localFileType,
-    localFileSize: raw.localFileSize,
-    createdAt: Number(raw.createdAt) || now,
+    localFileName: typeof raw.localFileName === "string" ? raw.localFileName : undefined,
+    localFileType: typeof raw.localFileType === "string" ? raw.localFileType : undefined,
+    localFileSize:
+      typeof raw.localFileSize === "number" && Number.isFinite(raw.localFileSize) && raw.localFileSize >= 0
+        ? raw.localFileSize
+        : undefined,
+    createdAt:
+      typeof raw.createdAt === "number" && Number.isFinite(raw.createdAt) && raw.createdAt > 0
+        ? raw.createdAt
+        : now,
     updatedAt: now,
   };
 

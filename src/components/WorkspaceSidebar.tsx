@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Check, Clock, Film, Loader2, Plus, Trash2, X } from "lucide-react";
+import { Check, Clock, Film, Loader2, Plus, RefreshCw, Trash2, X } from "lucide-react";
 import type {
   ActiveMediaSource,
   SavedProjectRecord,
@@ -17,6 +17,7 @@ import { YouTubePreviewPanel } from "./YouTubePreviewPanel";
 import { VideoEditPanel } from "./VideoEditPanel";
 import { SavedProjectsPanel } from "./SavedProjectsPanel";
 import { getEffectivePlaybackSpeed } from "../utils/voicePresets";
+import { findActiveSubtitle, getSceneDurationSec } from "../utils/projectTimeline";
 
 export type WorkspaceTab =
   | "videos"
@@ -33,6 +34,7 @@ interface WorkspaceSidebarProps {
   selectedVideoId?: string;
   activeQuery: string;
   licenseFilter: YouTubeLicenseFilter;
+  thaiOnly: boolean;
   hasMoreVideos: boolean;
   isLoadingMore: boolean;
   localMedia: ActiveMediaSource | null;
@@ -54,8 +56,10 @@ interface WorkspaceSidebarProps {
   isSavingProject: boolean;
   onSelectVideo: (video: YouTubeVideo) => void;
   onChangeLicenseFilter: (license: YouTubeLicenseFilter) => void;
+  onToggleThaiOnly: () => void;
   onLoadMoreVideos: () => void;
   onResetToRecommended: () => void;
+  onRefreshRecommended?: () => void;
   onUpdateScene: (id: string, startSec: number, endSec: number) => void;
   onRemoveScene: (id: string) => void;
   onReplaceScenes: (scenes: SceneSelection[]) => void;
@@ -110,6 +114,7 @@ export function WorkspaceSidebar({
   selectedVideoId,
   activeQuery,
   licenseFilter,
+  thaiOnly,
   hasMoreVideos,
   isLoadingMore,
   localMedia,
@@ -131,8 +136,10 @@ export function WorkspaceSidebar({
   isSavingProject,
   onSelectVideo,
   onChangeLicenseFilter,
+  onToggleThaiOnly,
   onLoadMoreVideos,
   onResetToRecommended,
+  onRefreshRecommended,
   onUpdateScene,
   onRemoveScene,
   onReplaceScenes,
@@ -334,7 +341,7 @@ export function WorkspaceSidebar({
                     ({videos.length}{hasMoreVideos ? "+" : ""})
                   </span>
                 )}
-                {activeQuery && (
+                {activeQuery ? (
                   <button
                     type="button"
                     onClick={onResetToRecommended}
@@ -342,37 +349,79 @@ export function WorkspaceSidebar({
                   >
                     Recommended
                   </button>
+                ) : (
+                  onRefreshRecommended && (
+                    <button
+                      type="button"
+                      onClick={onRefreshRecommended}
+                      disabled={isSearching}
+                      title="Refresh recommended videos"
+                      aria-label="Refresh recommended videos"
+                      className="h-6 px-2 rounded-md border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 hover:bg-neutral-100 dark:hover:bg-neutral-900 text-[11px] font-medium text-neutral-600 dark:text-neutral-300 flex items-center gap-1 shrink-0 cursor-pointer disabled:opacity-40 transition-colors"
+                    >
+                      <RefreshCw className={`w-3 h-3 ${isSearching ? "animate-spin" : ""}`} />
+                      <span>Refresh</span>
+                    </button>
+                  )
                 )}
               </div>
 
-              <div
-                role="group"
-                aria-label="Reuse license filter"
-                className="inline-flex items-center p-0.5 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 shrink-0"
-              >
-                {(
-                  [
-                    { id: "all", label: "All Licenses" },
-                    { id: "creative_commons", label: "Creative Commons" },
-                    { id: "standard", label: "Standard" },
-                  ] as const
-                ).map((opt) => {
-                  const selected = licenseFilter === opt.id;
-                  return (
-                    <button
-                      key={opt.id}
-                      type="button"
-                      onClick={() => onChangeLicenseFilter(opt.id)}
-                      className={`px-2.5 py-1 text-[11px] font-medium rounded-md whitespace-nowrap transition-colors cursor-pointer ${
-                        selected
-                          ? "bg-white dark:bg-neutral-800 text-neutral-950 dark:text-white shadow-xs"
-                          : "text-neutral-500 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-200"
-                      }`}
-                    >
-                      {opt.label}
-                    </button>
-                  );
-                })}
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={thaiOnly}
+                  onClick={onToggleThaiOnly}
+                  disabled={isSearching}
+                  title="Show Thai-language videos only"
+                  className={`h-8 px-2.5 rounded-lg border text-[11px] font-medium flex items-center gap-2 whitespace-nowrap transition-colors cursor-pointer disabled:opacity-50 ${
+                    thaiOnly
+                      ? "border-neutral-950 bg-neutral-950 text-white dark:border-white dark:bg-white dark:text-neutral-950"
+                      : "border-neutral-200 dark:border-neutral-800 bg-neutral-100 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-300 hover:text-neutral-950 dark:hover:text-white"
+                  }`}
+                >
+                  <span>Thai Only</span>
+                  <span
+                    aria-hidden="true"
+                    className={`w-7 h-4 rounded-full p-0.5 transition-colors flex items-center ${
+                      thaiOnly
+                        ? "bg-emerald-500 justify-end"
+                        : "bg-neutral-300 dark:bg-neutral-700 justify-start"
+                    }`}
+                  >
+                    <span className="w-3 h-3 rounded-full bg-white shadow-xs" />
+                  </span>
+                </button>
+
+                <div
+                  role="group"
+                  aria-label="Reuse license filter"
+                  className="inline-flex items-center p-0.5 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 shrink-0"
+                >
+                  {(
+                    [
+                      { id: "all", label: "All Licenses" },
+                      { id: "creative_commons", label: "Creative Commons" },
+                      { id: "standard", label: "Standard" },
+                    ] as const
+                  ).map((opt) => {
+                    const selected = licenseFilter === opt.id;
+                    return (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => onChangeLicenseFilter(opt.id)}
+                        className={`px-2.5 py-1 text-[11px] font-medium rounded-md whitespace-nowrap transition-colors cursor-pointer ${
+                          selected
+                            ? "bg-white dark:bg-neutral-800 text-neutral-950 dark:text-white shadow-xs"
+                            : "text-neutral-500 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-200"
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
             </div>
 
@@ -401,19 +450,32 @@ export function WorkspaceSidebar({
               <div className="py-16 flex flex-col items-center justify-center text-center text-neutral-500 dark:text-neutral-400">
                 <Film className="w-6 h-6 mb-2 opacity-60" />
                 <p className="text-sm">
-                  {licenseFilter !== "all"
-                    ? "No videos matched this license filter"
-                    : "No YouTube videos found"}
+                  {thaiOnly
+                    ? "No Thai-language videos matched this filter"
+                    : licenseFilter !== "all"
+                      ? "No videos matched this license filter"
+                      : "No YouTube videos found"}
                 </p>
-                {licenseFilter !== "all" && (
-                  <button
-                    type="button"
-                    onClick={() => onChangeLicenseFilter("all")}
-                    className="mt-2 text-xs font-medium underline text-neutral-900 dark:text-neutral-100 cursor-pointer"
-                  >
-                    Show all licenses
-                  </button>
-                )}
+                <div className="mt-2 flex items-center gap-3">
+                  {thaiOnly && (
+                    <button
+                      type="button"
+                      onClick={onToggleThaiOnly}
+                      className="text-xs font-medium underline text-neutral-900 dark:text-neutral-100 cursor-pointer"
+                    >
+                      Show all languages
+                    </button>
+                  )}
+                  {licenseFilter !== "all" && (
+                    <button
+                      type="button"
+                      onClick={() => onChangeLicenseFilter("all")}
+                      className="text-xs font-medium underline text-neutral-900 dark:text-neutral-100 cursor-pointer"
+                    >
+                      Show all licenses
+                    </button>
+                  )}
+                </div>
               </div>
             ) : (
               <>
@@ -504,8 +566,6 @@ export function WorkspaceSidebar({
             hasMoreVideos={hasMoreVideos}
             isLoadingMore={isLoadingMore}
             isSearching={isSearching}
-            voiceSettings={voiceSettings}
-            editSettings={editSettings}
             initialSec={ytPreviewSec}
             seekRequest={ytSeekRequest}
             onSelectPreviewVideo={onSelectVideo}
@@ -520,8 +580,6 @@ export function WorkspaceSidebar({
             <ScenePicker
               media={localMedia}
               scenes={selectedScenes}
-              voiceSettings={voiceSettings}
-              editSettings={editSettings}
               isProcessing={isProcessing}
               isTabActive={activeTab === "scenes"}
               onUpdateScene={onUpdateScene}
@@ -539,8 +597,6 @@ export function WorkspaceSidebar({
           <ScenePicker
             media={null}
             scenes={selectedScenes}
-            voiceSettings={voiceSettings}
-            editSettings={editSettings}
             isProcessing={isProcessing}
             onUpdateScene={onUpdateScene}
             onRemoveScene={onRemoveScene}
@@ -594,10 +650,11 @@ export function WorkspaceSidebar({
                 {project.scenes.map((sc, idx) => {
                   let sceneCutStart = 0;
                   for (let i = 0; i < idx; i++) {
-                    sceneCutStart += project.scenes[i].durationSec;
+                    sceneCutStart += getSceneDurationSec(project.scenes[i]);
                   }
+                  const sceneDur = getSceneDurationSec(sc);
                   const isSceneActive =
-                    cutTime >= sceneCutStart && cutTime < sceneCutStart + sc.durationSec;
+                    cutTime >= sceneCutStart && cutTime < sceneCutStart + sceneDur;
 
                   return (
                     <button
@@ -745,10 +802,7 @@ export function WorkspaceSidebar({
             ) : (
               <div className="divide-y divide-neutral-200 dark:divide-neutral-800 border border-neutral-200 dark:border-neutral-800 rounded-xl overflow-hidden">
                 {(() => {
-                  const activeSubId = project.subtitles.reduce<string | undefined>(
-                    (acc, s) => (cutTime >= s.startTime ? s.id : acc),
-                    undefined
-                  );
+                  const activeSubId = findActiveSubtitle(project.subtitles, cutTime)?.id;
                   return project.subtitles.map((sub: SubtitleItem) => {
                     const isCurrent = sub.id === activeSubId;
                     const isEditingTime = editingTimeId === sub.id;

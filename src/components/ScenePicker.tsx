@@ -1,14 +1,11 @@
 import { useRef } from "react";
 import { Loader2, Upload, X } from "lucide-react";
-import type { ActiveMediaSource, SceneSelection, VideoEditSettings, VoiceSettings } from "../types";
-import { getEffectivePlaybackSpeed } from "../utils/voicePresets";
+import type { ActiveMediaSource, SceneSelection } from "../types";
 import { LocalVideoTimelineEditor } from "./LocalVideoTimelineEditor";
 
 interface ScenePickerProps {
   media?: ActiveMediaSource | null;
   scenes: SceneSelection[];
-  voiceSettings: VoiceSettings;
-  editSettings: VideoEditSettings;
   isProcessing: boolean;
   onUpdateScene: (id: string, startSec: number, endSec: number) => void;
   onRemoveScene: (id: string) => void;
@@ -23,8 +20,6 @@ interface ScenePickerProps {
 export function ScenePicker({
   media,
   scenes,
-  voiceSettings,
-  editSettings,
   isProcessing,
   onUpdateScene,
   onRemoveScene,
@@ -106,8 +101,6 @@ export function ScenePicker({
       <LocalVideoTimelineEditor
         media={media}
         scenes={scenes}
-        voiceSettings={voiceSettings}
-        editSettings={editSettings}
         onUpdateScene={onUpdateScene}
         onRemoveScene={onRemoveScene}
         onReplaceScenes={onReplaceScenes}
@@ -119,18 +112,7 @@ export function ScenePicker({
       <div className="flex items-center justify-between gap-4 pt-1">
         <span className="text-xs font-mono-tabular text-neutral-500 dark:text-neutral-400">
           {scenes.length} {scenes.length === 1 ? "scene" : "scenes"} ·{" "}
-          {(() => {
-            const spd = getEffectivePlaybackSpeed(
-              media.sourceType,
-              editSettings.playbackSpeed,
-              voiceSettings.speed
-            );
-            const scaled = Math.round((totalSelectedSec / spd) * 10) / 10;
-            const rawRounded = Math.round(totalSelectedSec * 10) / 10;
-            return Math.abs(spd - 1) > 0.01
-              ? `${rawRounded}s → ${scaled}s (${spd.toFixed(2).replace(/\.00$/, "")}x)`
-              : `${rawRounded}s`;
-          })()}
+          {`${Math.round(totalSelectedSec * 10) / 10}s`}
         </span>
 
         <button

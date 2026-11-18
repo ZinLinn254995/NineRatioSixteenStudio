@@ -23,8 +23,8 @@ import { resumeAllVoiceContexts } from "./utils/webAudioVoice";
 import { safeReadJson, uploadBlobInChunks } from "./utils/uploadFile";
 import {
   ensureSceneIds,
+  getSceneDurationSec,
   remapSubtitlesToScenes,
-  roundTenth,
 } from "./utils/projectTimeline";
 import {
   attachLocalVideoToSavedProject,
@@ -48,6 +48,7 @@ export default function App() {
   const [searchInput, setSearchInput] = useState("");
   const [activeQuery, setActiveQuery] = useState("");
   const [licenseFilter, setLicenseFilter] = useState<YouTubeLicenseFilter>("all");
+  const [thaiOnly, setThaiOnly] = useState<boolean>(false);
   const [videos, setVideos] = useState<YouTubeVideo[]>([]);
   const [nextContinuation, setNextContinuation] = useState<string | null>(null);
   const [isSearching, setIsSearching] = useState(false);
@@ -154,7 +155,9 @@ export default function App() {
     async (
       query: string,
       license: YouTubeLicenseFilter,
-      continuation?: string | null
+      onlyThai: boolean,
+      continuation?: string | null,
+      forceRefresh = false
     ) => {
       const seq = ++searchSeqRef.current;
       const cleanQuery = query.trim();
@@ -172,12 +175,17 @@ export default function App() {
         const params = new URLSearchParams({
           q: cleanQuery,
           license,
+          ...(onlyThai ? { thaiOnly: "1" } : {}),
         });
         if (continuation) {
           params.set("continuation", continuation);
+        } else if (forceRefresh) {
+          params.set("refresh", "1");
         }
 
-        const resp = await fetch(`/api/youtube/search?${params.toString()}`);
+        const resp = await fetch(`/api/youtube/search?${params.toString()}`, {
+          cache: "no-store",
+        });
         const data = await safeReadJson<{
           videos?: YouTubeVideo[];
           nextContinuation?: string | null;
@@ -215,7 +223,7 @@ export default function App() {
   );
 
   useEffect(() => {
-    runSearch("", "all");
+    runSearch("", "all", false);
   }, [runSearch]);
 
   // Pre-load the first recommended YouTube video into YouTube Preview by default
@@ -236,20 +244,31 @@ export default function App() {
   const handleChangeLicenseFilter = useCallback(
     (nextLicense: YouTubeLicenseFilter) => {
       setLicenseFilter(nextLicense);
-      runSearch(activeQuery, nextLicense);
+      runSearch(activeQuery, nextLicense, thaiOnly);
     },
-    [activeQuery, runSearch]
+    [activeQuery, thaiOnly, runSearch]
   );
+
+  const handleToggleThaiOnly = useCallback(() => {
+    const nextThai = !thaiOnly;
+    setThaiOnly(nextThai);
+    runSearch(activeQuery, licenseFilter, nextThai, null, true);
+  }, [activeQuery, licenseFilter, thaiOnly, runSearch]);
 
   const handleLoadMoreVideos = useCallback(() => {
     if (!nextContinuation || isSearching || isLoadingMore) return;
-    runSearch(activeQuery, licenseFilter, nextContinuation);
-  }, [activeQuery, licenseFilter, nextContinuation, isSearching, isLoadingMore, runSearch]);
+    runSearch(activeQuery, licenseFilter, thaiOnly, nextContinuation);
+  }, [activeQuery, licenseFilter, thaiOnly, nextContinuation, isSearching, isLoadingMore, runSearch]);
 
   const handleResetToRecommended = useCallback(() => {
     setSearchInput("");
-    runSearch("", licenseFilter);
-  }, [licenseFilter, runSearch]);
+    runSearch("", licenseFilter, thaiOnly, null, true);
+  }, [licenseFilter, thaiOnly, runSearch]);
+
+  const handleRefreshRecommended = useCallback(() => {
+    if (isSearching) return;
+    runSearch("", licenseFilter, thaiOnly, null, true);
+  }, [isSearching, licenseFilter, thaiOnly, runSearch]);
 
   useEffect(() => {
     let mounted = true;
@@ -304,7 +323,7 @@ export default function App() {
 
     const resolvedMime = inferVideoMimeType(rawFile.name, rawFile.type);
     let file: File = rawFile;
-    if (rawFile.size > 0 && rawFile.size <= 120 * 1024 * 1024) {
+    if (rawFile.size > 0 && rawFile.size <= 64 * 1024 * 1024) {
       try {
         const byteBlob = await materializeReadableBlob(rawFile, resolvedMime);
         if (activeRunIdRef.current !== uploadRunId) return;
@@ -322,6 +341,8 @@ export default function App() {
     const localUrl = registerBlobUrl(file);
     const durationSec = await new Promise<number>((resolve) => {
       const v = document.createElement("video");
+      v.muted = true;
+      v.playsInline = true;
       v.preload = "metadata";
       let done = false;
       const finish = (dur: number) => {
@@ -333,7 +354,7 @@ export default function App() {
         v.removeAttribute("src");
         resolve(dur);
       };
-      const timer = setTimeout(() => finish(120), 4000);
+      const timer = setTimeout(() => finish(120), 6000);
       v.onloadedmetadata = () => {
         const raw = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : 120;
         finish(Math.max(0.5, Math.round(raw * 10) / 10));
@@ -562,8 +583,8 @@ export default function App() {
   const handleUpdateProjectScenes = useCallback(
     (nextScenesRaw: SpeakingScene[]) => {
       const nextScenes = ensureSceneIds(nextScenesRaw);
-      const nextDuration = roundTenth(
-        nextScenes.reduce((acc, sc) => acc + Math.max(0.1, sc.endSec - sc.startSec), 0)
+      const nextDuration = Number(
+        nextScenes.reduce((acc, sc) => acc + getSceneDurationSec(sc), 0).toFixed(2)
       );
       checkTimelineDirty(nextScenes);
 
@@ -585,8 +606,8 @@ export default function App() {
   const handleRestoreProjectSnapshot = useCallback(
     (scenesRaw: SpeakingScene[], subtitlesOverride?: SubtitleItem[]) => {
       const nextScenes = ensureSceneIds(scenesRaw);
-      const nextDuration = roundTenth(
-        nextScenes.reduce((acc, sc) => acc + Math.max(0.1, sc.endSec - sc.startSec), 0)
+      const nextDuration = Number(
+        nextScenes.reduce((acc, sc) => acc + getSceneDurationSec(sc), 0).toFixed(2)
       );
       checkTimelineDirty(nextScenes);
 
@@ -595,7 +616,7 @@ export default function App() {
         const nextSubtitles = subtitlesOverride
           ? subtitlesOverride.map((sub) => ({
               ...sub,
-              words: sub.words.map((w) => ({ ...w })),
+              words: (Array.isArray(sub.words) ? sub.words : []).map((w) => ({ ...w })),
             }))
           : remapSubtitlesToScenes(
               timelineBaselineRef.current?.subtitles ?? prev.subtitles,
@@ -616,8 +637,8 @@ export default function App() {
     const base = timelineBaselineRef.current;
     if (!base) return;
     const nextScenes = ensureSceneIds(base.scenes).map((s) => ({ ...s }));
-    const nextDuration = roundTenth(
-      nextScenes.reduce((acc, sc) => acc + Math.max(0.1, sc.endSec - sc.startSec), 0)
+    const nextDuration = Number(
+      nextScenes.reduce((acc, sc) => acc + getSceneDurationSec(sc), 0).toFixed(2)
     );
     setTimelineDirty(false);
     setProject((prev) => {
@@ -628,7 +649,7 @@ export default function App() {
         targetDurationSec: nextDuration,
         subtitles: base.subtitles.map((sub) => ({
           ...sub,
-          words: sub.words.map((w) => ({ ...w })),
+          words: (Array.isArray(sub.words) ? sub.words : []).map((w) => ({ ...w })),
         })),
       };
     });
@@ -765,47 +786,45 @@ export default function App() {
   };
 
   const handleUpdateSubtitleTiming = (id: string, nextStart: number, nextEnd: number) => {
-    setProject((prev) => {
-      if (!prev) return prev;
-      const maxDur = Math.max(0.5, prev.targetDurationSec || 10);
-      const startTime = Number(Math.max(0, Math.min(maxDur - 0.2, nextStart)).toFixed(2));
-      const endTime = Number(Math.max(startTime + 0.2, Math.min(maxDur, nextEnd)).toFixed(2));
-      const newDur = Math.max(0.2, endTime - startTime);
-      const mappedStart = mapCutTimeToSource(prev.scenes, startTime);
-      const mappedEnd = mapCutTimeToSource(prev.scenes, endTime);
+    if (!project) return;
+    const maxDur = Math.max(0.5, project.targetDurationSec || 10);
+    const startTime = Number(Math.max(0, Math.min(maxDur - 0.2, nextStart)).toFixed(2));
+    const endTime = Number(Math.max(startTime + 0.2, Math.min(maxDur, nextEnd)).toFixed(2));
+    const newDur = Math.max(0.2, endTime - startTime);
+    const mappedStart = mapCutTimeToSource(project.scenes, startTime);
+    const mappedEnd = mapCutTimeToSource(project.scenes, endTime);
 
-      const updateList = (list: SubtitleItem[]) =>
-        list
-          .map((sub) => {
-            if (sub.id !== id) return sub;
-            const oldDur = Math.max(0.2, sub.endTime - sub.startTime);
-            const scale = newDur / oldDur;
-            const words =
-              sub.words.length > 0
-                ? sub.words.map((w) => ({
-                    ...w,
-                    startOffsetSec: Number((w.startOffsetSec * scale).toFixed(2)),
-                    endOffsetSec: Number(Math.min(newDur, w.endOffsetSec * scale).toFixed(2)),
-                  }))
-                : buildWordsFromPhonetic(sub.thaiPhonetic, 0, newDur);
-            return {
-              ...sub,
-              sceneIndex: mappedStart.sceneIndex,
-              startTime,
-              endTime,
-              sourceStartSec: Number(mappedStart.sourceSec.toFixed(2)),
-              sourceEndSec: Number(mappedEnd.sourceSec.toFixed(2)),
-              words,
-            };
-          })
-          .sort((a, b) => a.startTime - b.startTime);
+    const updateList = (list: SubtitleItem[]) =>
+      list
+        .map((sub) => {
+          if (sub.id !== id) return sub;
+          const oldDur = Math.max(0.2, sub.endTime - sub.startTime);
+          const scale = newDur / oldDur;
+          const words =
+            sub.words.length > 0
+              ? sub.words.map((w) => ({
+                  ...w,
+                  startOffsetSec: Number((w.startOffsetSec * scale).toFixed(2)),
+                  endOffsetSec: Number(Math.min(newDur, w.endOffsetSec * scale).toFixed(2)),
+                }))
+              : buildWordsFromPhonetic(sub.thaiPhonetic, 0, newDur);
+          return {
+            ...sub,
+            sceneIndex: mappedStart.sceneIndex,
+            startTime,
+            endTime,
+            sourceStartSec: Number(mappedStart.sourceSec.toFixed(2)),
+            sourceEndSec: Number(mappedEnd.sourceSec.toFixed(2)),
+            words,
+          };
+        })
+        .sort((a, b) => a.startTime - b.startTime);
 
-      if (timelineBaselineRef.current) {
-        timelineBaselineRef.current.subtitles = updateList(timelineBaselineRef.current.subtitles);
-      }
+    if (timelineBaselineRef.current) {
+      timelineBaselineRef.current.subtitles = updateList(timelineBaselineRef.current.subtitles);
+    }
 
-      return { ...prev, subtitles: updateList(prev.subtitles) };
-    });
+    setProject((prev) => (prev ? { ...prev, subtitles: updateList(prev.subtitles) } : prev));
   };
 
   const handleDownloadMp4 = async () => {
@@ -1009,12 +1028,14 @@ export default function App() {
       channel: record.channel,
       sourceDurationSec: record.sourceDurationSec,
       targetDurationSec: record.targetDurationSec,
-      scenes: ensureSceneIds(record.scenes.map((s) => ({ ...s }))),
-      subtitles: record.subtitles.map((sub) => ({
+      scenes: ensureSceneIds(
+        (Array.isArray(record.scenes) ? record.scenes : []).map((s) => ({ ...s }))
+      ),
+      subtitles: (Array.isArray(record.subtitles) ? record.subtitles : []).map((sub) => ({
         ...sub,
-        words: sub.words.map((w) => ({ ...w })),
+        words: (Array.isArray(sub.words) ? sub.words : []).map((w) => ({ ...w })),
       })),
-      keyframeUrls: [...record.keyframeUrls],
+      keyframeUrls: Array.isArray(record.keyframeUrls) ? [...record.keyframeUrls] : [],
     };
     setProject(openedProj);
     setBaselineFromProject(openedProj);
@@ -1100,7 +1121,7 @@ export default function App() {
     try {
       const resolvedMime = inferVideoMimeType(rawFile.name, rawFile.type);
       let file: File = rawFile;
-      if (rawFile.size > 0 && rawFile.size <= 120 * 1024 * 1024) {
+      if (rawFile.size > 0 && rawFile.size <= 64 * 1024 * 1024) {
         try {
           const byteBlob = await materializeReadableBlob(rawFile, resolvedMime);
           file = new File(
@@ -1153,7 +1174,7 @@ export default function App() {
           onSubmit={(e) => {
             e.preventDefault();
             setActiveTab("videos");
-            runSearch(searchInput, licenseFilter);
+            runSearch(searchInput, licenseFilter, thaiOnly);
           }}
           className="flex-1 max-w-xl flex items-center gap-2"
         >
@@ -1173,7 +1194,7 @@ export default function App() {
                 onClick={() => {
                   setSearchInput("");
                   setActiveTab("videos");
-                  runSearch("", licenseFilter);
+                  runSearch("", licenseFilter, thaiOnly);
                 }}
                 aria-label="Clear search and show recommended"
                 className="w-6 h-6 rounded flex items-center justify-center text-neutral-400 hover:text-neutral-950 dark:hover:text-white absolute right-1.5 top-1/2 -translate-y-1/2 cursor-pointer"
@@ -1337,6 +1358,7 @@ export default function App() {
             selectedVideoId={youtubeMedia?.videoId}
             activeQuery={activeQuery}
             licenseFilter={licenseFilter}
+            thaiOnly={thaiOnly}
             hasMoreVideos={Boolean(nextContinuation)}
             isLoadingMore={isLoadingMore}
             localMedia={localMedia}
@@ -1358,8 +1380,10 @@ export default function App() {
             isSavingProject={isSavingProject}
             onSelectVideo={handleSelectVideo}
             onChangeLicenseFilter={handleChangeLicenseFilter}
+            onToggleThaiOnly={handleToggleThaiOnly}
             onLoadMoreVideos={handleLoadMoreVideos}
             onResetToRecommended={handleResetToRecommended}
+            onRefreshRecommended={handleRefreshRecommended}
             onUpdateScene={handleUpdateScene}
             onRemoveScene={handleRemoveScene}
             onReplaceScenes={setSelectedScenes}

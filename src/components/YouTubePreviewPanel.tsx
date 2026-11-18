@@ -1,15 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, ChevronLeft, ChevronRight, Copy, Film, Loader2 } from "lucide-react";
-import type {
-  ActiveMediaSource,
-  VideoEditSettings,
-  VoiceSettings,
-  YouTubeVideo,
-} from "../types";
-import { buildCssFilterString, buildCssTransformString } from "../utils/videoFilters";
-import { getEffectivePlaybackSpeed } from "../utils/voicePresets";
+import type { ActiveMediaSource, YouTubeVideo } from "../types";
 import { loadYouTubeIframeAPI } from "../utils/youtubeApi";
-import { AdversarialNoiseOverlay } from "./AdversarialNoiseOverlay";
 
 interface YTPreviewPlayer {
   seekTo: (seconds: number, allowSeekAhead: boolean) => void;
@@ -26,8 +18,6 @@ interface YouTubePreviewPanelProps {
   hasMoreVideos: boolean;
   isLoadingMore: boolean;
   isSearching: boolean;
-  voiceSettings: VoiceSettings;
-  editSettings: VideoEditSettings;
   initialSec?: number;
   seekRequest?: { sec: number; nonce: number } | null;
   onSelectPreviewVideo: (video: YouTubeVideo) => void;
@@ -42,8 +32,6 @@ export function YouTubePreviewPanel({
   hasMoreVideos,
   isLoadingMore,
   isSearching,
-  voiceSettings,
-  editSettings,
   initialSec = 0,
   seekRequest,
   onSelectPreviewVideo,
@@ -245,22 +233,6 @@ export function YouTubePreviewPanel({
     }
   }, [seekRequest]);
 
-  useEffect(() => {
-    if (!media) return;
-    const effectiveSpeed = getEffectivePlaybackSpeed(
-      media.sourceType,
-      editSettings.playbackSpeed,
-      voiceSettings.speed
-    );
-    if (media.sourceType === "youtube" && ytReadyRef.current && ytPlayerRef.current) {
-      try {
-        ytPlayerRef.current.setPlaybackRate?.(effectiveSpeed);
-      } catch {
-        // ignore
-      }
-    }
-  }, [media?.sourceType, voiceSettings.speed, editSettings.playbackSpeed]);
-
   if (!media || media.sourceType !== "youtube" || !media.videoId) {
     return (
       <div className="max-w-3xl mx-auto w-full pb-6">
@@ -281,36 +253,11 @@ export function YouTubePreviewPanel({
     );
   }
 
-  const transformCss = buildCssTransformString(editSettings);
-  const filterCss = buildCssFilterString(editSettings);
-
   return (
     <div className="max-w-3xl mx-auto w-full flex flex-col gap-4 pb-6">
       {/* Dedicated Standalone YouTube Player */}
       <div className="relative w-full aspect-video rounded-xl overflow-hidden bg-neutral-950 border border-neutral-200 dark:border-neutral-800 shadow-xs">
-        <div
-          ref={ytHostRef}
-          className="w-full h-full origin-center transition-transform duration-75"
-          style={{
-            ...(transformCss !== "none" ? { transform: transformCss } : {}),
-            ...(filterCss !== "none" ? { filter: filterCss } : {}),
-          }}
-        />
-        <AdversarialNoiseOverlay
-          enabled={editSettings.adversarialNoise}
-          strength={editSettings.adversarialStrength}
-        />
-        {editSettings.vignette > 0 && (
-          <div
-            aria-hidden="true"
-            className="absolute inset-0 pointer-events-none"
-            style={{
-              background: `radial-gradient(circle, transparent 42%, rgba(0,0,0,${(
-                (editSettings.vignette / 100) * 0.85
-              ).toFixed(2)}) 100%)`,
-            }}
-          />
-        )}
+        <div ref={ytHostRef} className="w-full h-full" />
         {ytError && (
           <div className="absolute inset-0 flex items-center justify-center p-4 bg-black/75 text-center">
             <p className="text-xs text-white leading-relaxed max-w-xs">{ytError}</p>

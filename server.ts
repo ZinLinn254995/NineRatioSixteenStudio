@@ -16,14 +16,186 @@ import type {
 } from "./src/types.ts";
 
 const execFileAsync = promisify(execFile);
+const FFMPEG_EXEC_OPTS = { maxBuffer: 16 * 1024 * 1024 };
 
 const app = express();
 const PORT = 3000;
 
 app.use(express.json({ limit: "100mb" }));
 
-// Temporary store for uploaded local videos so audio can be extracted & muxed cleanly
-const uploadedFiles = new Map<string, string>();
+// Temporary store for uploaded local videos with TTL expiration, size validation, and active-operation locking
+const MAX_UPLOAD_BYTES = 500 * 1024 * 1024;
+const INCOMPLETE_UPLOAD_TTL_MS = 20 * 60 * 1000;
+const COMPLETED_UPLOAD_TTL_MS = 2 * 60 * 60 * 1000;
+const UPLOAD_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+
+interface UploadSession {
+  id: string;
+  filePath: string;
+  createdAt: number;
+  lastAccessedAt: number;
+  expectedSize?: number;
+  receivedBytes: number;
+  finalized: boolean;
+  activeLocks: number;
+  pendingDelete: boolean;
+  writeChain: Promise<void>;
+}
+
+const uploadSessions = new Map<string, UploadSession>();
+
+function registerUploadSession(
+  uploadId: string,
+  filePath: string,
+  opts: { expectedSize?: number; receivedBytes?: number; finalized?: boolean } = {}
+): UploadSession {
+  const now = Date.now();
+  const session: UploadSession = {
+    id: uploadId,
+    filePath,
+    createdAt: now,
+    lastAccessedAt: now,
+    expectedSize: opts.expectedSize,
+    receivedBytes: opts.receivedBytes ?? 0,
+    finalized: Boolean(opts.finalized),
+    activeLocks: 0,
+    pendingDelete: false,
+    writeChain: Promise.resolve(),
+  };
+  uploadSessions.set(uploadId, session);
+  return session;
+}
+
+function touchUploadSession(session: UploadSession, markFinalized = false): void {
+  session.lastAccessedAt = Date.now();
+  if (markFinalized) {
+    session.finalized = true;
+  }
+}
+
+async function deleteUploadSessionNow(session: UploadSession): Promise<void> {
+  if (uploadSessions.get(session.id) === session) {
+    uploadSessions.delete(session.id);
+  }
+  await fs.promises.rm(session.filePath, { force: true }).catch(() => {});
+}
+
+async function deleteUploadSession(uploadId: string): Promise<boolean> {
+  const session = uploadSessions.get(uploadId);
+  if (!session) return false;
+  if (session.activeLocks > 0) {
+    session.pendingDelete = true;
+    return true;
+  }
+  await deleteUploadSessionNow(session);
+  return true;
+}
+
+async function withUploadSessionLock<T>(
+  uploadId: string,
+  fn: (filePath: string, session: UploadSession) => Promise<T>,
+  opts: { markFinalized?: boolean } = {}
+): Promise<T | null> {
+  const session = uploadSessions.get(uploadId);
+  if (!session || session.pendingDelete || !fs.existsSync(session.filePath)) {
+    return null;
+  }
+  session.activeLocks += 1;
+  touchUploadSession(session, Boolean(opts.markFinalized));
+  try {
+    return await fn(session.filePath, session);
+  } finally {
+    session.activeLocks = Math.max(0, session.activeLocks - 1);
+    touchUploadSession(session);
+    if (session.activeLocks === 0 && session.pendingDelete) {
+      await deleteUploadSessionNow(session);
+    }
+  }
+}
+
+async function sweepExpiredUploadSessions(): Promise<void> {
+  const now = Date.now();
+  const entries = Array.from(uploadSessions.values());
+  for (const session of entries) {
+    if (session.activeLocks > 0) continue;
+    const ttl = session.finalized ? COMPLETED_UPLOAD_TTL_MS : INCOMPLETE_UPLOAD_TTL_MS;
+    const isExpired = now - session.lastAccessedAt > ttl;
+    const missingFile = !fs.existsSync(session.filePath);
+    if (session.pendingDelete || isExpired || missingFile) {
+      await deleteUploadSessionNow(session);
+    }
+  }
+}
+
+async function sweepOrphanedTempFiles(): Promise<void> {
+  try {
+    const tmpRoot = os.tmpdir();
+    const activePaths = new Set(Array.from(uploadSessions.values()).map((s) => s.filePath));
+    const names = await fs.promises.readdir(tmpRoot);
+    const now = Date.now();
+    for (const name of names) {
+      if (
+        !name.startsWith("thai-studio-upload-") &&
+        !name.startsWith("upload-vid-") &&
+        !name.startsWith("thai-prep-") &&
+        !name.startsWith("thai-studio-")
+      ) {
+        continue;
+      }
+      const fullPath = path.join(tmpRoot, name);
+      if (activePaths.has(fullPath)) continue;
+      try {
+        const st = await fs.promises.stat(fullPath);
+        if (now - st.mtimeMs > COMPLETED_UPLOAD_TTL_MS) {
+          await fs.promises.rm(fullPath, { recursive: true, force: true }).catch(() => {});
+        }
+      } catch {
+        // ignore stat/rm race
+      }
+    }
+  } catch {
+    // ignore readdir failure
+  }
+}
+
+async function probeMediaInfo(
+  mediaPath: string
+): Promise<{ hasAudio: boolean; hasVideo: boolean; durationSec: number }> {
+  try {
+    const { stdout } = await execFileAsync(
+      "ffprobe",
+      [
+        "-v",
+        "quiet",
+        "-print_format",
+        "json",
+        "-show_streams",
+        "-show_format",
+        mediaPath,
+      ],
+      FFMPEG_EXEC_OPTS
+    );
+    const parsed = JSON.parse(stdout || "{}") as {
+      streams?: { codec_type?: string; duration?: string }[];
+      format?: { duration?: string };
+    };
+    const streams = Array.isArray(parsed.streams) ? parsed.streams : [];
+    const hasAudio = streams.some((s) => s.codec_type === "audio");
+    const hasVideo = streams.some((s) => s.codec_type === "video");
+    const rawFmtDur = Number(parsed.format?.duration);
+    const videoStream = streams.find((s) => s.codec_type === "video");
+    const rawStreamDur = Number(videoStream?.duration);
+    const durationSec =
+      Number.isFinite(rawFmtDur) && rawFmtDur > 0
+        ? rawFmtDur
+        : Number.isFinite(rawStreamDur) && rawStreamDur > 0
+          ? rawStreamDur
+          : 0;
+    return { hasAudio, hasVideo, durationSec };
+  } catch {
+    return { hasAudio: false, hasVideo: true, durationSec: 0 };
+  }
+}
 
 function getGeminiClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -342,56 +514,205 @@ async function annotateVideoLicenses(
   return out;
 }
 
-let cachedRecommendedPool: { videos: YouTubeVideo[]; fetchedAt: number } | null = null;
+function shuffleArray<T>(items: T[]): T[] {
+  const arr = [...items];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const tmp = arr[i];
+    arr[i] = arr[j];
+    arr[j] = tmp;
+  }
+  return arr;
+}
 
-async function getRecommendedPool(): Promise<YouTubeVideo[]> {
-  if (
-    cachedRecommendedPool &&
-    Date.now() - cachedRecommendedPool.fetchedAt < 10 * 60 * 1000
-  ) {
-    return cachedRecommendedPool.videos;
+const DISCOVERY_SEARCH_TOPICS = [
+  "science explainer",
+  "nature documentary",
+  "world news today",
+  "street food tour",
+  "history documentary",
+  "space exploration",
+  "cooking tutorial",
+  "travel vlog",
+  "english conversation practice",
+  "animation short film",
+  "technology explained",
+  "wildlife animals",
+];
+
+const THAI_DISCOVERY_SEARCH_TOPICS = [
+  "สารคดี วิทยาศาสตร์ น่าทึ่ง",
+  "สารคดี ธรรมชาติ สัตว์โลก",
+  "เล่าเรื่อง ประวัติศาสตร์ โลก",
+  "ความรู้รอบตัว วิทยาศาสตร์",
+  "สรุปข่าว วันนี้ ล่าสุด",
+  "ทำอาหาร อาหารไทย วิธีทำ",
+  "ท่องเที่ยว ไทย vlog พากิน",
+  "เทคโนโลยี อธิบาย ง่ายๆ",
+  "ฝึกพูดภาษาไทย บทสนทนา",
+  "พอดแคสต์ เล่าเรื่อง ภาษาไทย",
+  "อาหารข้างทาง รีวิว ไทย",
+  "สารคดี อวกาศ จักรวาล",
+];
+
+const CREATIVE_COMMONS_DISCOVERY_QUERIES = [
+  "creative commons documentary",
+  "creative commons nature",
+  "creative commons science",
+  "creative commons travel",
+  "creative commons history",
+  "creative commons education",
+  "creative commons animation",
+  "creative commons",
+];
+
+const THAI_CREATIVE_COMMONS_QUERIES = [
+  "สารคดี ภาษาไทย",
+  "ความรู้ วิทยาศาสตร์ ไทย",
+  "ท่องเที่ยว ธรรมชาติ ไทย",
+  "ทำอาหาร ไทย",
+  "ประวัติศาสตร์ เล่าเรื่อง",
+  "การศึกษา ภาษาไทย",
+  "เทคโนโลยี ความรู้",
+  "ชีวิตประจำวัน ภาษาไทย",
+];
+
+const THAI_SCRIPT_REGEX = /[\u0E00-\u0E7F]/;
+
+function isThaiLanguageVideo(v: YouTubeVideo): boolean {
+  return THAI_SCRIPT_REGEX.test(v.title) || THAI_SCRIPT_REGEX.test(v.channel);
+}
+
+function getYouTubeHeaders(thaiOnly: boolean): Record<string, string> {
+  return {
+    ...YT_HEADERS,
+    "Accept-Language": thaiOnly ? "th-TH,th;q=0.9,en;q=0.5" : YT_HEADERS["Accept-Language"],
+    "Content-Type": "application/json",
+  };
+}
+
+function getYouTubeClientContext(
+  config: { clientVersion: string },
+  thaiOnly: boolean
+) {
+  return {
+    client: {
+      clientName: "WEB",
+      clientVersion: config.clientVersion,
+      hl: thaiOnly ? "th" : "en",
+      gl: thaiOnly ? "TH" : "US",
+    },
+  };
+}
+
+const cachedRecommendedPools: Record<
+  "all" | "th",
+  { videos: YouTubeVideo[]; fetchedAt: number } | null
+> = {
+  all: null,
+  th: null,
+};
+const recommendedFeedSessions = new Map<string, { videos: YouTubeVideo[]; createdAt: number }>();
+
+function storeRecommendedFeedSession(videos: YouTubeVideo[]): string {
+  const now = Date.now();
+  for (const [key, entry] of recommendedFeedSessions.entries()) {
+    if (now - entry.createdAt > 30 * 60 * 1000) {
+      recommendedFeedSessions.delete(key);
+    }
+  }
+  while (recommendedFeedSessions.size >= 40) {
+    const oldestKey = recommendedFeedSessions.keys().next().value;
+    if (!oldestKey) break;
+    recommendedFeedSessions.delete(oldestKey);
+  }
+  const feedId = crypto.randomBytes(6).toString("hex");
+  recommendedFeedSessions.set(feedId, { videos, createdAt: now });
+  return feedId;
+}
+
+async function getRecommendedPool(
+  forceRefresh = false,
+  thaiOnly = false
+): Promise<YouTubeVideo[]> {
+  const poolKey = thaiOnly ? "th" : "all";
+  const existing = cachedRecommendedPools[poolKey];
+  if (!forceRefresh && existing && Date.now() - existing.fetchedAt < 3 * 60 * 1000) {
+    return existing.videos;
   }
 
   const config = await getInnerTubeConfig();
-  const browseHubs = [
-    "UCtFRv9O2AHqOZjjynzrv-xg", // Learning & Explainers
-    "UC4R8DWoMoI7CAwX8_LjQHig", // Live & Popular
-    "UCEgdi0XIXXZ-qJOFPf4JSKw", // Sports
-    "UCLA_DiR1FfKNvjuUpBHmylQ", // NASA (public domain / CC & educational)
-    "UCYfdidRxbB8Qhf0Nx7ioOYw", // News
-  ];
+  const headers = getYouTubeHeaders(thaiOnly);
+  const context = getYouTubeClientContext(config, thaiOnly);
 
-  const lists = await Promise.all(
+  const browseHubs = thaiOnly
+    ? shuffleArray([
+        "UCtFRv9O2AHqOZjjynzrv-xg", // Learning & Explainers
+        "UCYfdidRxbB8Qhf0Nx7ioOYw", // News
+      ])
+    : shuffleArray([
+        "UCtFRv9O2AHqOZjjynzrv-xg", // Learning & Explainers
+        "UC4R8DWoMoI7CAwX8_LjQHig", // Live & Popular
+        "UCEgdi0XIXXZ-qJOFPf4JSKw", // Sports
+        "UCYfdidRxbB8Qhf0Nx7ioOYw", // News
+      ]);
+
+  const randomTopics = thaiOnly
+    ? shuffleArray(THAI_DISCOVERY_SEARCH_TOPICS).slice(0, 4)
+    : shuffleArray(DISCOVERY_SEARCH_TOPICS).slice(0, 2);
+
+  const hubListsPromise = Promise.all(
     browseHubs.map(async (browseId) => {
       try {
         const resp = await fetch(
           `https://www.youtube.com/youtubei/v1/browse?key=${config.apiKey}`,
           {
             method: "POST",
-            headers: { ...YT_HEADERS, "Content-Type": "application/json" },
+            headers,
             body: JSON.stringify({
-              context: {
-                client: {
-                  clientName: "WEB",
-                  clientVersion: config.clientVersion,
-                  hl: "en",
-                  gl: "US",
-                },
-              },
+              context,
               browseId,
             }),
           }
         );
         if (!resp.ok) return [] as YouTubeVideo[];
         const data = await resp.json();
-        return extractVideosAndContinuation(data).videos;
+        const vids = extractVideosAndContinuation(data).videos;
+        return thaiOnly ? vids.filter(isThaiLanguageVideo) : vids;
       } catch {
         return [] as YouTubeVideo[];
       }
     })
   );
 
-  // Interleave round-robin across hubs so recommended feed is balanced and diverse
+  const topicListsPromise = Promise.all(
+    randomTopics.map(async (topicQuery) => {
+      try {
+        const resp = await fetch(
+          `https://www.youtube.com/youtubei/v1/search?key=${config.apiKey}`,
+          {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              context,
+              query: topicQuery,
+            }),
+          }
+        );
+        if (!resp.ok) return [] as YouTubeVideo[];
+        const data = await resp.json();
+        const vids = extractVideosAndContinuation(data).videos;
+        return thaiOnly ? vids.filter(isThaiLanguageVideo) : vids;
+      } catch {
+        return [] as YouTubeVideo[];
+      }
+    })
+  );
+
+  const [hubLists, topicLists] = await Promise.all([hubListsPromise, topicListsPromise]);
+  const lists = [...topicLists, ...hubLists];
+
+  // Interleave round-robin across hubs & topics so recommended feed is balanced and diverse
   const seen = new Set<string>();
   const combined: YouTubeVideo[] = [];
   const maxLen = Math.max(...lists.map((l) => l.length), 0);
@@ -405,12 +726,12 @@ async function getRecommendedPool(): Promise<YouTubeVideo[]> {
   }
 
   if (combined.length > 0) {
-    cachedRecommendedPool = { videos: combined, fetchedAt: Date.now() };
+    cachedRecommendedPools[poolKey] = { videos: combined, fetchedAt: Date.now() };
   }
   return combined;
 }
 
-// Recommended YouTube videos (when q is empty) & unlimited paginated search with license filtering
+// Recommended YouTube videos (when q is empty) & unlimited paginated search with license & Thai-language filtering
 app.get("/api/youtube/search", async (req, res) => {
   try {
     const rawQuery = String(req.query.q ?? "").trim();
@@ -419,10 +740,17 @@ app.get("/api/youtube/search", async (req, res) => {
       rawLicense === "creative_commons" || rawLicense === "standard"
         ? rawLicense
         : "all";
+    const thaiOnly =
+      String(req.query.thaiOnly ?? "").trim() === "1" ||
+      String(req.query.thaiOnly ?? "").trim() === "true" ||
+      String(req.query.lang ?? "").trim() === "th";
     const continuation = String(req.query.continuation ?? "").trim();
+    const forceRefresh = String(req.query.refresh ?? "") === "1";
     const directId = rawQuery ? extractYouTubeVideoId(rawQuery) : null;
 
     const config = await getInnerTubeConfig();
+    const ytHeaders = getYouTubeHeaders(thaiOnly);
+    const ytContext = getYouTubeClientContext(config, thaiOnly);
 
     if (directId) {
       const [oembedResp, detectedLicense] = await Promise.all([
@@ -451,64 +779,88 @@ app.get("/api/youtube/search", async (req, res) => {
       return;
     }
 
-    // Empty query => Recommended YouTube feed (no hardcoded default search)
+    // Empty query => Recommended YouTube feed (freshly shuffled per visit/refresh)
     if (!rawQuery) {
       if (licenseFilter === "creative_commons") {
-        const body: Record<string, unknown> = {
-          context: {
-            client: {
-              clientName: "WEB",
-              clientVersion: config.clientVersion,
-              hl: "en",
-              gl: "US",
-            },
-          },
-        };
-        if (continuation && !continuation.startsWith("rec:")) {
-          body.continuation = continuation;
-        } else {
-          body.query = "creative commons";
-          body.params = "EgIwAQ==";
-        }
-        const resp = await fetch(
-          `https://www.youtube.com/youtubei/v1/search?key=${config.apiKey}`,
-          {
-            method: "POST",
-            headers: { ...YT_HEADERS, "Content-Type": "application/json" },
-            body: JSON.stringify(body),
+        const isFirstPage = !continuation || continuation.startsWith("rec:");
+        const ccQueries = thaiOnly
+          ? THAI_CREATIVE_COMMONS_QUERIES
+          : CREATIVE_COMMONS_DISCOVERY_QUERIES;
+        const randomCcQuery = ccQueries[Math.floor(Math.random() * ccQueries.length)];
+        const seen = new Set<string>();
+        const collected: YouTubeVideo[] = [];
+        let currentCont: string | undefined = !isFirstPage ? continuation : undefined;
+        let nextCont: string | null = null;
+        const maxAttempts = thaiOnly ? 3 : 1;
+
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+          const body: Record<string, unknown> = { context: ytContext };
+          if (currentCont) {
+            body.continuation = currentCont;
+          } else {
+            body.query = randomCcQuery;
+            body.params = "EgIwAQ==";
           }
-        );
-        if (!resp.ok) {
-          throw new Error(`YouTube returned HTTP ${resp.status}`);
+          const resp = await fetch(
+            `https://www.youtube.com/youtubei/v1/search?key=${config.apiKey}`,
+            {
+              method: "POST",
+              headers: ytHeaders,
+              body: JSON.stringify(body),
+            }
+          );
+          if (!resp.ok) {
+            throw new Error(`YouTube returned HTTP ${resp.status}`);
+          }
+          const data = await resp.json();
+          const extracted = extractVideosAndContinuation(data, seen, "creative_commons");
+          nextCont = extracted.nextContinuation;
+          for (const v of extracted.videos) {
+            if (!thaiOnly || isThaiLanguageVideo(v)) {
+              collected.push(v);
+              licenseCache.set(v.videoId, "creative_commons");
+            }
+          }
+          if (collected.length >= 12 || !nextCont) break;
+          currentCont = nextCont;
         }
-        const data = await resp.json();
-        const { videos, nextContinuation } = extractVideosAndContinuation(
-          data,
-          new Set<string>(),
-          "creative_commons"
-        );
-        for (const v of videos) {
-          licenseCache.set(v.videoId, "creative_commons");
-        }
-        res.json({ videos, nextContinuation, mode: "recommended" });
+
+        const videos = isFirstPage ? shuffleArray(collected) : collected;
+        res.setHeader("Cache-Control", "no-store");
+        res.json({ videos, nextContinuation: nextCont, mode: "recommended" });
         return;
       }
 
-      const pool = await getRecommendedPool();
       const pageSize = 24;
+      let feedId = "";
+      let sessionPool: YouTubeVideo[] | undefined;
       let startIdx = 0;
+
       if (continuation.startsWith("rec:")) {
-        const parsed = parseInt(continuation.slice(4), 10);
-        if (Number.isFinite(parsed) && parsed >= 0) startIdx = parsed;
+        const parts = continuation.slice(4).split(":");
+        if (parts.length === 2) {
+          feedId = parts[0];
+          const parsed = parseInt(parts[1], 10);
+          if (Number.isFinite(parsed) && parsed >= 0) startIdx = parsed;
+          sessionPool = recommendedFeedSessions.get(feedId)?.videos;
+        }
+      }
+
+      if (!sessionPool) {
+        const basePool = await getRecommendedPool(forceRefresh, thaiOnly);
+        sessionPool = shuffleArray(basePool);
+        feedId = storeRecommendedFeedSession(sessionPool);
+        startIdx = 0;
       }
 
       if (licenseFilter === "all") {
-        const slice = pool.slice(startIdx, startIdx + pageSize);
+        const slice = sessionPool.slice(startIdx, startIdx + pageSize);
         const annotated = await annotateVideoLicenses(slice, config);
         const nextIdx = startIdx + slice.length;
+        res.setHeader("Cache-Control", "no-store");
         res.json({
           videos: annotated,
-          nextContinuation: nextIdx < pool.length ? `rec:${nextIdx}` : null,
+          nextContinuation: nextIdx < sessionPool.length ? `rec:${feedId}:${nextIdx}` : null,
           mode: "recommended",
         });
         return;
@@ -517,8 +869,8 @@ app.get("/api/youtube/search", async (req, res) => {
       // licenseFilter === "standard": fast chunk filter (max 2 chunks per request)
       const matched: YouTubeVideo[] = [];
       let cursor = startIdx;
-      for (let step = 0; step < 2 && cursor < pool.length && matched.length < pageSize; step++) {
-        const chunk = pool.slice(cursor, cursor + pageSize);
+      for (let step = 0; step < 2 && cursor < sessionPool.length && matched.length < pageSize; step++) {
+        const chunk = sessionPool.slice(cursor, cursor + pageSize);
         cursor += chunk.length;
         const annotated = await annotateVideoLicenses(chunk, config);
         for (const item of annotated) {
@@ -528,30 +880,27 @@ app.get("/api/youtube/search", async (req, res) => {
         }
       }
 
+      res.setHeader("Cache-Control", "no-store");
       res.json({
         videos: matched,
-        nextContinuation: cursor < pool.length ? `rec:${cursor}` : null,
+        nextContinuation: cursor < sessionPool.length ? `rec:${feedId}:${cursor}` : null,
         mode: "recommended",
       });
       return;
     }
 
     // Active keyword search via YouTube InnerTube API with continuation pagination (no 20-video cap)
+    const effectiveSearchQuery =
+      thaiOnly && !THAI_SCRIPT_REGEX.test(rawQuery) ? `${rawQuery} ภาษาไทย` : rawQuery;
+
     const runSearchPage = async (contToken?: string) => {
       const body: Record<string, unknown> = {
-        context: {
-          client: {
-            clientName: "WEB",
-            clientVersion: config.clientVersion,
-            hl: "en",
-            gl: "US",
-          },
-        },
+        context: ytContext,
       };
       if (contToken) {
         body.continuation = contToken;
       } else {
-        body.query = rawQuery;
+        body.query = effectiveSearchQuery;
         if (licenseFilter === "creative_commons") {
           body.params = "EgIwAQ==";
         }
@@ -561,7 +910,7 @@ app.get("/api/youtube/search", async (req, res) => {
         `https://www.youtube.com/youtubei/v1/search?key=${config.apiKey}`,
         {
           method: "POST",
-          headers: { ...YT_HEADERS, "Content-Type": "application/json" },
+          headers: ytHeaders,
           body: JSON.stringify(body),
         }
       );
@@ -576,28 +925,51 @@ app.get("/api/youtube/search", async (req, res) => {
       licenseFilter === "creative_commons" ? "creative_commons" : undefined;
 
     if (licenseFilter === "creative_commons") {
-      const data = await runSearchPage(continuation || undefined);
-      const { videos, nextContinuation } = extractVideosAndContinuation(
-        data,
-        seen,
-        forcedLicense
-      );
-      for (const v of videos) {
-        licenseCache.set(v.videoId, "creative_commons");
+      const collected: YouTubeVideo[] = [];
+      let currentCont: string | undefined = continuation || undefined;
+      let nextCont: string | null = null;
+      const maxAttempts = thaiOnly ? 3 : 1;
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        const data = await runSearchPage(currentCont);
+        const parsed = extractVideosAndContinuation(data, seen, forcedLicense);
+        nextCont = parsed.nextContinuation;
+        for (const v of parsed.videos) {
+          if (!thaiOnly || isThaiLanguageVideo(v)) {
+            collected.push(v);
+            licenseCache.set(v.videoId, "creative_commons");
+          }
+        }
+        if (collected.length >= 12 || !nextCont) break;
+        currentCont = nextCont;
       }
-      res.json({ videos, nextContinuation, mode: "search" });
+      res.setHeader("Cache-Control", "no-store");
+      res.json({ videos: collected, nextContinuation: nextCont, mode: "search" });
       return;
     }
 
     if (licenseFilter === "all") {
-      const data = await runSearchPage(continuation || undefined);
-      const { videos, nextContinuation } = extractVideosAndContinuation(data, seen);
-      const annotated = await annotateVideoLicenses(videos, config);
-      res.json({ videos: annotated, nextContinuation, mode: "search" });
+      const collected: YouTubeVideo[] = [];
+      let currentCont: string | undefined = continuation || undefined;
+      let nextCont: string | null = null;
+      const maxAttempts = thaiOnly ? 3 : 1;
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        const data = await runSearchPage(currentCont);
+        const parsed = extractVideosAndContinuation(data, seen);
+        nextCont = parsed.nextContinuation;
+        const filtered = thaiOnly
+          ? parsed.videos.filter(isThaiLanguageVideo)
+          : parsed.videos;
+        const annotated = await annotateVideoLicenses(filtered, config);
+        collected.push(...annotated);
+        if (collected.length >= 12 || !nextCont) break;
+        currentCont = nextCont;
+      }
+      res.setHeader("Cache-Control", "no-store");
+      res.json({ videos: collected, nextContinuation: nextCont, mode: "search" });
       return;
     }
 
-    // licenseFilter === "standard": fetch & filter out Creative Commons, advancing up to 2 continuation pages if sparse
+    // licenseFilter === "standard": fetch & filter out Creative Commons, advancing up to 3 continuation pages if sparse
     const collected: YouTubeVideo[] = [];
     let currentCont: string | undefined = continuation || undefined;
     let nextCont: string | null = null;
@@ -605,7 +977,10 @@ app.get("/api/youtube/search", async (req, res) => {
       const data = await runSearchPage(currentCont);
       const parsed = extractVideosAndContinuation(data, seen);
       nextCont = parsed.nextContinuation;
-      const annotated = await annotateVideoLicenses(parsed.videos, config);
+      const preFiltered = thaiOnly
+        ? parsed.videos.filter(isThaiLanguageVideo)
+        : parsed.videos;
+      const annotated = await annotateVideoLicenses(preFiltered, config);
       for (const v of annotated) {
         if (v.license === "standard") {
           collected.push(v);
@@ -615,6 +990,7 @@ app.get("/api/youtube/search", async (req, res) => {
       currentCont = nextCont;
     }
 
+    res.setHeader("Cache-Control", "no-store");
     res.json({ videos: collected, nextContinuation: nextCont, mode: "search" });
   } catch (err) {
     console.error("YouTube search error:", err);
@@ -773,7 +1149,7 @@ function normalizeSelectedScenes(
   const clean: SpeakingScene[] = [];
   for (const s of rawScenes) {
     const start = Math.max(0, Math.min(maxDuration - 0.5, Number(s.startSec)));
-    const end = Math.max(start + 1, Math.min(maxDuration, Number(s.endSec)));
+    const end = Math.max(start + 0.5, Math.min(maxDuration, Number(s.endSec)));
     if (Number.isFinite(start) && Number.isFinite(end) && end > start) {
       clean.push({
         index: clean.length,
@@ -1414,14 +1790,18 @@ async function extractEmbeddedSubtitles(
   tmpDir: string
 ): Promise<{ cues: EmbeddedCue[]; language?: string } | null> {
   try {
-    const { stdout } = await execFileAsync("ffprobe", [
-      "-v",
-      "quiet",
-      "-print_format",
-      "json",
-      "-show_streams",
-      mediaPath,
-    ]);
+    const { stdout } = await execFileAsync(
+      "ffprobe",
+      [
+        "-v",
+        "quiet",
+        "-print_format",
+        "json",
+        "-show_streams",
+        mediaPath,
+      ],
+      FFMPEG_EXEC_OPTS
+    );
     const info = JSON.parse(stdout || "{}") as {
       streams?: {
         index: number;
@@ -1451,16 +1831,20 @@ async function extractEmbeddedSubtitles(
     for (const stream of sorted) {
       const outSrt = path.join(tmpDir, `embedded-${stream.index}.srt`);
       try {
-        await execFileAsync("ffmpeg", [
-          "-y",
-          "-i",
-          mediaPath,
-          "-map",
-          `0:${stream.index}`,
-          "-f",
-          "srt",
-          outSrt,
-        ]);
+        await execFileAsync(
+          "ffmpeg",
+          [
+            "-y",
+            "-i",
+            mediaPath,
+            "-map",
+            `0:${stream.index}`,
+            "-f",
+            "srt",
+            outSrt,
+          ],
+          FFMPEG_EXEC_OPTS
+        );
         const srtText = await fs.promises.readFile(outSrt, "utf-8");
         const cues = parseSrtCues(srtText);
         if (cues.length > 0) {
@@ -1588,23 +1972,27 @@ async function processUploadedVideo(
           const segAudioPath = path.join(tmpDir, `scene-${idx}.mp3`);
           let hasAudio = false;
           try {
-            await execFileAsync("ffmpeg", [
-              "-y",
-              "-vn",
-              "-i",
-              persistentPath,
-              "-ss",
-              String(sc.startSec),
-              "-t",
-              String(sc.durationSec),
-              "-ac",
-              "1",
-              "-ar",
-              "16000",
-              "-b:a",
-              "48k",
-              segAudioPath,
-            ]);
+            await execFileAsync(
+              "ffmpeg",
+              [
+                "-y",
+                "-vn",
+                "-i",
+                persistentPath,
+                "-ss",
+                String(sc.startSec),
+                "-t",
+                String(sc.durationSec),
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-b:a",
+                "48k",
+                segAudioPath,
+              ],
+              FFMPEG_EXEC_OPTS
+            );
             hasAudio = fs.existsSync(segAudioPath) && fs.statSync(segAudioPath).size > 0;
           } catch {
             hasAudio = false;
@@ -1632,23 +2020,27 @@ async function processUploadedVideo(
         const scenePcmPath = path.join(tmpDir, `scene-${idx}.pcm`);
         let hasPcm = false;
         try {
-          await execFileAsync("ffmpeg", [
-            "-y",
-            "-vn",
-            "-i",
-            persistentPath,
-            "-ss",
-            String(sc.startSec),
-            "-t",
-            String(sc.durationSec),
-            "-f",
-            "s16le",
-            "-ac",
-            "1",
-            "-ar",
-            "16000",
-            scenePcmPath,
-          ]);
+          await execFileAsync(
+            "ffmpeg",
+            [
+              "-y",
+              "-vn",
+              "-i",
+              persistentPath,
+              "-ss",
+              String(sc.startSec),
+              "-t",
+              String(sc.durationSec),
+              "-f",
+              "s16le",
+              "-ac",
+              "1",
+              "-ar",
+              "16000",
+              scenePcmPath,
+            ],
+            FFMPEG_EXEC_OPTS
+          );
           hasPcm = fs.existsSync(scenePcmPath) && fs.statSync(scenePcmPath).size > 0;
         } catch {
           hasPcm = false;
@@ -1790,12 +2182,29 @@ function sanitizeVideoExtension(fileName?: string): string {
 // Initialize a chunked upload (avoids 32MB Cloud Run single-request payload limits)
 app.post("/api/upload-init", async (req, res) => {
   try {
-    const { fileName } = (req.body || {}) as { fileName?: string };
+    const { fileName, totalSize } = (req.body || {}) as {
+      fileName?: string;
+      totalSize?: number;
+    };
+    let expectedSize: number | undefined;
+    if (totalSize !== undefined) {
+      const n = Number(totalSize);
+      if (!Number.isFinite(n) || n < 0) {
+        res.status(400).json({ error: "Invalid totalSize." });
+        return;
+      }
+      if (n > MAX_UPLOAD_BYTES) {
+        res.status(413).json({ error: "Video file exceeds the 500 MB server upload limit." });
+        return;
+      }
+      expectedSize = n;
+    }
+
     const uploadId = crypto.randomUUID();
     const ext = sanitizeVideoExtension(fileName);
     const persistentPath = path.join(os.tmpdir(), `thai-studio-upload-${uploadId}${ext}`);
     await fs.promises.writeFile(persistentPath, Buffer.alloc(0));
-    uploadedFiles.set(uploadId, persistentPath);
+    registerUploadSession(uploadId, persistentPath, { expectedSize, receivedBytes: 0, finalized: false });
     res.json({ uploadId });
   } catch (err) {
     console.error("Upload init error:", err);
@@ -1805,15 +2214,15 @@ app.post("/api/upload-init", async (req, res) => {
   }
 });
 
-// Append binary chunk to an initialized upload
+// Append binary chunk to an initialized upload (with cumulative limit + idempotent offset support)
 app.post(
   "/api/upload-chunk",
   express.raw({ type: ["application/octet-stream", "video/*"], limit: "16mb" }),
   async (req, res) => {
     try {
       const uploadId = String(req.headers["x-upload-id"] || "");
-      const persistentPath = uploadId ? uploadedFiles.get(uploadId) : undefined;
-      if (!persistentPath) {
+      const session = uploadId ? uploadSessions.get(uploadId) : undefined;
+      if (!session || session.pendingDelete || !fs.existsSync(session.filePath)) {
         res.status(404).json({ error: "Upload session not found or expired." });
         return;
       }
@@ -1822,9 +2231,101 @@ app.post(
         res.status(400).json({ error: "Empty upload chunk." });
         return;
       }
-      await fs.promises.appendFile(persistentPath, chunk);
-      const stat = await fs.promises.stat(persistentPath);
-      res.json({ ok: true, receivedBytes: stat.size });
+
+      const rawOffsetHeader = req.headers["x-chunk-offset"];
+      const declaredOffset =
+        rawOffsetHeader !== undefined && rawOffsetHeader !== ""
+          ? Number(rawOffsetHeader)
+          : undefined;
+      if (
+        declaredOffset !== undefined &&
+        (!Number.isFinite(declaredOffset) || declaredOffset < 0)
+      ) {
+        res.status(400).json({ error: "Invalid chunk offset header." });
+        return;
+      }
+
+      const result = await new Promise<{
+        status: number;
+        body: Record<string, unknown>;
+      }>((resolve) => {
+        session.writeChain = session.writeChain
+          .then(async () => {
+            if (session.pendingDelete || !fs.existsSync(session.filePath)) {
+              resolve({
+                status: 404,
+                body: { error: "Upload session not found or expired." },
+              });
+              return;
+            }
+
+            if (declaredOffset !== undefined) {
+              // Idempotent retry handling when previous chunk response was dropped
+              if (
+                declaredOffset < session.receivedBytes &&
+                declaredOffset + chunk.length === session.receivedBytes
+              ) {
+                touchUploadSession(session);
+                resolve({
+                  status: 200,
+                  body: { ok: true, receivedBytes: session.receivedBytes, duplicate: true },
+                });
+                return;
+              }
+              if (declaredOffset !== session.receivedBytes) {
+                resolve({
+                  status: 409,
+                  body: {
+                    error: "Upload chunk offset mismatch.",
+                    receivedBytes: session.receivedBytes,
+                  },
+                });
+                return;
+              }
+            }
+
+            if (session.receivedBytes + chunk.length > MAX_UPLOAD_BYTES) {
+              await deleteUploadSession(session.id);
+              resolve({
+                status: 413,
+                body: { error: "Video upload exceeds the 500 MB server limit." },
+              });
+              return;
+            }
+
+            if (
+              session.expectedSize !== undefined &&
+              session.receivedBytes + chunk.length > session.expectedSize
+            ) {
+              await deleteUploadSession(session.id);
+              resolve({
+                status: 413,
+                body: { error: "Upload exceeded declared file size." },
+              });
+              return;
+            }
+
+            await fs.promises.appendFile(session.filePath, chunk);
+            session.receivedBytes += chunk.length;
+            const reachedEnd =
+              session.expectedSize !== undefined && session.receivedBytes >= session.expectedSize;
+            touchUploadSession(session, reachedEnd);
+            resolve({
+              status: 200,
+              body: { ok: true, receivedBytes: session.receivedBytes },
+            });
+          })
+          .catch((err) => {
+            resolve({
+              status: 500,
+              body: {
+                error: err instanceof Error ? err.message : "Failed to write upload chunk.",
+              },
+            });
+          });
+      });
+
+      res.status(result.status).json(result.body);
     } catch (err) {
       console.error("Upload chunk error:", err);
       res.status(500).json({
@@ -1833,6 +2334,19 @@ app.post(
     }
   }
 );
+
+// Immediately clean up abandoned/failed upload sessions
+app.post("/api/upload-abort", async (req, res) => {
+  try {
+    const { uploadId } = (req.body || {}) as { uploadId?: string };
+    if (uploadId && typeof uploadId === "string") {
+      await deleteUploadSession(uploadId);
+    }
+    res.json({ ok: true });
+  } catch {
+    res.json({ ok: true });
+  }
+});
 
 // Process an already-uploaded video file (detects embedded subtitles first, else transcribes audio)
 app.post("/api/process-upload", async (req, res) => {
@@ -1849,20 +2363,30 @@ app.post("/api/process-upload", async (req, res) => {
       selectedScenes?: { startSec: number; endSec: number }[];
     };
 
-    const persistentPath = uploadId ? uploadedFiles.get(uploadId) : undefined;
-    if (!uploadId || !persistentPath || !fs.existsSync(persistentPath)) {
+    if (!uploadId) {
       res.status(404).json({ error: "Uploaded video file not found. Please try again." });
       return;
     }
 
-    const result = await processUploadedVideo(
-      persistentPath,
+    const lockedResult = await withUploadSessionLock(
       uploadId,
-      title,
-      Math.max(5, Number(durationSec) || 120),
-      selectedScenes
+      async (persistentPath) =>
+        processUploadedVideo(
+          persistentPath,
+          uploadId,
+          title,
+          Math.max(5, Number(durationSec) || 120),
+          selectedScenes
+        ),
+      { markFinalized: true }
     );
-    res.status(result.status).json(result.body);
+
+    if (!lockedResult) {
+      res.status(404).json({ error: "Uploaded video file not found. Please try again." });
+      return;
+    }
+
+    res.status(lockedResult.status).json(lockedResult.body);
   } catch (err) {
     console.error("Process upload error:", err);
     res.status(500).json({
@@ -1882,10 +2406,18 @@ app.post(
         res.status(400).json({ error: "Empty video upload." });
         return;
       }
+      if (videoBuf.length > MAX_UPLOAD_BYTES) {
+        res.status(413).json({ error: "Video upload exceeds the 500 MB server limit." });
+        return;
+      }
       const uploadId = crypto.randomUUID();
       const persistentPath = path.join(os.tmpdir(), `thai-studio-upload-${uploadId}.mp4`);
       await fs.promises.writeFile(persistentPath, videoBuf);
-      uploadedFiles.set(uploadId, persistentPath);
+      registerUploadSession(uploadId, persistentPath, {
+        expectedSize: videoBuf.length,
+        receivedBytes: videoBuf.length,
+        finalized: true,
+      });
       res.json({ uploadId });
     } catch (err) {
       console.error("Raw upload error:", err);
@@ -1907,6 +2439,10 @@ app.post(
         res.status(400).json({ error: "Empty video upload." });
         return;
       }
+      if (videoBuf.length > MAX_UPLOAD_BYTES) {
+        res.status(413).json({ error: "Video upload exceeds the 500 MB server limit." });
+        return;
+      }
 
       const title = decodeURIComponent(String(req.headers["x-file-name"] || "Uploaded Video"));
       const durationSec = Math.max(5, Number(req.headers["x-video-duration"]) || 120);
@@ -1917,16 +2453,20 @@ app.post(
       const ext = sanitizeVideoExtension(title);
       const persistentPath = path.join(os.tmpdir(), `thai-studio-upload-${uploadId}${ext}`);
       await fs.promises.writeFile(persistentPath, videoBuf);
-      uploadedFiles.set(uploadId, persistentPath);
+      registerUploadSession(uploadId, persistentPath, {
+        expectedSize: videoBuf.length,
+        receivedBytes: videoBuf.length,
+        finalized: true,
+      });
 
-      const result = await processUploadedVideo(
-        persistentPath,
-        uploadId,
-        title,
-        durationSec,
-        parsedScenes
+      const lockedResult = await withUploadSessionLock(uploadId, async (lockedPath) =>
+        processUploadedVideo(lockedPath, uploadId, title, durationSec, parsedScenes)
       );
-      res.status(result.status).json(result.body);
+      if (!lockedResult) {
+        res.status(500).json({ error: "Uploaded session unexpectedly expired." });
+        return;
+      }
+      res.status(lockedResult.status).json(lockedResult.body);
     } catch (err) {
       console.error("Upload analysis error:", err);
       res.status(500).json({
@@ -2064,8 +2604,11 @@ app.get("/api/image-proxy", async (req, res) => {
 // Check whether an uploadId still exists on disk (e.g. after server restarts)
 app.get("/api/upload-exists/:uploadId", (req, res) => {
   const uploadId = String(req.params.uploadId || "");
-  const p = uploadId ? uploadedFiles.get(uploadId) : undefined;
-  const exists = Boolean(p && fs.existsSync(p));
+  const session = uploadId ? uploadSessions.get(uploadId) : undefined;
+  const exists = Boolean(session && !session.pendingDelete && fs.existsSync(session.filePath));
+  if (session && exists) {
+    touchUploadSession(session);
+  }
   res.json({ exists });
 });
 
@@ -2079,101 +2622,135 @@ app.post("/api/prepare-export-clip", async (req, res) => {
       scenes?: SpeakingScene[];
     };
 
-    const uploadedPath = uploadId ? uploadedFiles.get(uploadId) : undefined;
-    if (!uploadId || !uploadedPath || !fs.existsSync(uploadedPath)) {
+    if (!uploadId) {
       res.status(404).json({ error: "Uploaded video file not found. Please re-upload." });
       return;
     }
 
-    const validScenes = (Array.isArray(scenes) ? scenes : [])
-      .map((sc) => ({
-        startSec: Math.max(0, Number(sc.startSec) || 0),
-        durationSec: Math.max(0.1, Number(sc.durationSec) || Math.max(0.1, (Number(sc.endSec) || 0) - (Number(sc.startSec) || 0))),
-      }))
-      .filter((sc) => Number.isFinite(sc.startSec) && Number.isFinite(sc.durationSec) && sc.durationSec > 0.05);
+    const outBuf = await withUploadSessionLock(
+      uploadId,
+      async (uploadedPath) => {
+        const validScenes = (Array.isArray(scenes) ? scenes : [])
+          .map((sc) => {
+            const startSec = Math.max(0, Number(sc.startSec) || 0);
+            const rawEnd = Number(sc.endSec);
+            const rawDur = Number(sc.durationSec);
+            const durationSec =
+              Number.isFinite(rawEnd) && rawEnd > startSec
+                ? Math.max(0.1, rawEnd - startSec)
+                : Math.max(0.1, Number.isFinite(rawDur) ? rawDur : 0.1);
+            return { startSec, durationSec };
+          })
+          .filter(
+            (sc) =>
+              Number.isFinite(sc.startSec) &&
+              Number.isFinite(sc.durationSec) &&
+              sc.durationSec > 0.05
+          );
 
-    const outClipPath = path.join(tmpDir, "prepared-clip.mp4");
-    const scaleFilter =
-      "fps=24,scale=w='min(960,iw)':h='min(960,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1";
+        const outClipPath = path.join(tmpDir, "prepared-clip.mp4");
+        const perSceneScale =
+          "scale=w='min(960,iw)':h='min(960,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1,setpts=PTS-STARTPTS";
 
-    if (validScenes.length <= 1) {
-      const sc = validScenes[0];
-      const seekArgs = sc ? ["-ss", String(sc.startSec), "-t", String(sc.durationSec)] : [];
-      await execFileAsync("ffmpeg", [
-        "-y",
-        ...seekArgs,
-        "-i",
-        uploadedPath,
-        "-vf",
-        `${scaleFilter},format=yuv420p`,
-        "-c:v",
-        "libx264",
-        "-preset",
-        "ultrafast",
-        "-crf",
-        "21",
-        "-g",
-        "1",
-        "-keyint_min",
-        "1",
-        "-bf",
-        "0",
-        "-profile:v",
-        "baseline",
-        "-movflags",
-        "+faststart",
-        "-an",
-        outClipPath,
-      ]);
-    } else {
-      const inputArgs: string[] = [];
-      const filterParts: string[] = [];
-      const concatInputs: string[] = [];
-      for (let i = 0; i < validScenes.length; i++) {
-        const sc = validScenes[i];
-        inputArgs.push("-ss", String(sc.startSec), "-t", String(sc.durationSec), "-i", uploadedPath);
-        filterParts.push(`[${i}:v]${scaleFilter}[v${i}]`);
-        concatInputs.push(`[v${i}]`);
+        if (validScenes.length <= 1) {
+          const sc = validScenes[0];
+          const seekArgs = sc ? ["-ss", String(sc.startSec), "-t", String(sc.durationSec)] : [];
+          await execFileAsync(
+            "ffmpeg",
+            [
+              "-y",
+              ...seekArgs,
+              "-i",
+              uploadedPath,
+              "-vf",
+              `${perSceneScale},fps=24,format=yuv420p`,
+              "-c:v",
+              "libx264",
+              "-preset",
+              "ultrafast",
+              "-crf",
+              "21",
+              "-g",
+              "1",
+              "-keyint_min",
+              "1",
+              "-bf",
+              "0",
+              "-profile:v",
+              "baseline",
+              "-movflags",
+              "+faststart",
+              "-an",
+              outClipPath,
+            ],
+            FFMPEG_EXEC_OPTS
+          );
+        } else {
+          const inputArgs: string[] = [];
+          const filterParts: string[] = [];
+          const concatInputs: string[] = [];
+          for (let i = 0; i < validScenes.length; i++) {
+            const sc = validScenes[i];
+            inputArgs.push("-ss", String(sc.startSec), "-t", String(sc.durationSec), "-i", uploadedPath);
+            filterParts.push(`[${i}:v]${perSceneScale}[v${i}]`);
+            concatInputs.push(`[v${i}]`);
+          }
+          // Apply fps=24 AFTER concat so multi-cut scenes join continuously without per-cut frame rounding drift
+          const filterComplex = `${filterParts.join(";")};${concatInputs.join("")}concat=n=${validScenes.length}:v=1:a=0,fps=24,format=yuv420p[outv]`;
+
+          await execFileAsync(
+            "ffmpeg",
+            [
+              "-y",
+              ...inputArgs,
+              "-filter_complex",
+              filterComplex,
+              "-map",
+              "[outv]",
+              "-c:v",
+              "libx264",
+              "-preset",
+              "ultrafast",
+              "-crf",
+              "21",
+              "-g",
+              "1",
+              "-keyint_min",
+              "1",
+              "-bf",
+              "0",
+              "-profile:v",
+              "baseline",
+              "-movflags",
+              "+faststart",
+              "-an",
+              outClipPath,
+            ],
+            FFMPEG_EXEC_OPTS
+          );
+        }
+
+        if (!fs.existsSync(outClipPath) || fs.statSync(outClipPath).size < 512) {
+          return null;
+        }
+        return fs.promises.readFile(outClipPath);
+      },
+      { markFinalized: true }
+    );
+
+    if (outBuf === null) {
+      const sessionStillThere = Boolean(uploadSessions.get(uploadId));
+      if (!sessionStillThere) {
+        res.status(404).json({ error: "Uploaded video file not found. Please re-upload." });
+      } else {
+        res.status(422).json({ error: "Could not prepare video stream from file." });
       }
-      const filterComplex = `${filterParts.join(";")};${concatInputs.join("")}concat=n=${validScenes.length}:v=1:a=0,format=yuv420p[outv]`;
-
-      await execFileAsync("ffmpeg", [
-        "-y",
-        ...inputArgs,
-        "-filter_complex",
-        filterComplex,
-        "-map",
-        "[outv]",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "ultrafast",
-        "-crf",
-        "21",
-        "-g",
-        "1",
-        "-keyint_min",
-        "1",
-        "-bf",
-        "0",
-        "-profile:v",
-        "baseline",
-        "-movflags",
-        "+faststart",
-        "-an",
-        outClipPath,
-      ]);
-    }
-
-    if (!fs.existsSync(outClipPath) || fs.statSync(outClipPath).size < 512) {
-      res.status(422).json({ error: "Could not prepare video stream from file." });
       return;
     }
 
-    const buf = await fs.promises.readFile(outClipPath);
     res.setHeader("Content-Type", "video/mp4");
     res.setHeader("Cache-Control", "no-store");
-    res.send(buf);
+    res.send(outBuf);
   } catch (err) {
     console.error("Prepare export clip error:", err);
     res.status(500).json({
@@ -2184,48 +2761,146 @@ app.post("/api/prepare-export-clip", async (req, res) => {
   }
 });
 
+function buildVoiceAudioFilters(voiceSettings?: VoiceSettings): string[] {
+  const audioFilters: string[] = [];
+  let hasNonCleanEffect = false;
+
+  if (voiceSettings) {
+    const pitchSemi = Math.max(-12, Math.min(12, Number(voiceSettings.pitchSemitones) || 0));
+    const pitchFactor = Math.pow(2, pitchSemi / 12);
+    const speed = Math.max(0.25, Math.min(2.5, Number(voiceSettings.speed) || 1));
+    if (Math.abs(pitchFactor - 1) > 0.005 || Math.abs(speed - 1) > 0.005) {
+      audioFilters.push(`rubberband=pitch=${pitchFactor.toFixed(4)}:tempo=${speed.toFixed(3)}`);
+    }
+
+    // Tone shaping — matched exactly to webAudioVoice.ts lowshelf(220Hz) & highshelf(3200Hz)
+    const tone = Math.max(-10, Math.min(10, Number(voiceSettings.tone) || 0));
+    if (tone !== 0) {
+      hasNonCleanEffect = true;
+      const bassDb = tone < 0 ? Math.abs(tone) * 1.3 : -tone * 0.45;
+      const trebleDb = tone > 0 ? tone * 1.3 : -Math.abs(tone) * 0.35;
+      audioFilters.push(`bass=g=${bassDb.toFixed(2)}:f=220:t=q:w=0.707`);
+      audioFilters.push(`treble=g=${trebleDb.toFixed(2)}:f=3200:t=q:w=0.707`);
+    }
+
+    // Robot — matched to webAudioVoice.ts 58Hz bipolar ring modulator: x*(1 - 0.85r + 1.15r*sin(2pi*58*t))
+    const robot = Math.max(0, Math.min(100, Number(voiceSettings.robot) || 0));
+    if (robot > 0) {
+      hasNonCleanEffect = true;
+      const r = robot / 100;
+      const dryGain = (1 - r * 0.85).toFixed(4);
+      const ringGain = (r * 1.15).toFixed(4);
+      audioFilters.push(`aeval='val(0)*(${dryGain}+sin(2*PI*58*t)*${ringGain}):c=same'`);
+    }
+
+    // Echo — matched to webAudioVoice.ts DelayNode feedback loop (80..240ms delay, 0.15..0.60 fb, 0..0.65 wet)
+    const echo = Math.max(0, Math.min(100, Number(voiceSettings.echo) || 0));
+    if (echo > 0) {
+      hasNonCleanEffect = true;
+      const e = echo / 100;
+      const dMs = Math.round((0.08 + e * 0.16) * 1000);
+      const fb = 0.15 + e * 0.45;
+      const wet = e * 0.65;
+      const d1 = dMs;
+      const d2 = dMs * 2;
+      const d3 = dMs * 3;
+      const d4 = dMs * 4;
+      const k1 = wet;
+      const k2 = k1 * fb;
+      const k3 = k2 * fb;
+      const k4 = k3 * fb;
+      audioFilters.push(
+        `aecho=1.0:1.0:${d1}|${d2}|${d3}|${d4}:${k1.toFixed(3)}|${k2.toFixed(3)}|${k3.toFixed(3)}|${k4.toFixed(3)}`
+      );
+    }
+
+    if (hasNonCleanEffect) {
+      audioFilters.push("alimiter=limit=0.98:attack=5:release=50");
+    }
+  }
+
+  audioFilters.push("apad");
+  return audioFilters;
+}
+
 // Mux exported 9:16 H.264/WebM video + original audio from uploaded scenes into MP4
 app.post("/api/mux-mp4", async (req, res) => {
   const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "thai-studio-"));
-  try {
-    const {
-      videoBase64,
-      renderedVideoUploadId,
-      videoFormat = "mp4",
-      uploadId,
-      scenes = [],
-      voiceSettings,
-    } = req.body as {
-      videoBase64?: string;
-      renderedVideoUploadId?: string;
-      videoFormat?: "mp4" | "webm";
-      uploadId?: string;
-      scenes?: SpeakingScene[];
-      voiceSettings?: VoiceSettings;
-    };
+  const {
+    videoBase64,
+    renderedVideoUploadId,
+    videoFormat = "mp4",
+    uploadId,
+    scenes = [],
+    voiceSettings,
+    targetDurationSec,
+    forceCfrFromFrames,
+    recordedDurationSec,
+  } = (req.body || {}) as {
+    videoBase64?: string;
+    renderedVideoUploadId?: string;
+    videoFormat?: "mp4" | "webm";
+    uploadId?: string;
+    scenes?: SpeakingScene[];
+    voiceSettings?: VoiceSettings;
+    targetDurationSec?: number;
+    expectedFrameCount?: number;
+    forceCfrFromFrames?: boolean;
+    recordedDurationSec?: number;
+  };
 
-    const renderedPath = renderedVideoUploadId ? uploadedFiles.get(renderedVideoUploadId) : undefined;
-    if (!videoBase64 && (!renderedPath || !fs.existsSync(renderedPath))) {
+  try {
+    const inputVideoPath = path.join(tmpDir, `input.${videoFormat === "webm" ? "webm" : "mp4"}`);
+    const outputMp4Path = path.join(tmpDir, "output.mp4");
+
+    let hasInputVideo = false;
+    if (renderedVideoUploadId) {
+      const copied = await withUploadSessionLock(renderedVideoUploadId, async (renderedPath) => {
+        await fs.promises.copyFile(renderedPath, inputVideoPath);
+        return true;
+      });
+      hasInputVideo = Boolean(copied);
+    }
+    if (!hasInputVideo && videoBase64) {
+      await fs.promises.writeFile(inputVideoPath, Buffer.from(videoBase64, "base64"));
+      hasInputVideo = true;
+    }
+
+    if (!hasInputVideo || !fs.existsSync(inputVideoPath) || fs.statSync(inputVideoPath).size < 256) {
       res.status(400).json({ error: "Missing rendered video payload." });
       return;
     }
 
-    const inputVideoPath = path.join(tmpDir, `input.${videoFormat}`);
-    const outputMp4Path = path.join(tmpDir, "output.mp4");
-    if (renderedPath && fs.existsSync(renderedPath)) {
-      await fs.promises.copyFile(renderedPath, inputVideoPath);
-      uploadedFiles.delete(renderedVideoUploadId!);
-      await fs.promises.rm(renderedPath, { force: true }).catch(() => {});
-    } else if (videoBase64) {
-      await fs.promises.writeFile(inputVideoPath, Buffer.from(videoBase64, "base64"));
+    // Normalize rendered video timestamps (especially MediaRecorder wall-clock drift vs target CFR timeline)
+    const videoFilterParts: string[] = [];
+    const safeTargetDur = Number(targetDurationSec);
+    if (forceCfrFromFrames) {
+      // Manual requestFrame() pushed one frame per 1/24s timeline tick
+      videoFilterParts.push("setpts=N/(24*TB)");
+    } else if (
+      Number.isFinite(safeTargetDur) &&
+      safeTargetDur > 0.2 &&
+      recordedDurationSec !== undefined
+    ) {
+      const renderedProbe = await probeMediaInfo(inputVideoPath);
+      const actualDur =
+        renderedProbe.durationSec > 0.2
+          ? renderedProbe.durationSec
+          : Number(recordedDurationSec);
+      if (Number.isFinite(actualDur) && actualDur > 0.2) {
+        const ptsScale = safeTargetDur / actualDur;
+        if (Math.abs(ptsScale - 1) > 0.02 && ptsScale > 0.1 && ptsScale < 10) {
+          videoFilterParts.push(`setpts=PTS*${ptsScale.toFixed(6)}`);
+        }
+      }
     }
-
-    const uploadedPath = uploadId ? uploadedFiles.get(uploadId) : undefined;
-    const hasOriginalUploadAudio = uploadedPath && fs.existsSync(uploadedPath) && scenes.length > 0;
+    videoFilterParts.push("fps=24", "setsar=1");
 
     // Always normalize output video to standard 24fps CFR yuv420p H.264 Main@L4.0
     // so mobile gallery players, Android/iOS, and social apps never show black/blinking frames
     const videoCodecArgs = [
+      "-vf",
+      videoFilterParts.join(","),
       "-c:v",
       "libx264",
       "-preset",
@@ -2244,111 +2919,10 @@ app.post("/api/mux-mp4", async (req, res) => {
       "cfr",
     ];
 
-    if (hasOriginalUploadAudio && uploadedPath) {
-      const segFiles: string[] = [];
-      for (let i = 0; i < scenes.length; i++) {
-        const sc = scenes[i];
-        const segOut = path.join(tmpDir, `seg-${i}.wav`);
-        try {
-          await execFileAsync("ffmpeg", [
-            "-y",
-            "-vn",
-            "-i",
-            uploadedPath,
-            "-ss",
-            String(sc.startSec),
-            "-t",
-            String(sc.durationSec),
-            "-ac",
-            "2",
-            "-ar",
-            "44100",
-            segOut,
-          ]);
-          if (fs.existsSync(segOut) && fs.statSync(segOut).size > 44) {
-            segFiles.push(segOut);
-          }
-        } catch {
-          // ignore if video had no audio stream
-        }
-      }
-
-      if (segFiles.length > 0) {
-        const concatListPath = path.join(tmpDir, "concat.txt");
-        await fs.promises.writeFile(
-          concatListPath,
-          segFiles.map((f) => `file '${f.replace(/'/g, "'\\''")}'`).join("\n")
-        );
-        const origWavPath = path.join(tmpDir, "original-cuts.wav");
-        await execFileAsync("ffmpeg", [
-          "-y",
-          "-f",
-          "concat",
-          "-safe",
-          "0",
-          "-i",
-          concatListPath,
-          "-c",
-          "copy",
-          origWavPath,
-        ]);
-
-        const audioFilters: string[] = [];
-        if (voiceSettings) {
-          const pitchSemi = Math.max(-12, Math.min(12, Number(voiceSettings.pitchSemitones) || 0));
-          const pitchFactor = Math.pow(2, pitchSemi / 12);
-          const speed = Math.max(0.25, Math.min(2.5, Number(voiceSettings.speed) || 1));
-          if (Math.abs(pitchFactor - 1) > 0.005 || Math.abs(speed - 1) > 0.005) {
-            audioFilters.push(`rubberband=pitch=${pitchFactor.toFixed(4)}:tempo=${speed.toFixed(3)}`);
-          }
-          const tone = Math.max(-10, Math.min(10, Number(voiceSettings.tone) || 0));
-          if (tone !== 0) {
-            const bassDb = tone < 0 ? Math.abs(tone) * 1.1 : -tone * 0.4;
-            const trebleDb = tone > 0 ? tone * 1.1 : -Math.abs(tone) * 0.3;
-            audioFilters.push(`bass=g=${bassDb.toFixed(1)}:f=220`);
-            audioFilters.push(`treble=g=${trebleDb.toFixed(1)}:f=3200`);
-          }
-          const robot = Math.max(0, Math.min(100, Number(voiceSettings.robot) || 0));
-          if (robot > 0) {
-            audioFilters.push(`tremolo=f=58:d=${((robot / 100) * 0.9).toFixed(2)}`);
-          }
-          const echo = Math.max(0, Math.min(100, Number(voiceSettings.echo) || 0));
-          if (echo > 0) {
-            const delayMs = Math.round(70 + echo * 1.5);
-            const decay = ((echo / 100) * 0.55).toFixed(2);
-            audioFilters.push(`aecho=0.8:0.7:${delayMs}:${decay}`);
-          }
-        }
-        audioFilters.push("apad");
-
-        await execFileAsync("ffmpeg", [
-          "-y",
-          "-i",
-          inputVideoPath,
-          "-i",
-          origWavPath,
-          "-map",
-          "0:v:0",
-          "-map",
-          "1:a:0",
-          ...videoCodecArgs,
-          "-af",
-          audioFilters.join(","),
-          "-c:a",
-          "aac",
-          "-b:a",
-          "192k",
-          "-ar",
-          "44100",
-          "-ac",
-          "2",
-          "-movflags",
-          "+faststart",
-          "-shortest",
-          outputMp4Path,
-        ]);
-      } else {
-        await execFileAsync("ffmpeg", [
+    const runVideoOnlyMux = async () => {
+      await execFileAsync(
+        "ffmpeg",
+        [
           "-y",
           "-i",
           inputVideoPath,
@@ -2357,19 +2931,170 @@ app.post("/api/mux-mp4", async (req, res) => {
           "+faststart",
           "-an",
           outputMp4Path,
-        ]);
-      }
-    } else {
-      await execFileAsync("ffmpeg", [
-        "-y",
-        "-i",
-        inputVideoPath,
-        ...videoCodecArgs,
-        "-movflags",
-        "+faststart",
-        "-an",
-        outputMp4Path,
-      ]);
+        ],
+        FFMPEG_EXEC_OPTS
+      );
+    };
+
+    const normalizedScenes = (Array.isArray(scenes) ? scenes : [])
+      .map((sc) => {
+        const startSec = Math.max(0, Number(sc.startSec) || 0);
+        const rawEnd = Number(sc.endSec);
+        const rawDur = Number(sc.durationSec);
+        const durationSec =
+          Number.isFinite(rawEnd) && rawEnd > startSec
+            ? Math.max(0.1, rawEnd - startSec)
+            : Math.max(0.1, Number.isFinite(rawDur) ? rawDur : 0.1);
+        return { startSec, durationSec };
+      })
+      .filter((sc) => Number.isFinite(sc.startSec) && Number.isFinite(sc.durationSec));
+
+    let muxedWithAudio = false;
+    if (uploadId && normalizedScenes.length > 0) {
+      await withUploadSessionLock(
+        uploadId,
+        async (uploadedPath) => {
+          const sourceProbe = await probeMediaInfo(uploadedPath);
+          if (!sourceProbe.hasAudio) {
+            return;
+          }
+
+          const segFiles: string[] = [];
+          for (let i = 0; i < normalizedScenes.length; i++) {
+            const sc = normalizedScenes[i];
+            const segOut = path.join(tmpDir, `seg-${i}.wav`);
+            let extracted = false;
+            try {
+              await execFileAsync(
+                "ffmpeg",
+                [
+                  "-y",
+                  "-vn",
+                  "-ss",
+                  String(sc.startSec),
+                  "-t",
+                  String(sc.durationSec),
+                  "-i",
+                  uploadedPath,
+                  "-af",
+                  `aresample=44100:async=1,apad,atrim=0:${sc.durationSec.toFixed(4)}`,
+                  "-ac",
+                  "2",
+                  "-ar",
+                  "44100",
+                  segOut,
+                ],
+                FFMPEG_EXEC_OPTS
+              );
+              extracted = fs.existsSync(segOut) && fs.statSync(segOut).size > 44;
+            } catch {
+              extracted = false;
+            }
+
+            if (!extracted) {
+              // Pad exact silence duration so subsequent scenes never shift out of sync
+              try {
+                await execFileAsync(
+                  "ffmpeg",
+                  [
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "anullsrc=r=44100:cl=stereo",
+                    "-t",
+                    sc.durationSec.toFixed(4),
+                    "-ac",
+                    "2",
+                    "-ar",
+                    "44100",
+                    segOut,
+                  ],
+                  FFMPEG_EXEC_OPTS
+                );
+                extracted = fs.existsSync(segOut) && fs.statSync(segOut).size > 44;
+              } catch {
+                extracted = false;
+              }
+            }
+
+            if (extracted) {
+              segFiles.push(segOut);
+            }
+          }
+
+          if (segFiles.length === 0) {
+            return;
+          }
+
+          let origWavPath = segFiles[0];
+          if (segFiles.length > 1) {
+            origWavPath = path.join(tmpDir, "original-cuts.wav");
+            const concatInputArgs: string[] = [];
+            const concatLabels: string[] = [];
+            for (let i = 0; i < segFiles.length; i++) {
+              concatInputArgs.push("-i", segFiles[i]);
+              concatLabels.push(`[${i}:a]`);
+            }
+            await execFileAsync(
+              "ffmpeg",
+              [
+                "-y",
+                ...concatInputArgs,
+                "-filter_complex",
+                `${concatLabels.join("")}concat=n=${segFiles.length}:v=0:a=1[outa]`,
+                "-map",
+                "[outa]",
+                "-ac",
+                "2",
+                "-ar",
+                "44100",
+                origWavPath,
+              ],
+              FFMPEG_EXEC_OPTS
+            );
+          }
+
+          const audioFilters = buildVoiceAudioFilters(voiceSettings);
+
+          await execFileAsync(
+            "ffmpeg",
+            [
+              "-y",
+              "-i",
+              inputVideoPath,
+              "-i",
+              origWavPath,
+              "-map",
+              "0:v:0",
+              "-map",
+              "1:a:0",
+              ...videoCodecArgs,
+              "-af",
+              audioFilters.join(","),
+              "-c:a",
+              "aac",
+              "-b:a",
+              "192k",
+              "-ar",
+              "44100",
+              "-ac",
+              "2",
+              "-movflags",
+              "+faststart",
+              "-shortest",
+              outputMp4Path,
+            ],
+            FFMPEG_EXEC_OPTS
+          );
+          muxedWithAudio = true;
+        },
+        { markFinalized: true }
+      );
+    }
+
+    if (!muxedWithAudio) {
+      await runVideoOnlyMux();
     }
 
     const outBuffer = await fs.promises.readFile(outputMp4Path);
@@ -2382,6 +3107,9 @@ app.post("/api/mux-mp4", async (req, res) => {
       error: err instanceof Error ? err.message : "Failed to encode 9:16 MP4.",
     });
   } finally {
+    if (renderedVideoUploadId) {
+      await deleteUploadSession(renderedVideoUploadId);
+    }
     await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   }
 });
@@ -2413,6 +3141,11 @@ app.use(
 );
 
 async function startServer() {
+  await sweepOrphanedTempFiles();
+  setInterval(() => {
+    sweepExpiredUploadSessions().catch(() => {});
+  }, UPLOAD_SWEEP_INTERVAL_MS).unref();
+
   if (process.env.NODE_ENV !== "production") {
     const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
