@@ -10,8 +10,12 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import type { SpeakingScene, SubtitleItem, VideoProject } from "../types";
+import type { SpeechRegion, SpeakingScene, SubtitleItem, VideoProject } from "../types";
 import { ensureSceneIds, roundTenth } from "../utils/projectTimeline";
+import {
+  projectSpeechRegionsToCutTimeline,
+} from "../utils/audioSpeechAnalyzer";
+import { hasVerticalScrollRoom, scrollVerticalAncestors } from "../utils/timelineScroll";
 
 interface ProjectTimelineEditorProps {
   project: VideoProject | null;
@@ -48,8 +52,12 @@ interface UndoEntry {
 type DragMode =
   | {
       type: "scrub";
+      pointerType: string;
       startClientX: number;
+      startClientY: number;
+      lastClientY: number;
       startCutTime: number;
+      axis: "x" | "y" | "pending";
     }
   | {
       type: "trim-start";
@@ -138,20 +146,51 @@ export function ProjectTimelineEditor({
     startTime: number;
     endTime: number;
   } | null>(null);
+  const [trimPreview, setTrimPreview] = useState<{
+    sceneId: string;
+    mode: "trim-start" | "trim-end";
+    origStartSec: number;
+    origEndSec: number;
+    origCutStart: number;
+    origCutEnd: number;
+    nextStartSec: number;
+    nextEndSec: number;
+  } | null>(null);
   const [dragState, setDragState] = useState<DragMode | null>(null);
+  const [liveScrubCutTime, setLiveScrubCutTime] = useState<number | null>(null);
   const [frozenTrackTime, setFrozenTrackTime] = useState<number | null>(null);
   const [dragBadge, setDragBadge] = useState<{ label: string; sec: number } | null>(null);
   const [thumbnails, setThumbnails] = useState<string[]>([]);
+  const [baselineSubRegions, setBaselineSubRegions] = useState<SpeechRegion[]>([]);
   const [undoStack, setUndoStack] = useState<UndoEntry[]>([]);
 
   const dragStateRef = useRef<DragMode | null>(null);
-  dragStateRef.current = dragState;
+  const updateDragState = useCallback((next: DragMode | null) => {
+    dragStateRef.current = next;
+    setDragState(next);
+  }, []);
+  const liveScrubCutRef = useRef<number | null>(null);
+  liveScrubCutRef.current = liveScrubCutTime;
+  const frozenTrackTimeRef = useRef<number | null>(null);
+  const wheelTargetCutRef = useRef<{ cutTime: number; expiresAt: number } | null>(null);
+  const wheelClearTimerRef = useRef<number | null>(null);
   const dragSubPreviewRef = useRef<{
     id: string;
     startTime: number;
     endTime: number;
   } | null>(null);
   dragSubPreviewRef.current = dragSubPreview;
+  const trimPreviewRef = useRef<{
+    sceneId: string;
+    mode: "trim-start" | "trim-end";
+    origStartSec: number;
+    origEndSec: number;
+    origCutStart: number;
+    origCutEnd: number;
+    nextStartSec: number;
+    nextEndSec: number;
+  } | null>(null);
+  trimPreviewRef.current = trimPreview;
   const lastDragTargetRef = useRef<{ cutTime: number; sourceSec: number } | null>(null);
   const trimPreUndoRef = useRef<UndoEntry | null>(null);
   const lastSeekDispatchAtRef = useRef<number>(0);
@@ -218,20 +257,46 @@ export function ProjectTimelineEditor({
     : "none";
 
   useEffect(() => {
+    frozenTrackTimeRef.current = null;
     setFrozenTrackTime(null);
-    setDragState(null);
+    setLiveScrubCutTime(null);
+    wheelTargetCutRef.current = null;
+    activePointersRef.current.clear();
+    pinchStartRef.current = null;
+    updateDragState(null);
+    trimPreviewRef.current = null;
+    setTrimPreview(null);
     setDragSubPreview(null);
     setDragBadge(null);
+    setActiveSceneId(null);
     setActiveSubId(null);
+    setBaselineSubRegions(
+      project?.subtitles.map((s) => ({
+        sourceStartSec: s.sourceStartSec,
+        sourceEndSec: s.sourceEndSec,
+      })) ?? []
+    );
     setUndoStack([]);
   }, [projectIdentity]);
 
-  // Keep activeSceneId synced to existing scenes
+  // Capture initial subtitle baseline if project mounted with subtitles after identity init
+  useEffect(() => {
+    if (baselineSubRegions.length === 0 && project && project.subtitles.length > 0) {
+      setBaselineSubRegions(
+        project.subtitles.map((s) => ({
+          sourceStartSec: s.sourceStartSec,
+          sourceEndSec: s.sourceEndSec,
+        }))
+      );
+    }
+  }, [baselineSubRegions.length, project]);
+
+  // Clear activeSceneId only if the previously selected scene was removed (never auto-select on load)
   useEffect(() => {
     if (segments.length === 0) {
       setActiveSceneId(null);
-    } else if (!activeSceneId || !segments.some((s) => s.sceneId === activeSceneId)) {
-      setActiveSceneId(segments[0].sceneId);
+    } else if (activeSceneId && !segments.some((s) => s.sceneId === activeSceneId)) {
+      setActiveSceneId(null);
     }
   }, [segments, activeSceneId]);
 
@@ -385,6 +450,9 @@ export function ProjectTimelineEditor({
       if (seekThrottleTimerRef.current !== null) {
         window.clearTimeout(seekThrottleTimerRef.current);
       }
+      if (wheelClearTimerRef.current !== null) {
+        window.clearTimeout(wheelClearTimerRef.current);
+      }
     };
   }, []);
 
@@ -522,7 +590,7 @@ export function ProjectTimelineEditor({
     const prev = undoStack[undoStack.length - 1];
     setUndoStack((s) => s.slice(0, -1));
     onRestoreSnapshot(prev.scenes, prev.subtitles);
-    setActiveSceneId(prev.scenes[0]?.id ?? null);
+    setActiveSceneId((cur) => (cur && prev.scenes.some((s) => s.id === cur) ? cur : null));
   }, [undoStack, isPlaying, onPause, onRestoreSnapshot]);
 
   const handleRestoreOriginal = useCallback(() => {
@@ -553,10 +621,36 @@ export function ProjectTimelineEditor({
     return () => window.removeEventListener("keydown", onKey);
   }, [isActive, project, onTogglePlay, targetClipForDelete, handleDeleteClip]);
 
-  const trackCenterTime = frozenTrackTime ?? cutTime;
+  const trackCenterTime = frozenTrackTime ?? liveScrubCutTime ?? cutTime;
   const centerX = viewportWidth / 2;
   const trackWidth = Math.max(totalCutDuration * pxPerSec, 1);
   const trackTranslateX = centerX - trackCenterTime * pxPerSec;
+
+  const resolvedSpeechRegions = useMemo<SpeechRegion[]>(() => {
+    if (project?.speechRegions && project.speechRegions.length > 0) {
+      return project.speechRegions;
+    }
+    if (baselineSubRegions.length > 0) {
+      return baselineSubRegions;
+    }
+    return (project?.subtitles ?? []).map((s) => ({
+      sourceStartSec: s.sourceStartSec,
+      sourceEndSec: s.sourceEndSec,
+    }));
+  }, [project?.speechRegions, baselineSubRegions, project?.subtitles]);
+
+  const cutSpeechRegions = useMemo(() => {
+    const primary = projectSpeechRegionsToCutTimeline(segments, resolvedSpeechRegions);
+    if (primary.length > 0) return primary;
+    const fallbackSubs =
+      baselineSubRegions.length > 0
+        ? baselineSubRegions
+        : (project?.subtitles ?? []).map((s) => ({
+            sourceStartSec: s.sourceStartSec,
+            sourceEndSec: s.sourceEndSec,
+          }));
+    return projectSpeechRegionsToCutTimeline(segments, fallbackSubs);
+  }, [segments, resolvedSpeechRegions, baselineSubRegions, project?.subtitles]);
 
   const tickStepSec = useMemo(() => {
     if (pxPerSec >= 75) return 1;
@@ -584,18 +678,20 @@ export function ProjectTimelineEditor({
     if (e.button !== 0 && e.pointerType === "mouse") return;
     blurFocusedButton();
 
+    if (e.isPrimary) {
+      activePointersRef.current.clear();
+    }
     activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
     try {
       e.currentTarget.setPointerCapture(e.pointerId);
     } catch {
-      // ignore
+      // ignore if capture unavailable
     }
 
-    if (isPlaying) onPause();
-
-    if (activePointersRef.current.size === 2) {
-      dragStateRef.current = null;
-      setDragState(null);
+    if (activePointersRef.current.size >= 2) {
+      if (isPlaying) onPause();
+      updateDragState(null);
       setDragBadge(null);
       const pts = Array.from(activePointersRef.current.values());
       const dist = Math.max(10, Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y));
@@ -604,12 +700,22 @@ export function ProjectTimelineEditor({
     }
 
     if (activePointersRef.current.size === 1) {
+      const isMouse = e.pointerType === "mouse";
+      if (isMouse && isPlaying) {
+        onPause();
+      }
       pinchStartRef.current = null;
-      setDragState({
+      const startTime = liveScrubCutRef.current ?? cutTimeRef.current;
+      const nextDrag: DragMode = {
         type: "scrub",
+        pointerType: e.pointerType || "mouse",
         startClientX: e.clientX,
-        startCutTime: cutTimeRef.current,
-      });
+        startClientY: e.clientY,
+        lastClientY: e.clientY,
+        startCutTime: startTime,
+        axis: isMouse ? "x" : "pending",
+      };
+      updateDragState(nextDrag);
     }
   };
 
@@ -639,9 +745,23 @@ export function ProjectTimelineEditor({
         }
       : null;
 
+    const freezeCut = liveScrubCutRef.current ?? cutTimeRef.current;
+    frozenTrackTimeRef.current = freezeCut;
     setActiveSceneId(seg.sceneId);
-    setFrozenTrackTime(cutTimeRef.current);
-    setDragState({
+    setFrozenTrackTime(freezeCut);
+    const initTrim = {
+      sceneId: seg.sceneId,
+      mode,
+      origStartSec: seg.startSec,
+      origEndSec: seg.endSec,
+      origCutStart: seg.cutStart,
+      origCutEnd: seg.cutEnd,
+      nextStartSec: seg.startSec,
+      nextEndSec: seg.endSec,
+    };
+    trimPreviewRef.current = initTrim;
+    setTrimPreview(initTrim);
+    updateDragState({
       type: mode,
       sceneId: seg.sceneId,
       startClientX: e.clientX,
@@ -686,7 +806,7 @@ export function ProjectTimelineEditor({
       startTime: sub.startTime,
       endTime: sub.endTime,
     });
-    setDragState({
+    updateDragState({
       type: mode,
       subId: sub.id,
       subIndex,
@@ -714,42 +834,67 @@ export function ProjectTimelineEditor({
     const activeDrag = dragStateRef.current;
     if (!activeDrag) return;
     const dx = e.clientX - activeDrag.startClientX;
-    if (tappedClipRef.current && Math.abs(dx) > 5) {
-      tappedClipRef.current.moved = true;
-    }
-    if (tappedSubRef.current && Math.abs(dx) > 5) {
-      tappedSubRef.current.moved = true;
-    }
-    const dt = dx / pxPerSec;
 
     if (activeDrag.type === "scrub") {
+      if (activeDrag.axis === "pending") {
+        const dy = e.clientY - activeDrag.startClientY;
+        const dist = Math.hypot(dx, dy);
+        if (dist < 8 && Math.abs(dx) < 6) return;
+        const canScrollVertically = hasVerticalScrollRoom(viewportRef.current);
+        if (canScrollVertically && Math.abs(dy) >= 10 && Math.abs(dy) > Math.abs(dx) * 1.4) {
+          activeDrag.axis = "y";
+          activeDrag.lastClientY = e.clientY;
+          tappedClipRef.current = null;
+          tappedSubRef.current = null;
+        } else {
+          activeDrag.axis = "x";
+          if (isPlaying) onPause();
+        }
+      }
+
+      if (activeDrag.axis === "y") {
+        const moveY = e.clientY - activeDrag.lastClientY;
+        activeDrag.lastClientY = e.clientY;
+        scrollVerticalAncestors(viewportRef.current, -moveY);
+        return;
+      }
+
+      if (tappedClipRef.current && Math.abs(dx) > 5) {
+        tappedClipRef.current.moved = true;
+      }
+      if (tappedSubRef.current && Math.abs(dx) > 5) {
+        tappedSubRef.current.moved = true;
+      }
+
+      const dt = dx / pxPerSec;
       const nextCut = Math.max(
         0,
         Math.min(totalCutDurationRef.current, activeDrag.startCutTime - dt)
       );
+      liveScrubCutRef.current = nextCut;
+      setLiveScrubCutTime(nextCut);
       dispatchSeek(nextCut);
       return;
     }
+
+    const dt = dx / pxPerSec;
 
     if (activeDrag.type === "trim-start") {
       const nextStart = roundTenth(
         Math.max(0, Math.min(activeDrag.origEndSec - 0.5, activeDrag.origStartSec + dt))
       );
-      const nextScenes = normalizedScenesRef.current.map((sc) =>
-        sc.id === activeDrag.sceneId
-          ? {
-              ...sc,
-              startSec: nextStart,
-              durationSec: roundTenth(activeDrag.origEndSec - nextStart),
-            }
-          : sc
-      );
-      lastDragTargetRef.current = {
-        cutTime: activeDrag.origCutStart,
-        sourceSec: nextStart,
+      const nextPreview = {
+        sceneId: activeDrag.sceneId,
+        mode: "trim-start" as const,
+        origStartSec: activeDrag.origStartSec,
+        origEndSec: activeDrag.origEndSec,
+        origCutStart: activeDrag.origCutStart,
+        origCutEnd: activeDrag.origCutStart + Math.max(0.1, activeDrag.origEndSec - activeDrag.origStartSec),
+        nextStartSec: nextStart,
+        nextEndSec: activeDrag.origEndSec,
       };
-      onUpdateScenes(nextScenes);
-      dispatchSeek(activeDrag.origCutStart);
+      trimPreviewRef.current = nextPreview;
+      setTrimPreview(nextPreview);
       setDragBadge({ label: "In", sec: nextStart });
       return;
     }
@@ -761,23 +906,18 @@ export function ProjectTimelineEditor({
           Math.max(activeDrag.origStartSec + 0.5, activeDrag.origEndSec + dt)
         )
       );
-      const nextClipDur = Math.max(0.5, nextEnd - activeDrag.origStartSec);
-      const nextScenes = normalizedScenesRef.current.map((sc) =>
-        sc.id === activeDrag.sceneId
-          ? {
-              ...sc,
-              endSec: nextEnd,
-              durationSec: roundTenth(nextClipDur),
-            }
-          : sc
-      );
-      const previewCut = Math.max(0, activeDrag.origCutStart + nextClipDur - 0.05);
-      lastDragTargetRef.current = {
-        cutTime: activeDrag.origCutStart + nextClipDur,
-        sourceSec: nextEnd,
+      const nextPreview = {
+        sceneId: activeDrag.sceneId,
+        mode: "trim-end" as const,
+        origStartSec: activeDrag.origStartSec,
+        origEndSec: activeDrag.origEndSec,
+        origCutStart: activeDrag.origCutStart,
+        origCutEnd: activeDrag.origCutStart + Math.max(0.1, activeDrag.origEndSec - activeDrag.origStartSec),
+        nextStartSec: activeDrag.origStartSec,
+        nextEndSec: nextEnd,
       };
-      onUpdateScenes(nextScenes);
-      dispatchSeek(previewCut);
+      trimPreviewRef.current = nextPreview;
+      setTrimPreview(nextPreview);
       setDragBadge({ label: "Out", sec: nextEnd });
       return;
     }
@@ -858,21 +998,37 @@ export function ProjectTimelineEditor({
 
       let subTapSeekTarget: number | null = null;
       if (activeDrag.type === "scrub") {
-        if (tappedClipRef.current && !tappedClipRef.current.moved) {
-          setActiveSceneId(tappedClipRef.current.sceneId);
-        }
-        if (tappedSubRef.current && !tappedSubRef.current.moved) {
+        const hadClipTap = Boolean(tappedClipRef.current && !tappedClipRef.current.moved);
+        const hadSubTap = Boolean(tappedSubRef.current && !tappedSubRef.current.moved);
+        const isUnmovedTouchTap =
+          activeDrag.axis === "pending" ||
+          (activeDrag.axis === "x" && e && Math.abs(e.clientX - activeDrag.startClientX) <= 5);
+
+        if (hadClipTap && tappedClipRef.current) {
+          const tappedId = tappedClipRef.current.sceneId;
+          setActiveSceneId((cur) => (cur === tappedId ? null : tappedId));
+        } else if (hadSubTap && tappedSubRef.current) {
           setActiveSubId(tappedSubRef.current.subId);
           subTapSeekTarget = tappedSubRef.current.startTime;
+        } else if (isUnmovedTouchTap && !hadClipTap && !hadSubTap) {
+          setActiveSceneId(null);
+          setActiveSubId(null);
         }
       }
       tappedClipRef.current = null;
       tappedSubRef.current = null;
 
       if (activeDrag.type === "scrub") {
+        const finalScrubCut = liveScrubCutRef.current;
+        liveScrubCutRef.current = null;
+        setLiveScrubCutTime(null);
+
         if (subTapSeekTarget !== null) {
           queuedSeekSecRef.current = null;
           dispatchSeek(subTapSeekTarget, true);
+        } else if (activeDrag.axis === "x" && finalScrubCut !== null) {
+          queuedSeekSecRef.current = null;
+          dispatchSeek(finalScrubCut, true);
         } else if (queuedSeekSecRef.current !== null) {
           dispatchSeek(queuedSeekSecRef.current, true);
         }
@@ -903,24 +1059,47 @@ export function ProjectTimelineEditor({
         setDragSubPreview(null);
         setFrozenTrackTime(null);
       } else {
-        if (trimPreUndoRef.current && lastDragTargetRef.current) {
+        const preview = trimPreviewRef.current;
+        trimPreviewRef.current = null;
+        setTrimPreview(null);
+        const stayFrozen = frozenTrackTimeRef.current;
+        frozenTrackTimeRef.current = null;
+        setFrozenTrackTime(null);
+
+        if (
+          preview &&
+          trimPreUndoRef.current &&
+          (Math.abs(preview.nextStartSec - preview.origStartSec) >= 0.01 ||
+            Math.abs(preview.nextEndSec - preview.origEndSec) >= 0.01)
+        ) {
           const snapshot = trimPreUndoRef.current;
           setUndoStack((prev) => [...prev.slice(-29), snapshot]);
+          const nextScenes = normalizedScenesRef.current.map((sc) =>
+            sc.id === preview.sceneId
+              ? {
+                  ...sc,
+                  startSec: preview.nextStartSec,
+                  endSec: preview.nextEndSec,
+                  durationSec: roundTenth(preview.nextEndSec - preview.nextStartSec),
+                }
+              : sc
+          );
+          onUpdateScenes(nextScenes);
+          const newMaxCut = nextScenes.reduce(
+            (acc, sc) => acc + Math.max(0.1, sc.endSec - sc.startSec),
+            0
+          );
+          const stayCut = Math.max(0, Math.min(newMaxCut, stayFrozen ?? cutTimeRef.current));
+          dispatchSeek(stayCut, true);
         }
         trimPreUndoRef.current = null;
-
-        const target = lastDragTargetRef.current;
-        if (target) {
-          dispatchSeek(target.cutTime, true);
-        }
         lastDragTargetRef.current = null;
-        setFrozenTrackTime(null);
       }
 
       setDragBadge(null);
-      setDragState(null);
+      updateDragState(null);
     },
-    [dispatchSeek, onUpdateSubtitleTiming]
+    [dispatchSeek, onUpdateScenes, onUpdateSubtitleTiming, updateDragState]
   );
 
   // Safety fallback if pointerup happens outside captured element
@@ -948,8 +1127,15 @@ export function ProjectTimelineEditor({
         setPxPerSec((z) => clampZoom(Math.round(z * factor)));
         return;
       }
-      const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
-      if (Math.abs(delta) < 1) return;
+      const isHorizontalScroll =
+        (Math.abs(e.deltaX) >= 0.5 && Math.abs(e.deltaX) >= Math.abs(e.deltaY) * 0.65) ||
+        (e.shiftKey && Math.abs(e.deltaY) > 0);
+      if (!isHorizontalScroll) {
+        // Allow vertical wheel/trackpad scrolling to scroll the page/panel vertically
+        return;
+      }
+      const delta = Math.abs(e.deltaX) >= Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+      if (Math.abs(delta) < 0.05) return;
       e.preventDefault();
       const {
         pxPerSec: pps,
@@ -958,7 +1144,26 @@ export function ProjectTimelineEditor({
         onPause: pause,
       } = wheelStateRef.current;
       if (playing) pause();
-      seek(cutTimeRef.current + delta / pps);
+
+      const now = performance.now();
+      const baseCut =
+        wheelTargetCutRef.current && wheelTargetCutRef.current.expiresAt > now
+          ? wheelTargetCutRef.current.cutTime
+          : liveScrubCutRef.current ?? cutTimeRef.current;
+      const next = Math.max(0, Math.min(totalCutDurationRef.current, baseCut + delta / pps));
+      wheelTargetCutRef.current = { cutTime: next, expiresAt: now + 240 };
+      liveScrubCutRef.current = next;
+      setLiveScrubCutTime(next);
+      seek(next);
+
+      if (wheelClearTimerRef.current !== null) {
+        window.clearTimeout(wheelClearTimerRef.current);
+      }
+      wheelClearTimerRef.current = window.setTimeout(() => {
+        wheelClearTimerRef.current = null;
+        liveScrubCutRef.current = null;
+        setLiveScrubCutTime(null);
+      }, 220);
     };
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
@@ -1124,9 +1329,14 @@ export function ProjectTimelineEditor({
         onPointerMove={handlePointerMoveViewport}
         onPointerUp={handlePointerUpAny}
         onPointerCancel={handlePointerUpAny}
-        onLostPointerCapture={handlePointerUpAny}
-        className="relative h-56 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-neutral-100 dark:bg-neutral-900 overflow-hidden select-none touch-none cursor-grab active:cursor-grabbing"
+        className="relative h-64 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-neutral-100 dark:bg-neutral-900 overflow-hidden select-none touch-none [&_*]:touch-none cursor-grab active:cursor-grabbing"
       >
+        {/* Full-Width Stationary Ruler Bar Background */}
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-x-0 top-0 h-6 border-b border-neutral-200 dark:border-neutral-800 bg-neutral-50/90 dark:bg-neutral-950/90"
+        />
+
         {/* Moving Timeline Content Track */}
         <div
           style={{
@@ -1136,7 +1346,7 @@ export function ProjectTimelineEditor({
           className="absolute inset-y-0 left-0 will-change-transform"
         >
           {/* Time Ruler Ticks (Cut Timeline Seconds) */}
-          <div className="relative h-6 border-b border-neutral-200 dark:border-neutral-800 bg-neutral-50/90 dark:bg-neutral-950/90">
+          <div className="relative h-6">
             {rulerTicks.map((s) => (
               <div
                 key={s}
@@ -1154,16 +1364,24 @@ export function ProjectTimelineEditor({
           {/* Kept Video Clips Track */}
           <div className="relative h-16 mt-2">
             {segments.map((seg, idx) => {
-              const leftPx = seg.cutStart * pxPerSec;
-              const widthPx = Math.max(18, seg.clipDur * pxPerSec);
+              const activeTrim = trimPreview?.sceneId === seg.sceneId ? trimPreview : null;
+              const deltaStart = activeTrim ? activeTrim.nextStartSec - activeTrim.origStartSec : 0;
+              const deltaEnd = activeTrim ? activeTrim.nextEndSec - activeTrim.origEndSec : 0;
+              const leftPx = (seg.cutStart + deltaStart) * pxPerSec;
+              const rightPx = (seg.cutEnd + deltaEnd) * pxPerSec;
+              const widthPx = Math.max(18, rightPx - leftPx);
+              const displayDur = activeTrim
+                ? Math.max(0.1, activeTrim.nextEndSec - activeTrim.nextStartSec)
+                : seg.clipDur;
               const isSelected = seg.sceneId === activeSceneId;
 
               const slotCount = Math.max(2, Math.min(18, Math.ceil(widthPx / 52)));
               const clipThumbs =
                 thumbnails.length > 0
                   ? Array.from({ length: slotCount }, (_, slotIdx) => {
+                      const effectiveStart = activeTrim ? activeTrim.nextStartSec : seg.startSec;
                       const sampleSourceSec =
-                        seg.startSec + ((slotIdx + 0.5) / slotCount) * seg.clipDur;
+                        effectiveStart + ((slotIdx + 0.5) / slotCount) * displayDur;
                       const thumbIdx = Math.max(
                         0,
                         Math.min(
@@ -1186,14 +1404,16 @@ export function ProjectTimelineEditor({
                       moved: false,
                     };
                   }}
-                  className={`absolute inset-y-0 rounded-md overflow-visible transition-shadow cursor-pointer ${
-                    isSelected
-                      ? "ring-2 ring-indigo-500 dark:ring-indigo-400 z-10 shadow-sm"
-                      : "ring-1 ring-neutral-400/70 dark:ring-neutral-600/80 hover:ring-neutral-500"
+                  className={`absolute inset-y-0 rounded-md overflow-hidden transition-shadow cursor-pointer ${
+                    activeTrim
+                      ? "z-20 shadow-md"
+                      : isSelected
+                        ? "z-10 shadow-md"
+                        : "ring-1 ring-neutral-400/70 dark:ring-neutral-600/80 hover:ring-neutral-500"
                   }`}
                 >
                   {/* Clip Filmstrip Frames */}
-                  <div className="absolute inset-0 rounded-md overflow-hidden bg-neutral-800 flex">
+                  <div className="absolute inset-0 bg-neutral-800 flex">
                     {clipThumbs.length > 0 ? (
                       clipThumbs.map((src, tIdx) => (
                         <img
@@ -1211,48 +1431,118 @@ export function ProjectTimelineEditor({
                   </div>
 
                   {/* Subtle Label Inside Clip */}
-                  <div className="pointer-events-none relative px-2 pt-1 flex items-center justify-between text-[10px] font-mono-tabular font-semibold text-white">
+                  <div
+                    className={`pointer-events-none relative pt-1 flex items-center justify-between text-[10px] font-mono-tabular font-semibold text-white ${
+                      isSelected ? "px-4" : "px-2"
+                    }`}
+                  >
                     <span className="px-1.5 py-0.5 rounded bg-black/65 backdrop-blur-xs truncate">
-                      #{idx + 1} · {roundTenth(seg.clipDur)}s
+                      #{idx + 1} · {roundTenth(displayDur)}s
                     </span>
                   </div>
 
-                  {/* Left Start Trim Handle */}
+                  {/* Seamless Non-Overlapping Selection Frame & Edge Trim Handles */}
                   {isSelected && (
-                    <div
-                      role="slider"
-                      aria-label={`Scene ${idx + 1} start handle`}
-                      aria-valuemin={0}
-                      aria-valuemax={seg.endSec}
-                      aria-valuenow={seg.startSec}
-                      onPointerDown={(e) => handlePointerDownTrimHandle(e, "trim-start", seg)}
-                      className="absolute left-0 inset-y-0 w-3.5 -translate-x-1/2 rounded-l-md bg-indigo-600 text-white shadow flex items-center justify-center cursor-ew-resize z-20"
-                    >
-                      <div className="w-0.5 h-5 rounded-full bg-white/90" />
-                    </div>
-                  )}
-
-                  {/* Right End Trim Handle */}
-                  {isSelected && (
-                    <div
-                      role="slider"
-                      aria-label={`Scene ${idx + 1} end handle`}
-                      aria-valuemin={seg.startSec}
-                      aria-valuemax={sourceDuration}
-                      aria-valuenow={seg.endSec}
-                      onPointerDown={(e) => handlePointerDownTrimHandle(e, "trim-end", seg)}
-                      className="absolute right-0 inset-y-0 w-3.5 translate-x-1/2 rounded-r-md bg-indigo-600 text-white shadow flex items-center justify-center cursor-ew-resize z-20"
-                    >
-                      <div className="w-0.5 h-5 rounded-full bg-white/90" />
-                    </div>
+                    <>
+                      <div
+                        aria-hidden="true"
+                        className="pointer-events-none absolute top-0 left-3.5 right-3.5 h-[2px] bg-indigo-600 dark:bg-indigo-400 z-20"
+                      />
+                      <div
+                        aria-hidden="true"
+                        className="pointer-events-none absolute bottom-0 left-3.5 right-3.5 h-[2px] bg-indigo-600 dark:bg-indigo-400 z-20"
+                      />
+                      <div
+                        role="slider"
+                        aria-label={`Scene ${idx + 1} start handle`}
+                        aria-valuemin={0}
+                        aria-valuemax={seg.endSec}
+                        aria-valuenow={seg.startSec}
+                        onPointerDown={(e) => handlePointerDownTrimHandle(e, "trim-start", seg)}
+                        className="absolute left-0 inset-y-0 w-3.5 bg-indigo-600 dark:bg-indigo-500 text-white flex items-center justify-center cursor-ew-resize touch-none z-20"
+                      >
+                        <div className="w-0.5 h-5 rounded-full bg-white/95" />
+                      </div>
+                      <div
+                        role="slider"
+                        aria-label={`Scene ${idx + 1} end handle`}
+                        aria-valuemin={seg.startSec}
+                        aria-valuemax={sourceDuration}
+                        aria-valuenow={seg.endSec}
+                        onPointerDown={(e) => handlePointerDownTrimHandle(e, "trim-end", seg)}
+                        className="absolute right-0 inset-y-0 w-3.5 bg-indigo-600 dark:bg-indigo-500 text-white flex items-center justify-center cursor-ew-resize touch-none z-20"
+                      >
+                        <div className="w-0.5 h-5 rounded-full bg-white/95" />
+                      </div>
+                    </>
                   )}
                 </div>
               );
             })}
           </div>
 
-          {/* Interactive Subtitles Track */}
-          <div className="relative h-11 mt-2">
+          {/* Interactive Subtitles Track + Underlying Original Speech & Waveform Markers */}
+          <div className="relative h-16 mt-2">
+            {/* Background Speech Bands (align vertically behind subtitles so handles snap visually) */}
+            <div className="pointer-events-none absolute inset-0">
+              {cutSpeechRegions.map((sr, srIdx) => {
+                const leftPx = sr.cutStart * pxPerSec;
+                const widthPx = Math.max(4, (sr.cutEnd - sr.cutStart) * pxPerSec);
+                const alignedLeft =
+                  Boolean(dragSubPreview) &&
+                  (Math.abs(dragSubPreview!.startTime - sr.cutStart) <= 0.12 ||
+                    Math.abs(dragSubPreview!.endTime - sr.cutStart) <= 0.12);
+                const alignedRight =
+                  Boolean(dragSubPreview) &&
+                  (Math.abs(dragSubPreview!.endTime - sr.cutEnd) <= 0.12 ||
+                    Math.abs(dragSubPreview!.startTime - sr.cutEnd) <= 0.12);
+                const isEdgeAligned = alignedLeft || alignedRight;
+
+                return (
+                  <div
+                    key={`sr-${srIdx}-${sr.cutStart.toFixed(2)}`}
+                    style={{ left: `${leftPx}px`, width: `${widthPx}px` }}
+                    className={`absolute inset-y-0 transition-colors ${
+                      isEdgeAligned
+                        ? "bg-amber-400/30 dark:bg-amber-400/24"
+                        : "bg-amber-400/18 dark:bg-amber-400/12"
+                    }`}
+                  >
+                    <div
+                      className={`absolute inset-y-0 left-0 w-[1.5px] ${
+                        alignedLeft
+                          ? "bg-amber-500 dark:bg-amber-300 shadow-[0_0_6px_rgba(245,158,11,0.75)]"
+                          : "bg-amber-500/45 dark:bg-amber-400/40"
+                      }`}
+                    />
+                    <div
+                      className={`absolute inset-y-0 right-0 w-[1.5px] ${
+                        alignedRight
+                          ? "bg-amber-500 dark:bg-amber-300 shadow-[0_0_6px_rgba(245,158,11,0.75)]"
+                          : "bg-amber-500/45 dark:bg-amber-400/40"
+                      }`}
+                    />
+                  </div>
+                );
+              })}
+
+              {/* Lower Initial Subtitle Area Highlight Bars (no gray track background) */}
+              <div className="absolute inset-x-0 bottom-0.5 h-3">
+                {cutSpeechRegions.map((sr, srIdx) => {
+                  const leftPx = sr.cutStart * pxPerSec;
+                  const widthPx = Math.max(4, (sr.cutEnd - sr.cutStart) * pxPerSec);
+                  return (
+                    <div
+                      key={`sr-bar-${srIdx}-${sr.cutStart.toFixed(2)}`}
+                      style={{ left: `${leftPx}px`, width: `${widthPx}px` }}
+                      className="absolute inset-y-0 rounded-[3px] bg-amber-400/85 dark:bg-amber-400/80 border border-amber-600/70 dark:border-amber-300/70"
+                    />
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Upper Subtitle Clips Row */}
             {project.subtitles.map((sub, subIdx) => {
               const preview = dragSubPreview?.id === sub.id ? dragSubPreview : null;
               const startTime = preview ? preview.startTime : sub.startTime;
@@ -1280,12 +1570,12 @@ export function ProjectTimelineEditor({
                     }
                   }}
                   title={`#${subIdx + 1} (${formatTimePrecise(startTime)} – ${formatTimePrecise(endTime)}): ${sub.burmese || sub.thaiPhonetic}`}
-                  className={`absolute inset-y-0 rounded-md overflow-visible flex items-center px-2 transition-shadow ${
+                  className={`absolute top-0 h-10 rounded-md overflow-hidden flex items-center transition-shadow ${
                     isSelected
-                      ? "bg-emerald-600 dark:bg-emerald-500 text-white ring-2 ring-emerald-300 dark:ring-emerald-200 z-10 shadow-sm cursor-grab active:cursor-grabbing"
+                      ? "bg-emerald-600 dark:bg-emerald-500 text-white px-4 z-10 shadow-sm cursor-grab active:cursor-grabbing touch-none"
                       : isAtPlayhead
-                        ? "bg-emerald-100 dark:bg-emerald-950/90 text-emerald-950 dark:text-emerald-100 ring-1 ring-emerald-500/80 dark:ring-emerald-400/80 cursor-pointer"
-                        : "bg-white/95 dark:bg-neutral-800/95 text-neutral-800 dark:text-neutral-200 ring-1 ring-neutral-300 dark:ring-neutral-700 hover:ring-emerald-400 cursor-pointer"
+                        ? "bg-emerald-100/95 dark:bg-emerald-950/90 text-emerald-950 dark:text-emerald-100 px-2 ring-1 ring-emerald-500/80 dark:ring-emerald-400/80 cursor-pointer"
+                        : "bg-white/92 dark:bg-neutral-800/92 text-neutral-800 dark:text-neutral-200 px-2 ring-1 ring-neutral-300 dark:ring-neutral-700 hover:ring-emerald-400 cursor-pointer"
                   }`}
                 >
                   <div className="pointer-events-none flex items-center gap-1.5 min-w-0 w-full">
@@ -1306,6 +1596,14 @@ export function ProjectTimelineEditor({
                   {isSelected && onUpdateSubtitleTiming && (
                     <>
                       <div
+                        aria-hidden="true"
+                        className="pointer-events-none absolute top-0 left-3 right-3 h-[2px] bg-emerald-300 dark:bg-emerald-200 z-20"
+                      />
+                      <div
+                        aria-hidden="true"
+                        className="pointer-events-none absolute bottom-0 left-3 right-3 h-[2px] bg-emerald-300 dark:bg-emerald-200 z-20"
+                      />
+                      <div
                         role="slider"
                         aria-label={`Subtitle ${subIdx + 1} start handle`}
                         aria-valuemin={0}
@@ -1314,9 +1612,9 @@ export function ProjectTimelineEditor({
                         onPointerDown={(e) =>
                           handlePointerDownSubInteraction(e, "sub-trim-start", sub, subIdx)
                         }
-                        className="absolute left-0 inset-y-0 w-3 -translate-x-1/2 rounded-l-md bg-emerald-700 dark:bg-emerald-400 text-white shadow flex items-center justify-center cursor-ew-resize z-20"
+                        className="absolute left-0 inset-y-0 w-3 bg-emerald-700 dark:bg-emerald-400 text-white flex items-center justify-center cursor-ew-resize touch-none z-20"
                       >
-                        <div className="w-0.5 h-4 rounded-full bg-white/90" />
+                        <div className="w-0.5 h-4 rounded-full bg-white/95" />
                       </div>
                       <div
                         role="slider"
@@ -1327,9 +1625,9 @@ export function ProjectTimelineEditor({
                         onPointerDown={(e) =>
                           handlePointerDownSubInteraction(e, "sub-trim-end", sub, subIdx)
                         }
-                        className="absolute right-0 inset-y-0 w-3 translate-x-1/2 rounded-r-md bg-emerald-700 dark:bg-emerald-400 text-white shadow flex items-center justify-center cursor-ew-resize z-20"
+                        className="absolute right-0 inset-y-0 w-3 bg-emerald-700 dark:bg-emerald-400 text-white flex items-center justify-center cursor-ew-resize touch-none z-20"
                       >
-                        <div className="w-0.5 h-4 rounded-full bg-white/90" />
+                        <div className="w-0.5 h-4 rounded-full bg-white/95" />
                       </div>
                     </>
                   )}
@@ -1361,12 +1659,6 @@ export function ProjectTimelineEditor({
           </div>
         )}
 
-        {/* Bottom Free-Scroll Zone Hint */}
-        <div className="pointer-events-none absolute bottom-2 left-1/2 -translate-x-1/2 z-20 px-2.5 py-0.5 rounded-full bg-black/55 text-white/90 text-[10px] whitespace-nowrap">
-          {segments.length === 0
-            ? "No clips kept · Click Reset to restore scenes"
-            : "Drag open space below to scroll timeline · Pinch with two fingers to zoom"}
-        </div>
       </div>
 
       {/* Kept Scenes Summary List */}

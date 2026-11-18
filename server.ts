@@ -1197,7 +1197,6 @@ function normalizeSelectedScenes(
   return clean;
 }
 
-// Compute 10ms-frame RMS energy envelope from 16kHz mono signed 16-bit LE PCM
 function computeRmsEnvelope10ms(pcmBuffer: Buffer): Float32Array {
   const frameSamples = 160; // 10ms @ 16kHz
   const totalSamples = Math.floor(pcmBuffer.length / 2);
@@ -1281,7 +1280,6 @@ function detectSpeechSegments10ms(rms: Float32Array, clipDur: number): SpeechWin
     });
   }
 
-  // Merge small micro-pauses <= 0.32s within a spoken phrase
   const merged: SpeechWindow[] = [];
   for (const seg of raw) {
     const prev = merged[merged.length - 1];
@@ -1292,7 +1290,6 @@ function detectSpeechSegments10ms(rms: Float32Array, clipDur: number): SpeechWin
     }
   }
 
-  // Keep segments >= 0.15s and add tiny onset/offset breathing room
   return merged
     .filter((s) => s.endSec - s.startSec >= 0.15)
     .map((s) => ({
@@ -2067,6 +2064,8 @@ async function processUploadedVideo(
               "-vn",
               "-i",
               persistentPath,
+              "-af",
+              "aresample=async=1:first_pts=0",
               "-ss",
               String(sc.startSec),
               "-t",
@@ -2201,6 +2200,11 @@ async function processUploadedVideo(
       };
     }
 
+    const speechRegions = compiled.subtitles.map((s) => ({
+      sourceStartSec: s.sourceStartSec,
+      sourceEndSec: s.sourceEndSec,
+    }));
+
     return {
       status: 200 as const,
       body: {
@@ -2212,6 +2216,7 @@ async function processUploadedVideo(
         targetDurationSec: compiled.targetDurationSec,
         scenes: compiled.scenes,
         subtitles: compiled.subtitles,
+        speechRegions,
         keyframeUrls: [],
       },
     };
@@ -2615,6 +2620,11 @@ app.post("/api/process-video", async (req, res) => {
       `/api/image-proxy?url=${encodeURIComponent(`https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`)}`,
     ];
 
+    const speechRegions = compiled.subtitles.map((s) => ({
+      sourceStartSec: s.sourceStartSec,
+      sourceEndSec: s.sourceEndSec,
+    }));
+
     res.json({
       sourceType: "youtube",
       videoId,
@@ -2624,6 +2634,7 @@ app.post("/api/process-video", async (req, res) => {
       targetDurationSec: compiled.targetDurationSec,
       scenes: compiled.scenes,
       subtitles: compiled.subtitles,
+      speechRegions,
       keyframeUrls,
     });
   } catch (err) {
@@ -3146,6 +3157,8 @@ app.post("/api/resync-subtitles", async (req, res) => {
                 "-vn",
                 "-i",
                 uploadedPath,
+                "-af",
+                "aresample=async=1:first_pts=0",
                 "-ss",
                 sc.startSec.toFixed(3),
                 "-t",

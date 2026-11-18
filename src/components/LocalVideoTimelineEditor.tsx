@@ -10,6 +10,7 @@ import {
   ZoomOut,
 } from "lucide-react";
 import type { ActiveMediaSource, SceneSelection } from "../types";
+import { hasVerticalScrollRoom, scrollVerticalAncestors } from "../utils/timelineScroll";
 
 interface LocalVideoTimelineEditorProps {
   media: ActiveMediaSource;
@@ -34,8 +35,12 @@ interface ClipSegment {
 type DragMode =
   | {
       type: "scrub";
+      pointerType: string;
       startClientX: number;
+      startClientY: number;
+      lastClientY: number;
       startCutTime: number;
+      axis: "x" | "y" | "pending";
     }
   | {
       type: "trim-start";
@@ -98,6 +103,16 @@ export function LocalVideoTimelineEditor({
   const [pxPerSec, setPxPerSec] = useState(32);
   const [viewportWidth, setViewportWidth] = useState(560);
   const [activeSceneId, setActiveSceneId] = useState<string | null>(null);
+  const [trimPreview, setTrimPreview] = useState<{
+    sceneId: string;
+    mode: "trim-start" | "trim-end";
+    origStartSec: number;
+    origEndSec: number;
+    origCutStart: number;
+    origCutEnd: number;
+    nextStartSec: number;
+    nextEndSec: number;
+  } | null>(null);
   const [dragState, setDragState] = useState<DragMode | null>(null);
   const [frozenTrackTime, setFrozenTrackTime] = useState<number | null>(null);
   const [dragBadge, setDragBadge] = useState<{ label: string; sec: number } | null>(null);
@@ -106,7 +121,24 @@ export function LocalVideoTimelineEditor({
   const [playError, setPlayError] = useState<string | null>(null);
 
   const dragStateRef = useRef<DragMode | null>(null);
-  dragStateRef.current = dragState;
+  const updateDragState = useCallback((next: DragMode | null) => {
+    dragStateRef.current = next;
+    setDragState(next);
+  }, []);
+  const frozenTrackTimeRef = useRef<number | null>(null);
+  const trimPreviewRef = useRef<{
+    sceneId: string;
+    mode: "trim-start" | "trim-end";
+    origStartSec: number;
+    origEndSec: number;
+    origCutStart: number;
+    origCutEnd: number;
+    nextStartSec: number;
+    nextEndSec: number;
+  } | null>(null);
+  trimPreviewRef.current = trimPreview;
+  const scenesRef = useRef(scenes);
+  scenesRef.current = scenes;
   const lastDragTargetRef = useRef<{ cutTime: number; sourceSec: number } | null>(null);
   const trimPreUndoRef = useRef<SceneSelection[] | null>(null);
   const pendingSeekSecRef = useRef<number | null>(null);
@@ -116,6 +148,7 @@ export function LocalVideoTimelineEditor({
   const activePointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
   const pinchStartRef = useRef<{ dist: number; pxPerSec: number } | null>(null);
   const tappedClipRef = useRef<{ sceneId: string; startX: number; moved: boolean } | null>(null);
+  const wheelTargetCutRef = useRef<{ cutTime: number; expiresAt: number } | null>(null);
 
   // Packed magnetic cut-timeline segments built strictly from remaining scenes
   const { segments, totalCutDuration } = useMemo(() => {
@@ -171,8 +204,15 @@ export function LocalVideoTimelineEditor({
   useEffect(() => {
     setIsPlaying(false);
     setCutTime(0);
+    frozenTrackTimeRef.current = null;
     setFrozenTrackTime(null);
-    setDragState(null);
+    activePointersRef.current.clear();
+    pinchStartRef.current = null;
+    updateDragState(null);
+    trimPreviewRef.current = null;
+    setTrimPreview(null);
+    setActiveSceneId(null);
+    wheelTargetCutRef.current = null;
     setPlayError(null);
     setUndoStack([]);
     pendingSeekSecRef.current = null;
@@ -189,12 +229,12 @@ export function LocalVideoTimelineEditor({
     }
   }, [isTabActive]);
 
-  // Keep activeSceneId synced to existing scenes
+  // Clear activeSceneId only if the selected scene was removed (never auto-select clips)
   useEffect(() => {
     if (scenes.length === 0) {
       setActiveSceneId(null);
-    } else if (!activeSceneId || !scenes.some((s) => s.id === activeSceneId)) {
-      setActiveSceneId(scenes[0].id);
+    } else if (activeSceneId && !scenes.some((s) => s.id === activeSceneId)) {
+      setActiveSceneId(null);
     }
   }, [scenes, activeSceneId]);
 
@@ -396,6 +436,7 @@ export function LocalVideoTimelineEditor({
         }
         scheduleSourcePreviewSeek(sourceSec);
       }
+      cutTimeRef.current = clampedCut;
       setCutTime(clampedCut);
       return clampedCut;
     },
@@ -614,7 +655,7 @@ export function LocalVideoTimelineEditor({
     if (onReplaceScenes) {
       onReplaceScenes(prev);
     }
-    setActiveSceneId(prev[0]?.id ?? null);
+    setActiveSceneId((cur) => (cur && prev.some((s) => s.id === cur) ? cur : null));
   }, [undoStack, onReplaceScenes]);
 
   const handleRestoreFullVideo = useCallback(() => {
@@ -627,7 +668,7 @@ export function LocalVideoTimelineEditor({
       endSec: roundTenth(sourceDuration),
     };
     applyScenesMutation([fullClip], scenes.length > 0);
-    setActiveSceneId(fullClip.id);
+    setActiveSceneId(null);
     seekCutTo(0, true);
   }, [sourceDuration, applyScenesMutation, scenes.length, seekCutTo]);
 
@@ -684,21 +725,23 @@ export function LocalVideoTimelineEditor({
     if (e.button !== 0 && e.pointerType === "mouse") return;
     blurFocusedButton();
 
+    if (e.isPrimary) {
+      activePointersRef.current.clear();
+    }
     activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
     try {
       e.currentTarget.setPointerCapture(e.pointerId);
     } catch {
       // ignore if capture unavailable
     }
 
-    if (videoRef.current && !videoRef.current.paused) {
-      videoRef.current.pause();
-    }
-
-    if (activePointersRef.current.size === 2) {
+    if (activePointersRef.current.size >= 2) {
       // Switch cleanly into two-finger pinch-to-zoom mode
-      dragStateRef.current = null;
-      setDragState(null);
+      if (videoRef.current && !videoRef.current.paused) {
+        videoRef.current.pause();
+      }
+      updateDragState(null);
       setDragBadge(null);
       const pts = Array.from(activePointersRef.current.values());
       const dist = Math.max(10, Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y));
@@ -707,12 +750,21 @@ export function LocalVideoTimelineEditor({
     }
 
     if (activePointersRef.current.size === 1) {
+      const isMouse = e.pointerType === "mouse";
+      if (isMouse && videoRef.current && !videoRef.current.paused) {
+        videoRef.current.pause();
+      }
       pinchStartRef.current = null;
-      setDragState({
+      const nextDrag: DragMode = {
         type: "scrub",
+        pointerType: e.pointerType || "mouse",
         startClientX: e.clientX,
+        startClientY: e.clientY,
+        lastClientY: e.clientY,
         startCutTime: cutTimeRef.current,
-      });
+        axis: isMouse ? "x" : "pending",
+      };
+      updateDragState(nextDrag);
     }
   };
 
@@ -732,10 +784,24 @@ export function LocalVideoTimelineEditor({
     if (videoRef.current && !videoRef.current.paused) {
       videoRef.current.pause();
     }
+    const freezeCut = cutTimeRef.current;
+    frozenTrackTimeRef.current = freezeCut;
     trimPreUndoRef.current = scenes.map((s) => ({ ...s }));
     setActiveSceneId(seg.scene.id);
-    setFrozenTrackTime(cutTimeRef.current);
-    setDragState({
+    setFrozenTrackTime(freezeCut);
+    const initTrim = {
+      sceneId: seg.scene.id,
+      mode,
+      origStartSec: seg.startSec,
+      origEndSec: seg.endSec,
+      origCutStart: seg.cutStart,
+      origCutEnd: seg.cutEnd,
+      nextStartSec: seg.startSec,
+      nextEndSec: seg.endSec,
+    };
+    trimPreviewRef.current = initTrim;
+    setTrimPreview(initTrim);
+    updateDragState({
       type: mode,
       sceneId: seg.scene.id,
       startClientX: e.clientX,
@@ -764,12 +830,36 @@ export function LocalVideoTimelineEditor({
     const activeDrag = dragStateRef.current;
     if (!activeDrag) return;
     const dx = e.clientX - activeDrag.startClientX;
-    if (tappedClipRef.current && Math.abs(dx) > 5) {
-      tappedClipRef.current.moved = true;
-    }
-    const dt = dx / pxPerSec;
 
     if (activeDrag.type === "scrub") {
+      if (activeDrag.axis === "pending") {
+        const dy = e.clientY - activeDrag.startClientY;
+        const dist = Math.hypot(dx, dy);
+        if (dist < 8 && Math.abs(dx) < 6) return;
+        const canScrollVertically = hasVerticalScrollRoom(viewportRef.current);
+        if (canScrollVertically && Math.abs(dy) >= 10 && Math.abs(dy) > Math.abs(dx) * 1.4) {
+          activeDrag.axis = "y";
+          activeDrag.lastClientY = e.clientY;
+          tappedClipRef.current = null;
+        } else {
+          activeDrag.axis = "x";
+          if (videoRef.current && !videoRef.current.paused) {
+            videoRef.current.pause();
+          }
+        }
+      }
+
+      if (activeDrag.axis === "y") {
+        const moveY = e.clientY - activeDrag.lastClientY;
+        activeDrag.lastClientY = e.clientY;
+        scrollVerticalAncestors(viewportRef.current, -moveY);
+        return;
+      }
+
+      if (tappedClipRef.current && Math.abs(dx) > 5) {
+        tappedClipRef.current.moved = true;
+      }
+      const dt = dx / pxPerSec;
       const nextCut = Math.max(
         0,
         Math.min(totalCutDurationRef.current, activeDrag.startCutTime - dt)
@@ -778,15 +868,24 @@ export function LocalVideoTimelineEditor({
       return;
     }
 
+    const dt = dx / pxPerSec;
+
     if (activeDrag.type === "trim-start") {
       const nextStart = roundTenth(
         Math.max(0, Math.min(activeDrag.origEndSec - 0.5, activeDrag.origStartSec + dt))
       );
-      lastDragTargetRef.current = {
-        cutTime: activeDrag.origCutStart,
-        sourceSec: nextStart,
+      const nextPreview = {
+        sceneId: activeDrag.sceneId,
+        mode: "trim-start" as const,
+        origStartSec: activeDrag.origStartSec,
+        origEndSec: activeDrag.origEndSec,
+        origCutStart: activeDrag.origCutStart,
+        origCutEnd: activeDrag.origCutStart + Math.max(0.1, activeDrag.origEndSec - activeDrag.origStartSec),
+        nextStartSec: nextStart,
+        nextEndSec: activeDrag.origEndSec,
       };
-      onUpdateScene(activeDrag.sceneId, nextStart, activeDrag.origEndSec);
+      trimPreviewRef.current = nextPreview;
+      setTrimPreview(nextPreview);
       scheduleSourcePreviewSeek(nextStart);
       setDragBadge({ label: "In", sec: nextStart });
       return;
@@ -799,12 +898,18 @@ export function LocalVideoTimelineEditor({
           Math.max(activeDrag.origStartSec + 0.5, activeDrag.origEndSec + dt)
         )
       );
-      const nextClipDur = Math.max(0.5, nextEnd - activeDrag.origStartSec);
-      lastDragTargetRef.current = {
-        cutTime: activeDrag.origCutStart + nextClipDur,
-        sourceSec: nextEnd,
+      const nextPreview = {
+        sceneId: activeDrag.sceneId,
+        mode: "trim-end" as const,
+        origStartSec: activeDrag.origStartSec,
+        origEndSec: activeDrag.origEndSec,
+        origCutStart: activeDrag.origCutStart,
+        origCutEnd: activeDrag.origCutStart + Math.max(0.1, activeDrag.origEndSec - activeDrag.origStartSec),
+        nextStartSec: activeDrag.origStartSec,
+        nextEndSec: nextEnd,
       };
-      onUpdateScene(activeDrag.sceneId, activeDrag.origStartSec, nextEnd);
+      trimPreviewRef.current = nextPreview;
+      setTrimPreview(nextPreview);
       scheduleSourcePreviewSeek(nextEnd);
       setDragBadge({ label: "Out", sec: nextEnd });
     }
@@ -829,21 +934,65 @@ export function LocalVideoTimelineEditor({
       }
       dragStateRef.current = null;
 
-      if (activeDrag.type === "scrub" && tappedClipRef.current && !tappedClipRef.current.moved) {
-        setActiveSceneId(tappedClipRef.current.sceneId);
+      if (activeDrag.type === "scrub") {
+        const hadClipTap = Boolean(tappedClipRef.current && !tappedClipRef.current.moved);
+        const isUnmovedTouchTap =
+          activeDrag.axis === "pending" ||
+          (activeDrag.axis === "x" && e && Math.abs(e.clientX - activeDrag.startClientX) <= 5);
+        if (hadClipTap && tappedClipRef.current) {
+          const tappedId = tappedClipRef.current.sceneId;
+          setActiveSceneId((cur) => (cur === tappedId ? null : tappedId));
+        } else if (isUnmovedTouchTap && !hadClipTap) {
+          setActiveSceneId(null);
+        }
       }
       tappedClipRef.current = null;
 
       if (activeDrag.type !== "scrub") {
-        if (trimPreUndoRef.current && lastDragTargetRef.current) {
+        const preview = trimPreviewRef.current;
+        trimPreviewRef.current = null;
+        setTrimPreview(null);
+        const stayFrozen = frozenTrackTimeRef.current;
+        frozenTrackTimeRef.current = null;
+        setFrozenTrackTime(null);
+
+        if (
+          preview &&
+          trimPreUndoRef.current &&
+          (Math.abs(preview.nextStartSec - preview.origStartSec) >= 0.01 ||
+            Math.abs(preview.nextEndSec - preview.origEndSec) >= 0.01)
+        ) {
           const snapshot = trimPreUndoRef.current;
           setUndoStack((prev) => [...prev.slice(-29), snapshot]);
-        }
-        trimPreUndoRef.current = null;
+          const nextScenes = scenesRef.current.map((sc) =>
+            sc.id === preview.sceneId
+              ? { ...sc, startSec: preview.nextStartSec, endSec: preview.nextEndSec }
+              : sc
+          );
+          onUpdateScene(preview.sceneId, preview.nextStartSec, preview.nextEndSec);
 
-        const target = lastDragTargetRef.current;
-        if (target) {
-          setCutTime(target.cutTime);
+          const newMaxCut = nextScenes.reduce(
+            (acc, sc) => acc + Math.max(0.1, sc.endSec - sc.startSec),
+            0
+          );
+          const stayCut = Math.max(0, Math.min(newMaxCut, stayFrozen ?? cutTimeRef.current));
+          cutTimeRef.current = stayCut;
+          setCutTime(stayCut);
+
+          let cursor = 0;
+          let mappedSource = nextScenes[0]?.startSec ?? 0;
+          for (let i = 0; i < nextScenes.length; i++) {
+            const sc = nextScenes[i];
+            const dur = Math.max(0.1, sc.endSec - sc.startSec);
+            if (stayCut < cursor + dur - 0.0005 || i === nextScenes.length - 1) {
+              const offset = Math.max(0, Math.min(dur, stayCut - cursor));
+              mappedSource = Math.min(sc.endSec, sc.startSec + offset);
+              activePlaybackIdxRef.current = i;
+              break;
+            }
+            cursor += dur;
+          }
+
           const vid = videoRef.current;
           if (vid) {
             const actualDur =
@@ -851,17 +1000,17 @@ export function LocalVideoTimelineEditor({
             pendingSeekSecRef.current = null;
             vid.currentTime = Math.max(
               0,
-              Math.min(Math.max(0, actualDur - 0.02), target.sourceSec)
+              Math.min(Math.max(0, actualDur - 0.02), mappedSource)
             );
           }
         }
+        trimPreUndoRef.current = null;
         lastDragTargetRef.current = null;
-        setFrozenTrackTime(null);
       }
       setDragBadge(null);
-      setDragState(null);
+      updateDragState(null);
     },
-    [sourceDuration]
+    [onUpdateScene, sourceDuration, updateDragState]
   );
 
   // Safety fallback if pointerup happens outside captured element
@@ -889,11 +1038,25 @@ export function LocalVideoTimelineEditor({
         setPxPerSec((z) => clampZoom(Math.round(z * factor)));
         return;
       }
-      const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
-      if (Math.abs(delta) < 1) return;
+      const isHorizontalScroll =
+        (Math.abs(e.deltaX) >= 0.5 && Math.abs(e.deltaX) >= Math.abs(e.deltaY) * 0.65) ||
+        (e.shiftKey && Math.abs(e.deltaY) > 0);
+      if (!isHorizontalScroll) {
+        // Allow vertical wheel/trackpad scrolling to scroll the page/panel vertically
+        return;
+      }
+      const delta = Math.abs(e.deltaX) >= Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+      if (Math.abs(delta) < 0.05) return;
       e.preventDefault();
       const { pxPerSec: pps, seekCutTo: seek } = wheelStateRef.current;
-      seek(cutTimeRef.current + delta / pps, true);
+      const now = performance.now();
+      const baseCut =
+        wheelTargetCutRef.current && wheelTargetCutRef.current.expiresAt > now
+          ? wheelTargetCutRef.current.cutTime
+          : cutTimeRef.current;
+      const next = Math.max(0, Math.min(totalCutDurationRef.current, baseCut + delta / pps));
+      wheelTargetCutRef.current = { cutTime: next, expiresAt: now + 240 };
+      seek(next, true);
     };
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
@@ -1119,9 +1282,14 @@ export function LocalVideoTimelineEditor({
         onPointerMove={handlePointerMoveViewport}
         onPointerUp={handlePointerUpAny}
         onPointerCancel={handlePointerUpAny}
-        onLostPointerCapture={handlePointerUpAny}
-        className="relative h-48 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-neutral-100 dark:bg-neutral-900 overflow-hidden select-none touch-none cursor-grab active:cursor-grabbing"
+        className="relative h-48 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-neutral-100 dark:bg-neutral-900 overflow-hidden select-none touch-none [&_*]:touch-none cursor-grab active:cursor-grabbing"
       >
+        {/* Full-Width Stationary Ruler Bar Background */}
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-x-0 top-0 h-6 border-b border-neutral-200 dark:border-neutral-800 bg-neutral-50/90 dark:bg-neutral-950/90"
+        />
+
         {/* Moving Timeline Content Track */}
         <div
           style={{
@@ -1131,7 +1299,7 @@ export function LocalVideoTimelineEditor({
           className="absolute inset-y-0 left-0 will-change-transform"
         >
           {/* Time Ruler Ticks (Cut Timeline Seconds) */}
-          <div className="relative h-6 border-b border-neutral-200 dark:border-neutral-800 bg-neutral-50/90 dark:bg-neutral-950/90">
+          <div className="relative h-6">
             {rulerTicks.map((s) => (
               <div
                 key={s}
@@ -1149,8 +1317,15 @@ export function LocalVideoTimelineEditor({
           {/* Kept Video Clips Track (ONLY the scenes you keep — zero overlay boxes!) */}
           <div className="relative h-16 mt-2">
             {segments.map((seg, idx) => {
-              const leftPx = seg.cutStart * pxPerSec;
-              const widthPx = Math.max(18, seg.clipDur * pxPerSec);
+              const activeTrim = trimPreview?.sceneId === seg.scene.id ? trimPreview : null;
+              const deltaStart = activeTrim ? activeTrim.nextStartSec - activeTrim.origStartSec : 0;
+              const deltaEnd = activeTrim ? activeTrim.nextEndSec - activeTrim.origEndSec : 0;
+              const leftPx = (seg.cutStart + deltaStart) * pxPerSec;
+              const rightPx = (seg.cutEnd + deltaEnd) * pxPerSec;
+              const widthPx = Math.max(18, rightPx - leftPx);
+              const displayDur = activeTrim
+                ? Math.max(0.1, activeTrim.nextEndSec - activeTrim.nextStartSec)
+                : seg.clipDur;
               const isSelected = seg.scene.id === activeSceneId;
 
               // Slice thumbnails matching this clip's [startSec .. endSec] range
@@ -1158,8 +1333,9 @@ export function LocalVideoTimelineEditor({
               const clipThumbs =
                 thumbnails.length > 0
                   ? Array.from({ length: slotCount }, (_, slotIdx) => {
+                      const effectiveStart = activeTrim ? activeTrim.nextStartSec : seg.startSec;
                       const sampleSourceSec =
-                        seg.startSec + ((slotIdx + 0.5) / slotCount) * seg.clipDur;
+                        effectiveStart + ((slotIdx + 0.5) / slotCount) * displayDur;
                       const thumbIdx = Math.max(
                         0,
                         Math.min(
@@ -1182,14 +1358,16 @@ export function LocalVideoTimelineEditor({
                       moved: false,
                     };
                   }}
-                  className={`absolute inset-y-0 rounded-md overflow-visible transition-shadow cursor-pointer ${
-                    isSelected
-                      ? "ring-2 ring-indigo-500 dark:ring-indigo-400 z-10 shadow-sm"
-                      : "ring-1 ring-neutral-400/70 dark:ring-neutral-600/80 hover:ring-neutral-500"
+                  className={`absolute inset-y-0 rounded-md overflow-hidden transition-shadow cursor-pointer ${
+                    activeTrim
+                      ? "z-20 shadow-md"
+                      : isSelected
+                        ? "z-10 shadow-md"
+                        : "ring-1 ring-neutral-400/70 dark:ring-neutral-600/80 hover:ring-neutral-500"
                   }`}
                 >
                   {/* Clip Filmstrip Frames */}
-                  <div className="absolute inset-0 rounded-md overflow-hidden bg-neutral-800 flex">
+                  <div className="absolute inset-0 bg-neutral-800 flex">
                     {clipThumbs.length > 0 ? (
                       clipThumbs.map((src, tIdx) => (
                         <img
@@ -1206,40 +1384,50 @@ export function LocalVideoTimelineEditor({
                   </div>
 
                   {/* Subtle Label Inside Clip */}
-                  <div className="pointer-events-none relative px-2 pt-1 flex items-center justify-between text-[10px] font-mono-tabular font-semibold text-white">
+                  <div
+                    className={`pointer-events-none relative pt-1 flex items-center justify-between text-[10px] font-mono-tabular font-semibold text-white ${
+                      isSelected ? "px-4" : "px-2"
+                    }`}
+                  >
                     <span className="px-1.5 py-0.5 rounded bg-black/65 backdrop-blur-xs truncate">
-                      #{idx + 1} · {roundTenth(seg.clipDur)}s
+                      #{idx + 1} · {roundTenth(displayDur)}s
                     </span>
                   </div>
 
-                  {/* Left Start Trim Handle */}
+                  {/* Seamless Non-Overlapping Selection Frame & Edge Trim Handles */}
                   {isSelected && (
-                    <div
-                      role="slider"
-                      aria-label={`Scene ${idx + 1} start handle`}
-                      aria-valuemin={0}
-                      aria-valuemax={seg.endSec}
-                      aria-valuenow={seg.startSec}
-                      onPointerDown={(e) => handlePointerDownTrimHandle(e, "trim-start", seg)}
-                      className="absolute left-0 inset-y-0 w-3.5 -translate-x-1/2 rounded-l-md bg-indigo-600 text-white shadow flex items-center justify-center cursor-ew-resize z-20"
-                    >
-                      <div className="w-0.5 h-5 rounded-full bg-white/90" />
-                    </div>
-                  )}
-
-                  {/* Right End Trim Handle */}
-                  {isSelected && (
-                    <div
-                      role="slider"
-                      aria-label={`Scene ${idx + 1} end handle`}
-                      aria-valuemin={seg.startSec}
-                      aria-valuemax={sourceDuration}
-                      aria-valuenow={seg.endSec}
-                      onPointerDown={(e) => handlePointerDownTrimHandle(e, "trim-end", seg)}
-                      className="absolute right-0 inset-y-0 w-3.5 translate-x-1/2 rounded-r-md bg-indigo-600 text-white shadow flex items-center justify-center cursor-ew-resize z-20"
-                    >
-                      <div className="w-0.5 h-5 rounded-full bg-white/90" />
-                    </div>
+                    <>
+                      <div
+                        aria-hidden="true"
+                        className="pointer-events-none absolute top-0 left-3.5 right-3.5 h-[2px] bg-indigo-600 dark:bg-indigo-400 z-20"
+                      />
+                      <div
+                        aria-hidden="true"
+                        className="pointer-events-none absolute bottom-0 left-3.5 right-3.5 h-[2px] bg-indigo-600 dark:bg-indigo-400 z-20"
+                      />
+                      <div
+                        role="slider"
+                        aria-label={`Scene ${idx + 1} start handle`}
+                        aria-valuemin={0}
+                        aria-valuemax={seg.endSec}
+                        aria-valuenow={seg.startSec}
+                        onPointerDown={(e) => handlePointerDownTrimHandle(e, "trim-start", seg)}
+                        className="absolute left-0 inset-y-0 w-3.5 bg-indigo-600 dark:bg-indigo-500 text-white flex items-center justify-center cursor-ew-resize touch-none z-20"
+                      >
+                        <div className="w-0.5 h-5 rounded-full bg-white/95" />
+                      </div>
+                      <div
+                        role="slider"
+                        aria-label={`Scene ${idx + 1} end handle`}
+                        aria-valuemin={seg.startSec}
+                        aria-valuemax={sourceDuration}
+                        aria-valuenow={seg.endSec}
+                        onPointerDown={(e) => handlePointerDownTrimHandle(e, "trim-end", seg)}
+                        className="absolute right-0 inset-y-0 w-3.5 bg-indigo-600 dark:bg-indigo-500 text-white flex items-center justify-center cursor-ew-resize touch-none z-20"
+                      >
+                        <div className="w-0.5 h-5 rounded-full bg-white/95" />
+                      </div>
+                    </>
                   )}
                 </div>
               );
@@ -1262,12 +1450,6 @@ export function LocalVideoTimelineEditor({
           <div className="w-[2px] flex-1 bg-neutral-950 dark:bg-white shadow-[0_0_6px_rgba(0,0,0,0.45)]" />
         </div>
 
-        {/* Bottom Free-Scroll Zone Hint */}
-        <div className="pointer-events-none absolute bottom-2 left-1/2 -translate-x-1/2 z-20 px-2.5 py-0.5 rounded-full bg-black/55 text-white/90 text-[10px] whitespace-nowrap">
-          {segments.length === 0
-            ? "No clips kept · Click Reset to restore full video"
-            : "Drag open space below to scroll timeline · Pinch with two fingers to zoom"}
-        </div>
       </div>
 
       {/* Kept Scenes Summary List */}

@@ -28,21 +28,30 @@ export function ensureSceneIds(scenes: SpeakingScene[]): SpeakingScene[] {
 }
 
 /**
- * Returns the active subtitle ONLY when timeSec falls within [startTime, endTime].
- * During silent gaps between subtitles, returns undefined so no stale card stays highlighted.
+ * Returns the active subtitle when timeSec falls within [startTime, endTime].
+ * During silent gaps after a subtitle finishes and before the next subtitle starts,
+ * keeps the most recently spoken subtitle selected until the next subtitle arrives.
  */
 export function findActiveSubtitle(
   subtitles: SubtitleItem[],
   timeSec: number
 ): SubtitleItem | undefined {
-  let active: SubtitleItem | undefined;
+  let activeInRange: SubtitleItem | undefined;
+  let lastStarted: SubtitleItem | undefined;
+
   for (let i = 0; i < subtitles.length; i++) {
     const sub = subtitles[i];
-    if (timeSec >= sub.startTime && timeSec <= sub.endTime) {
-      active = sub;
+    if (timeSec >= sub.startTime) {
+      if (!lastStarted || sub.startTime >= lastStarted.startTime) {
+        lastStarted = sub;
+      }
+      if (timeSec <= sub.endTime) {
+        activeInRange = sub;
+      }
     }
   }
-  return active;
+
+  return activeInRange ?? lastStarted;
 }
 
 /**

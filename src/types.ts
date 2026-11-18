@@ -61,6 +61,11 @@ export interface ActiveMediaSource {
   thumbnail?: string;
 }
 
+export interface SpeechRegion {
+  sourceStartSec: number;
+  sourceEndSec: number;
+}
+
 export interface VideoProject {
   sourceType: "youtube" | "local";
   videoId?: string;
@@ -73,6 +78,7 @@ export interface VideoProject {
   targetDurationSec: number;
   scenes: SpeakingScene[];
   subtitles: SubtitleItem[];
+  speechRegions?: SpeechRegion[];
   keyframeUrls: string[];
 }
 
@@ -158,6 +164,7 @@ export interface SavedProjectRecord {
   selectedScenes: SceneSelection[];
   scenes: SpeakingScene[];
   subtitles: SubtitleItem[];
+  speechRegions?: SpeechRegion[];
   keyframeUrls: string[];
   voiceSettings: VoiceSettings;
   editSettings: VideoEditSettings;

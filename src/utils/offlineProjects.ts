@@ -528,6 +528,14 @@ export async function saveOfflineProject(
         ...sub,
         words: (Array.isArray(sub.words) ? sub.words : []).map((w) => ({ ...w })),
       })),
+      ...(Array.isArray(project.speechRegions) && project.speechRegions.length > 0
+        ? {
+            speechRegions: project.speechRegions.map((sr) => ({
+              sourceStartSec: sr.sourceStartSec,
+              sourceEndSec: sr.sourceEndSec,
+            })),
+          }
+        : {}),
       keyframeUrls: [...project.keyframeUrls],
       voiceSettings: sanitizeVoiceSettings(voiceSettings),
       editSettings: sanitizeEditSettings(editSettings),
@@ -914,6 +922,22 @@ export async function importProjectFromJsonText(
     selectedScenes: validatedSelectedScenes,
     scenes: validatedScenes,
     subtitles: validatedSubtitles.sort((a, b) => a.startTime - b.startTime),
+    ...(Array.isArray(raw.speechRegions) && raw.speechRegions.length > 0
+      ? {
+          speechRegions: raw.speechRegions
+            .filter(
+              (sr) =>
+                sr &&
+                typeof sr.sourceStartSec === "number" &&
+                typeof sr.sourceEndSec === "number" &&
+                sr.sourceEndSec > sr.sourceStartSec
+            )
+            .map((sr) => ({
+              sourceStartSec: sr.sourceStartSec,
+              sourceEndSec: sr.sourceEndSec,
+            })),
+        }
+      : {}),
     keyframeUrls: Array.isArray(raw.keyframeUrls)
       ? raw.keyframeUrls.filter((u): u is string => typeof u === "string")
       : [],

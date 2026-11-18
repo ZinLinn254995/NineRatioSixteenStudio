@@ -512,13 +512,20 @@ export async function exportProjectToMp4(
     });
 
     const getActiveCardIndex = (t: number): number => {
-      let idx = -1;
+      let activeIdx = -1;
+      let lastStartedIdx = -1;
       for (let i = 0; i < cards.length; i++) {
-        if (t >= cards[i].sub.startTime && t <= cards[i].sub.endTime) {
-          idx = i;
+        const sub = cards[i].sub;
+        if (t >= sub.startTime) {
+          if (lastStartedIdx === -1 || sub.startTime >= cards[lastStartedIdx].sub.startTime) {
+            lastStartedIdx = i;
+          }
+          if (t <= sub.endTime) {
+            activeIdx = i;
+          }
         }
       }
-      return idx;
+      return activeIdx >= 0 ? activeIdx : lastStartedIdx;
     };
 
     const getScrollYForTime = (t: number): number => {

@@ -14,7 +14,7 @@ import type {
   YouTubeLicenseFilter,
   YouTubeVideo,
 } from "./types";
-import { Stage9x16, type StagePreviewSize } from "./components/Stage9x16";
+import { DEFAULT_STAGE_PREVIEW_SCALE, Stage9x16 } from "./components/Stage9x16";
 import { mapCutTimeToSource } from "./components/YouTubeScenePlayer";
 import { WorkspaceSidebar, type WorkspaceTab } from "./components/WorkspaceSidebar";
 import { exportProjectToMp4, type ExportProgress } from "./utils/exportVideo";
@@ -93,7 +93,7 @@ export default function App() {
   const [isDesktop, setIsDesktop] = useState<boolean>(() =>
     typeof window !== "undefined" ? window.matchMedia("(min-width: 1024px)").matches : true
   );
-  const [stagePreviewSize, setStagePreviewSize] = useState<StagePreviewSize>("normal");
+  const [stagePreviewScale, setStagePreviewScale] = useState<number>(DEFAULT_STAGE_PREVIEW_SCALE);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const activeRunIdRef = useRef(0);
@@ -643,7 +643,7 @@ export default function App() {
         };
         setProject(nextProj);
         setBaselineFromProject(nextProj);
-        setActiveTab("script");
+        setActiveTab("edit");
       } else if (targetMedia.sourceType === "youtube" && targetMedia.videoId) {
         const resp = await fetch("/api/process-video", {
           method: "POST",
@@ -668,7 +668,7 @@ export default function App() {
         };
         setProject(nextProj);
         setBaselineFromProject(nextProj);
-        setActiveTab("script");
+        setActiveTab("edit");
       }
     } catch (err) {
       if (
@@ -2081,13 +2081,20 @@ export default function App() {
         ...sub,
         words: (Array.isArray(sub.words) ? sub.words : []).map((w) => ({ ...w })),
       })),
+      speechRegions:
+        Array.isArray(record.speechRegions) && record.speechRegions.length > 0
+          ? record.speechRegions.map((sr) => ({ ...sr }))
+          : (Array.isArray(record.subtitles) ? record.subtitles : []).map((sub) => ({
+              sourceStartSec: sub.sourceStartSec,
+              sourceEndSec: sub.sourceEndSec,
+            })),
       keyframeUrls: Array.isArray(record.keyframeUrls) ? [...record.keyframeUrls] : [],
     };
     setProject(openedProj);
     setBaselineFromProject(openedProj);
 
-    if (record.subtitles.length > 0) {
-      setActiveTab("script");
+    if (record.subtitles.length > 0 || record.scenes.length > 0) {
+      setActiveTab("edit");
     } else if (record.sourceType === "local" && localUrl) {
       setActiveTab("scenes");
     } else if (record.sourceType === "youtube") {
@@ -2343,19 +2350,11 @@ export default function App() {
           activeTab !== "videos" && activeTab !== "ytPreview" && activeTab !== "scenes";
         const isStageFocus = activeTab === "edit" || activeTab === "script";
         const renderInlineStageInSidebar = showStage && isStageFocus && !isDesktop;
-        const desktopSidebarCols = !showStage
-          ? "lg:col-span-12"
-          : isStageFocus && stagePreviewSize === "big"
-            ? "lg:col-span-6"
-            : isStageFocus && stagePreviewSize === "compact"
-              ? "lg:col-span-8"
-              : "lg:col-span-7";
-        const desktopStageCols =
-          isStageFocus && stagePreviewSize === "big"
-            ? "lg:col-span-6"
-            : isStageFocus && stagePreviewSize === "compact"
-              ? "lg:col-span-4"
-              : "lg:col-span-5";
+        const useSplitFlex = showStage && isStageFocus && isDesktop;
+        const desktopSidebarCols = !showStage ? "lg:col-span-12" : "lg:col-span-7";
+        const desktopStageCols = "lg:col-span-5";
+        const sidebarWidthPct = 66 - stagePreviewScale * 16;
+        const stageWidthPct = 34 + stagePreviewScale * 16;
 
         const stageNode = showStage ? (
           <Stage9x16
@@ -2373,22 +2372,29 @@ export default function App() {
             onEnded={handlePlaybackEnded}
             onToggleMute={() => setMuted((m) => !m)}
             compactMobile={isStageFocus}
-            previewSize={isStageFocus ? stagePreviewSize : "normal"}
-            onChangePreviewSize={isStageFocus ? setStagePreviewSize : undefined}
+            previewScale={isStageFocus ? stagePreviewScale : DEFAULT_STAGE_PREVIEW_SCALE}
+            onChangePreviewScale={isStageFocus ? setStagePreviewScale : undefined}
           />
         ) : null;
 
         return (
           <main
             className={`flex-1 min-h-0 max-w-[1440px] w-full mx-auto px-4 sm:px-6 py-4 ${
-              isStageFocus
-                ? "flex flex-col lg:grid lg:grid-cols-12 gap-3 lg:gap-6 overflow-hidden"
-                : "grid grid-cols-1 lg:grid-cols-12 gap-6"
+              useSplitFlex
+                ? "flex flex-row gap-6 overflow-hidden"
+                : isStageFocus
+                  ? "flex flex-col gap-3 overflow-hidden"
+                  : "grid grid-cols-1 lg:grid-cols-12 gap-6"
             }`}
           >
             {/* Left / Full: Video Picker, YouTube Preview, Watch & Custom Scene Selection, Subtitles, Voice, and Saved Projects */}
             <section
-              className={`${desktopSidebarCols} ${
+              style={
+                useSplitFlex
+                  ? { width: `calc(${sidebarWidthPct.toFixed(2)}% - 12px)` }
+                  : undefined
+              }
+              className={`${useSplitFlex ? "shrink-0 min-w-0" : desktopSidebarCols} ${
                 isStageFocus ? "flex-1 min-h-0" : "min-h-0"
               } flex flex-col`}
             >
@@ -2512,7 +2518,14 @@ export default function App() {
 
         {/* Right: Focused 9:16 Stage */}
         {showStage && !renderInlineStageInSidebar && (
-          <section className={`${desktopStageCols} flex items-center justify-center min-h-0`}>
+          <section
+            style={
+              useSplitFlex
+                ? { width: `calc(${stageWidthPct.toFixed(2)}% - 12px)` }
+                : undefined
+            }
+            className={`${useSplitFlex ? "shrink-0 min-w-0" : desktopStageCols} flex items-center justify-center min-h-0`}
+          >
             {stageNode}
           </section>
         )}

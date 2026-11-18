@@ -470,9 +470,9 @@ export function WorkspaceSidebar({
         )}
       </div>
 
-      {/* Inline 9:16 Stage directly below Tab Switcher (used on compact mobile Edit view) */}
+      {/* Inline 9:16 Stage directly below Tab Switcher (used on compact mobile Edit/Subtitles view) */}
       {inlineStage && (
-        <div className="py-2 border-b border-neutral-200 dark:border-neutral-800 shrink-0 flex justify-center">
+        <div className="pt-2 pb-0 shrink-0 flex justify-center">
           {inlineStage}
         </div>
       )}

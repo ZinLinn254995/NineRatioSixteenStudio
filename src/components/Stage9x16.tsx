@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
-import { Pause, Play, Volume2, VolumeX, ZoomIn, ZoomOut } from "lucide-react";
+import { ChevronsUpDown, GripHorizontal, Pause, Play, Volume2, VolumeX } from "lucide-react";
 import type { SubtitleItem, VideoEditSettings, VideoProject, VoiceSettings } from "../types";
 import { YouTubeScenePlayer, type YouTubeScenePlayerHandle } from "./YouTubeScenePlayer";
 import { getEffectivePlaybackSpeed } from "../utils/voicePresets";
 import { findActiveSubtitle, getScrollAnchorSubtitle } from "../utils/projectTimeline";
 
-export type StagePreviewSize = "compact" | "normal" | "big";
+export const DEFAULT_STAGE_PREVIEW_SCALE = 0.5;
 
 interface Stage9x16Props {
   project: VideoProject | null;
@@ -23,8 +23,8 @@ interface Stage9x16Props {
   onEnded: () => void;
   onToggleMute: () => void;
   compactMobile?: boolean;
-  previewSize?: StagePreviewSize;
-  onChangePreviewSize?: (size: StagePreviewSize) => void;
+  previewScale?: number;
+  onChangePreviewScale?: (scale: number) => void;
 }
 
 function formatSec(sec: number): string {
@@ -49,29 +49,50 @@ export function Stage9x16({
   onEnded,
   onToggleMute,
   compactMobile = false,
-  previewSize = "normal",
-  onChangePreviewSize,
+  previewScale = DEFAULT_STAGE_PREVIEW_SCALE,
+  onChangePreviewScale,
 }: Stage9x16Props) {
   const playerRef = useRef<YouTubeScenePlayerHandle | null>(null);
+  const stageOuterRef = useRef<HTMLDivElement | null>(null);
   const stageFrameRef = useRef<HTMLDivElement | null>(null);
   const listContainerRef = useRef<HTMLDivElement | null>(null);
   const itemRefs = useRef<Record<string, HTMLButtonElement | null>>({});
-  const [stageWidth, setStageWidth] = useState<number>(360);
+  const dragStartRef = useRef<{ startY: number; startHeightPx: number } | null>(null);
+  const [outerWidth, setOuterWidth] = useState<number>(0);
+  const [isResizing, setIsResizing] = useState(false);
+  const [viewportMetrics, setViewportMetrics] = useState<{ height: number; isLg: boolean }>(() =>
+    typeof window !== "undefined"
+      ? {
+          height: window.innerHeight,
+          isLg: window.matchMedia("(min-width: 1024px)").matches,
+        }
+      : { height: 900, isLg: true }
+  );
 
   useEffect(() => {
-    const el = stageFrameRef.current;
+    const updateViewport = () => {
+      setViewportMetrics({
+        height: window.innerHeight,
+        isLg: window.matchMedia("(min-width: 1024px)").matches,
+      });
+    };
+    updateViewport();
+    window.addEventListener("resize", updateViewport);
+    return () => window.removeEventListener("resize", updateViewport);
+  }, []);
+
+  useEffect(() => {
+    const el = stageOuterRef.current;
     if (!el) return;
     const update = () => {
       const w = el.clientWidth;
-      if (w > 0) setStageWidth(w);
+      if (w > 0) setOuterWidth(w);
     };
     update();
     const ro = new ResizeObserver(update);
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
-
-  const uiScale = Math.max(0.32, Math.min(1.08, stageWidth / 360));
 
   const totalDuration = project?.targetDurationSec || 90;
   const effectiveSpeed = project
@@ -94,7 +115,7 @@ export function Stage9x16({
   const activeSub: SubtitleItem | undefined = findActiveSubtitle(subtitles, highlightTime);
   const scrollTargetSub: SubtitleItem | undefined = getScrollAnchorSubtitle(subtitles, highlightTime);
 
-  // Auto-scroll the active list item smoothly inside the 9:16 list view
+  // Auto-scroll the active list item smoothly inside the fixed 720x1280 subtitle viewport
   useEffect(() => {
     if (!scrollTargetSub || !listContainerRef.current) return;
     const container = listContainerRef.current;
@@ -102,7 +123,7 @@ export function Stage9x16({
     if (!el) return;
 
     const containerHeight = container.clientHeight;
-    const targetTop = el.offsetTop - containerHeight * 0.34 + el.clientHeight * 0.5;
+    const targetTop = el.offsetTop + el.clientHeight * 0.5 - containerHeight * 0.42;
     container.scrollTo({
       top: Math.max(0, targetTop),
       behavior: "smooth",
@@ -113,37 +134,122 @@ export function Stage9x16({
   const displayTotalDuration = totalDuration / effectiveSpeed;
   const progressPct = totalDuration > 0 ? Math.min(100, (cutTime / totalDuration) * 100) : 0;
 
-  const frameSizeClass =
-    previewSize === "compact"
-      ? compactMobile
-        ? "h-[min(28dvh,250px)] min-h-[160px] lg:h-[min(calc(100dvh-310px),460px)] lg:min-h-[260px]"
-        : "h-[min(calc(100dvh-310px),460px)] min-h-[260px]"
-      : previewSize === "big"
-        ? compactMobile
-          ? "h-[min(56dvh,500px)] min-h-[280px] lg:h-[min(calc(100dvh-148px),840px)] lg:min-h-[420px]"
-          : "h-[min(calc(100dvh-148px),840px)] min-h-[420px]"
-        : compactMobile
-          ? "h-[min(42dvh,380px)] min-h-[220px] lg:h-[min(calc(100dvh-180px),675px)] lg:min-h-[360px]"
-          : "h-[min(calc(100dvh-180px),675px)] min-h-[360px]";
+  const clampedScale = Math.max(0, Math.min(1, previewScale));
+  const isCompactLayout = compactMobile && !viewportMetrics.isLg;
+  const minHeightPx = isCompactLayout
+    ? Math.max(150, Math.min(260, Math.round(viewportMetrics.height * 0.22)))
+    : Math.max(240, Math.min(440, viewportMetrics.height - 340));
+  const baseMaxHeightPx = isCompactLayout
+    ? Math.max(minHeightPx + 100, Math.min(520, Math.round(viewportMetrics.height * 0.56)))
+    : Math.max(minHeightPx + 120, Math.min(840, viewportMetrics.height - 168));
+  const maxHeightPx =
+    outerWidth > 0
+      ? Math.max(
+          minHeightPx + 40,
+          Math.min(baseMaxHeightPx, Math.floor((outerWidth * 16) / 9))
+        )
+      : baseMaxHeightPx;
+  const spanPx = Math.max(1, maxHeightPx - minHeightPx);
+  const frameHeightPx = Math.round(minHeightPx + clampedScale * spanPx);
+  const targetStageWidthPx = Math.round((frameHeightPx * 9) / 16);
+  const renderedStageWidthPx =
+    outerWidth > 0 ? Math.min(targetStageWidthPx, outerWidth) : targetStageWidthPx;
+  const stageScale = renderedStageWidthPx / 720;
 
-  const transportWidthClass =
-    previewSize === "big"
-      ? "max-w-[460px]"
-      : previewSize === "compact"
-        ? "max-w-[300px]"
-        : "max-w-[380px]";
+  const scaleLabel =
+    clampedScale < 0.28 ? "Small" : clampedScale > 0.72 ? "Large" : "Normal";
+
+  const handleDragPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!onChangePreviewScale) return;
+    if (e.button !== 0 && e.pointerType === "mouse") return;
+    const target = e.target as HTMLElement | null;
+    if (target?.closest("button, input")) return;
+    e.preventDefault();
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      // ignore
+    }
+    dragStartRef.current = {
+      startY: e.clientY,
+      startHeightPx: frameHeightPx,
+    };
+    setIsResizing(true);
+  };
+
+  const handleDragPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!dragStartRef.current || !onChangePreviewScale) return;
+    const dy = e.clientY - dragStartRef.current.startY;
+    const sensitivity = isCompactLayout ? 1.0 : 1.5;
+    const nextHeight = Math.max(
+      minHeightPx,
+      Math.min(maxHeightPx, dragStartRef.current.startHeightPx + dy * sensitivity)
+    );
+    const nextScale = Math.max(0, Math.min(1, (nextHeight - minHeightPx) / spanPx));
+    onChangePreviewScale(Number(nextScale.toFixed(4)));
+  };
+
+  const endDragResize = () => {
+    if (!dragStartRef.current) return;
+    dragStartRef.current = null;
+    setIsResizing(false);
+  };
+
+  const handleDragDoubleClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!onChangePreviewScale) return;
+    const target = e.target as HTMLElement | null;
+    if (target?.closest("button, input")) return;
+    onChangePreviewScale(DEFAULT_STAGE_PREVIEW_SCALE);
+  };
+
+  const handleDragKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!onChangePreviewScale) return;
+    const target = e.target as HTMLElement | null;
+    if (target && target !== e.currentTarget && target.closest("button, input")) return;
+    if (e.key === "ArrowUp" || e.key === "ArrowLeft") {
+      e.preventDefault();
+      onChangePreviewScale(Math.max(0, Number((clampedScale - 0.05).toFixed(2))));
+    } else if (e.key === "ArrowDown" || e.key === "ArrowRight") {
+      e.preventDefault();
+      onChangePreviewScale(Math.min(1, Number((clampedScale + 0.05).toFixed(2))));
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      onChangePreviewScale(0);
+    } else if (e.key === "End") {
+      e.preventDefault();
+      onChangePreviewScale(1);
+    } else if (e.key === "0" || e.key === "Enter") {
+      e.preventDefault();
+      onChangePreviewScale(DEFAULT_STAGE_PREVIEW_SCALE);
+    }
+  };
+
+  // Match exportVideo.ts 720x1280 split geometry verbatim
+  const hasSubtitles = Boolean(project && project.subtitles.length > 0);
+  const clampedHeightPct = Math.max(26, Math.min(52, editSettings.videoHeightPct || 35));
+  const exportTopVideoH = hasSubtitles ? Math.round((1280 * clampedHeightPct) / 100) : 1280;
+  const exportListH = Math.max(1, 1280 - exportTopVideoH);
+  const topVideoHeightPct = (exportTopVideoH / 1280) * 100;
 
   return (
     <div
+      ref={stageOuterRef}
       className={`flex flex-col items-center justify-center w-full ${
-        compactMobile ? "gap-2 lg:gap-3" : "gap-3"
+        compactMobile ? "gap-2 lg:gap-2.5" : "gap-2.5"
       }`}
     >
-      {/* Strictly 9:16 Vertical Video Frame */}
+      {/* Strictly 9:16 Vertical Video Frame matching exportVideo.ts 720x1280 layout */}
       <div
         ref={stageFrameRef}
-        className={`relative max-w-full aspect-[9/16] rounded-2xl overflow-hidden border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 flex flex-col shadow-sm transition-all duration-150 ${frameSizeClass}`}
+        style={{ width: `${renderedStageWidthPx}px` }}
+        className={`relative max-w-full aspect-[9/16] rounded-2xl overflow-hidden bg-white dark:bg-neutral-950 flex flex-col shadow-sm ${
+          isResizing ? "transition-none" : "transition-[width] duration-150"
+        }`}
       >
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0 rounded-2xl border border-neutral-200 dark:border-neutral-800 z-20"
+        />
         {!project ? (
           <div
             className={`flex-1 flex flex-col items-center justify-center text-center ${
@@ -178,19 +284,11 @@ export function Stage9x16({
           </div>
         ) : (
           <>
-            {/* Top Video Window (Full 9:16 if no subtitles, otherwise dynamic height split) */}
+            {/* Top Video Window (Strictly locked to exportVideo.ts heightPct% without min-height distortion) */}
             <div
-              style={
-                project.subtitles.length > 0
-                  ? { height: `${editSettings.videoHeightPct}%` }
-                  : undefined
-              }
+              style={hasSubtitles ? { height: `${topVideoHeightPct}%` } : undefined}
               className={`w-full bg-neutral-950 overflow-hidden ${
-                project.subtitles.length > 0
-                  ? `${
-                      compactMobile ? "min-h-[108px] lg:min-h-[200px]" : "min-h-[200px]"
-                    } shrink-0 border-b border-neutral-200 dark:border-neutral-800`
-                  : "flex-1 h-full"
+                hasSubtitles ? "shrink-0" : "flex-1 h-full"
               }`}
             >
               <YouTubeScenePlayer
@@ -212,15 +310,14 @@ export function Stage9x16({
               />
             </div>
 
-            {/* Bottom Scrolling List Item View (when subtitles exist, scaled proportionally to preview width) */}
-            {project.subtitles.length > 0 && (() => {
+            {/* Bottom Scrolling List Item View — fixed 720px coordinate system matching exportVideo.ts, scaled uniformly with preview */}
+            {hasSubtitles && (() => {
               const fontMultiplier =
                 editSettings.subtitleFontScale === "sm"
                   ? 0.86
                   : editSettings.subtitleFontScale === "lg"
                     ? 1.16
                     : 1;
-              const fScale = uiScale * fontMultiplier;
               const theme = editSettings.subtitleTheme || "auto";
               const hl = editSettings.subtitleHighlightColor || "amber";
               const showGloss = editSettings.showWordGloss !== false;
@@ -228,431 +325,519 @@ export function Stage9x16({
 
               const containerThemeClass =
                 theme === "light"
-                  ? "bg-slate-50"
+                  ? "bg-[#f8fafc]"
                   : theme === "dark"
                     ? "bg-[#0b1120]"
                     : theme === "warm"
                       ? "bg-[#fbf7ef]"
-                      : "bg-slate-50 dark:bg-[#0b1120]";
+                      : "bg-[#f8fafc] dark:bg-[#0b1120]";
+
+              const topDividerClass =
+                theme === "light"
+                  ? "border-t border-[#cbd5e1]"
+                  : theme === "dark"
+                    ? "border-t border-[#1e293b]"
+                    : theme === "warm"
+                      ? "border-t border-[#e7dcc8]"
+                      : "border-t border-[#cbd5e1] dark:border-[#1e293b]";
 
               const getCardThemeClass = (isActive: boolean) => {
                 if (theme === "light") {
                   return isActive
-                    ? "bg-white border border-indigo-200/90 shadow-sm shadow-indigo-950/5"
-                    : "bg-white/65 border border-slate-200/70 opacity-70 hover:opacity-95 hover:border-indigo-200/60";
+                    ? "bg-white border-2 border-[#c7d2fe]"
+                    : "bg-white/72 border border-[#e2e8f0] hover:border-[#c7d2fe]";
                 }
                 if (theme === "dark") {
                   return isActive
-                    ? "bg-[#131c31] border border-indigo-500/40 shadow-sm shadow-black/20"
-                    : "bg-slate-900/45 border border-slate-800/70 opacity-70 hover:opacity-95 hover:border-indigo-500/30";
+                    ? "bg-[#131c31] border-2 border-indigo-500/45"
+                    : "bg-slate-900/55 border border-[#1e293b] hover:border-indigo-500/35";
                 }
                 if (theme === "warm") {
                   return isActive
-                    ? "bg-[#fffdf8] border border-amber-300/80 shadow-sm shadow-amber-950/5"
-                    : "bg-[#f4ede0]/70 border border-[#e5dac6] opacity-75 hover:opacity-95 hover:border-amber-300/70";
+                    ? "bg-[#fffdf8] border-2 border-[#fcd34d]"
+                    : "bg-[#f4ede0]/72 border border-[#e5dac6] hover:border-[#fcd34d]";
                 }
                 return isActive
-                  ? "bg-white dark:bg-[#131c31] border border-indigo-200/90 dark:border-indigo-500/40 shadow-sm shadow-indigo-950/5"
-                  : "bg-white/65 dark:bg-slate-900/45 border border-slate-200/70 dark:border-slate-800/70 opacity-70 hover:opacity-95 hover:border-indigo-200/60 dark:hover:border-indigo-500/30";
+                  ? "bg-white dark:bg-[#131c31] border-2 border-[#c7d2fe] dark:border-indigo-500/45"
+                  : "bg-white/72 dark:bg-slate-900/55 border border-[#e2e8f0] dark:border-[#1e293b] hover:border-[#c7d2fe] dark:hover:border-indigo-500/35";
               };
 
               const getAccentBarClass = (isActive: boolean) => {
                 if (theme === "warm") {
-                  return isActive ? "bg-amber-600" : "bg-[#dfd3be]";
+                  return isActive ? "bg-[#d97706]" : "bg-[#dfd3be]";
                 }
                 if (theme === "light") {
-                  return isActive ? "bg-indigo-600" : "bg-slate-200";
+                  return isActive ? "bg-[#4f46e5]" : "bg-[#e2e8f0]";
                 }
                 if (theme === "dark") {
-                  return isActive ? "bg-indigo-400" : "bg-slate-800";
+                  return isActive ? "bg-[#818cf8]" : "bg-[#1e293b]";
                 }
                 return isActive
-                  ? "bg-indigo-600 dark:bg-indigo-400"
-                  : "bg-slate-200 dark:bg-slate-800";
+                  ? "bg-[#4f46e5] dark:bg-[#818cf8]"
+                  : "bg-[#e2e8f0] dark:bg-[#1e293b]";
               };
 
               const spokenPillClass =
                 hl === "emerald"
-                  ? "bg-emerald-300 text-slate-950 ring-1 ring-emerald-400/80 shadow-xs"
+                  ? "bg-[#6ee7b7] text-[#0f172a]"
                   : hl === "indigo"
-                    ? "bg-indigo-500 text-white ring-1 ring-indigo-400/80 shadow-xs"
+                    ? "bg-[#6366f1] text-white"
                     : hl === "rose"
-                      ? "bg-rose-300 text-slate-950 ring-1 ring-rose-400/80 shadow-xs"
-                      : "bg-amber-300 text-slate-950 ring-1 ring-amber-400/80 shadow-xs";
+                      ? "bg-[#fda4af] text-[#0f172a]"
+                      : theme === "dark"
+                        ? "bg-[#fbbf24] text-[#0f172a]"
+                        : theme === "light" || theme === "warm"
+                          ? "bg-[#fde047] text-[#0f172a]"
+                          : "bg-[#fde047] dark:bg-[#fbbf24] text-[#0f172a]";
 
               const getWordClass = (isWordSpoken: boolean, isActive: boolean, wasWordSpoken: boolean) => {
                 if (isWordSpoken) return spokenPillClass;
                 if (isActive) {
                   if (wasWordSpoken) {
-                    if (theme === "dark") return "text-indigo-300";
-                    if (theme === "warm") return "text-amber-800";
-                    if (theme === "light") return "text-indigo-700";
-                    return "text-indigo-700 dark:text-indigo-300";
+                    if (theme === "dark") return "text-[#a5b4fc]";
+                    if (theme === "warm") return "text-[#92400e]";
+                    if (theme === "light") return "text-[#4338ca]";
+                    return "text-[#4338ca] dark:text-[#a5b4fc]";
                   }
-                  if (theme === "dark") return "text-slate-300";
-                  if (theme === "warm") return "text-stone-800";
-                  if (theme === "light") return "text-slate-700";
-                  return "text-slate-700 dark:text-slate-300";
+                  if (theme === "dark") return "text-[#cbd5e1]";
+                  if (theme === "warm") return "text-[#292524]";
+                  if (theme === "light") return "text-[#334155]";
+                  return "text-[#334155] dark:text-[#cbd5e1]";
                 }
-                if (theme === "dark") return "text-slate-400";
-                if (theme === "warm") return "text-stone-500";
-                if (theme === "light") return "text-slate-500";
-                return "text-slate-500 dark:text-slate-400";
+                if (theme === "warm") return "text-[#78716c]";
+                return "text-[#64748b]";
               };
 
               const getGlossClass = (isWordSpoken: boolean, isActive: boolean) => {
                 if (isWordSpoken) {
-                  if (hl === "emerald") return theme === "dark" ? "text-emerald-300 font-semibold" : "text-emerald-700 font-semibold";
-                  if (hl === "indigo") return theme === "dark" ? "text-indigo-300 font-semibold" : "text-indigo-700 font-semibold";
-                  if (hl === "rose") return theme === "dark" ? "text-rose-300 font-semibold" : "text-rose-700 font-semibold";
-                  return theme === "dark" ? "text-amber-300 font-semibold" : "text-amber-700 dark:text-amber-300 font-semibold";
+                  if (hl === "emerald") {
+                    if (theme === "dark") return "text-[#6ee7b7] font-medium";
+                    if (theme === "light" || theme === "warm") return "text-[#047857] font-medium";
+                    return "text-[#047857] dark:text-[#6ee7b7] font-medium";
+                  }
+                  if (hl === "indigo") {
+                    if (theme === "dark") return "text-[#a5b4fc] font-medium";
+                    if (theme === "light" || theme === "warm") return "text-[#4338ca] font-medium";
+                    return "text-[#4338ca] dark:text-[#a5b4fc] font-medium";
+                  }
+                  if (hl === "rose") {
+                    if (theme === "dark") return "text-[#fda4af] font-medium";
+                    if (theme === "light" || theme === "warm") return "text-[#be123c] font-medium";
+                    return "text-[#be123c] dark:text-[#fda4af] font-medium";
+                  }
+                  if (theme === "dark") return "text-[#fcd34d] font-medium";
+                  if (theme === "light" || theme === "warm") return "text-[#b45309] font-medium";
+                  return "text-[#b45309] dark:text-[#fcd34d] font-medium";
                 }
                 if (isActive) {
-                  if (theme === "dark") return "text-teal-300 font-medium";
-                  if (theme === "light" || theme === "warm") return "text-teal-700 font-medium";
-                  return "text-teal-700 dark:text-teal-300 font-medium";
+                  if (theme === "dark") return "text-[#5eead4] font-medium";
+                  if (theme === "light" || theme === "warm") return "text-[#0f766e] font-medium";
+                  return "text-[#0f766e] dark:text-[#5eead4] font-medium";
                 }
-                if (theme === "dark") return "text-slate-500";
-                if (theme === "warm") return "text-stone-400";
-                if (theme === "light") return "text-slate-400";
-                return "text-slate-400 dark:text-slate-500";
+                if (theme === "dark") return "text-[#475569] font-medium";
+                if (theme === "warm") return "text-[#a8a29e] font-medium";
+                if (theme === "light") return "text-[#94a3b8] font-medium";
+                return "text-[#94a3b8] dark:text-[#475569] font-medium";
               };
 
               const getThaiScriptClass = (isActive: boolean) => {
                 if (isActive) {
-                  if (theme === "dark") return "text-slate-200 font-medium";
-                  if (theme === "warm") return "text-stone-700 font-medium";
-                  if (theme === "light") return "text-slate-700 font-medium";
-                  return "text-slate-700 dark:text-slate-200 font-medium";
+                  if (theme === "dark") return "text-[#e2e8f0] font-medium";
+                  if (theme === "warm") return "text-[#44403c] font-medium";
+                  if (theme === "light") return "text-[#334155] font-medium";
+                  return "text-[#334155] dark:text-[#e2e8f0] font-medium";
                 }
-                if (theme === "warm") return "text-stone-500";
-                return "text-slate-500 dark:text-slate-400";
+                if (theme === "warm") return "text-[#78716c] font-medium";
+                return "text-[#64748b] font-medium";
               };
 
               const getDividerClass = (isActive: boolean) => {
                 if (theme === "warm") {
-                  return isActive ? "border-amber-200/80" : "border-[#e7dcc8]/80";
+                  return isActive ? "border-[#fde68a]" : "border-[#e7dcc8]";
                 }
                 if (theme === "dark") {
-                  return isActive ? "border-indigo-500/20" : "border-slate-800/70";
+                  return isActive ? "border-indigo-500/25" : "border-[#1e293b]";
                 }
                 if (theme === "light") {
-                  return isActive ? "border-indigo-100" : "border-slate-100";
+                  return isActive ? "border-[#e0e7ff]" : "border-[#f1f5f9]";
                 }
                 return isActive
-                  ? "border-indigo-100 dark:border-indigo-500/20"
-                  : "border-slate-100 dark:border-slate-800/70";
+                  ? "border-[#e0e7ff] dark:border-indigo-500/25"
+                  : "border-[#f1f5f9] dark:border-[#1e293b]";
               };
 
               const getIndexClass = (isActive: boolean) => {
                 if (isActive) {
-                  if (theme === "warm") return "text-amber-700";
-                  if (theme === "dark") return "text-indigo-400";
-                  if (theme === "light") return "text-indigo-500";
-                  return "text-indigo-500 dark:text-indigo-400";
+                  if (theme === "warm") return "text-[#b45309]";
+                  if (theme === "dark") return "text-[#818cf8]";
+                  if (theme === "light") return "text-[#6366f1]";
+                  return "text-[#6366f1] dark:text-[#818cf8]";
                 }
-                if (theme === "warm") return "text-stone-400";
-                return "text-slate-400 dark:text-slate-500";
+                if (theme === "dark") return "text-[#475569]";
+                if (theme === "warm") return "text-[#a8a29e]";
+                if (theme === "light") return "text-[#94a3b8]";
+                return "text-[#94a3b8] dark:text-[#475569]";
               };
 
               const getBurmeseClass = (isActive: boolean) => {
                 if (isActive) {
-                  if (theme === "dark") return "text-teal-200 font-medium";
-                  if (theme === "light" || theme === "warm") return "text-teal-800 font-medium";
-                  return "text-teal-800 dark:text-teal-200 font-medium";
+                  if (theme === "dark") return "text-[#99f6e4] font-medium";
+                  if (theme === "light" || theme === "warm") return "text-[#115e59] font-medium";
+                  return "text-[#115e59] dark:text-[#99f6e4] font-medium";
                 }
-                if (theme === "warm") return "text-stone-600";
-                return "text-slate-500 dark:text-slate-400";
+                if (theme === "warm") return "text-[#57534e] font-medium";
+                return "text-[#64748b] font-medium";
               };
 
+              const phoneticPx = Math.round(28 * fontMultiplier);
+              const glossPx = Math.round(13 * fontMultiplier);
+              const thaiPx = Math.round(20 * fontMultiplier);
+              const indexPx = Math.round(15 * fontMultiplier);
+              const burmesePx = Math.round(22 * fontMultiplier);
+
               return (
-              <div
-                ref={listContainerRef}
-                style={{
-                  padding: `${Math.max(4, Math.round(14 * uiScale))}px ${Math.max(
-                    4,
-                    Math.round(12 * uiScale)
-                  )}px`,
-                  gap: `${Math.max(3, Math.round(10 * uiScale))}px`,
-                }}
-                className={`relative flex-1 flex flex-col overflow-y-auto overflow-x-hidden no-scrollbar ${containerThemeClass}`}
-              >
-                {project.subtitles.map((sub, subIdx) => {
-                  const isActive = activeSub?.id === sub.id;
-                  const localElapsed = Math.max(0, highlightTime - sub.startTime);
+                <div className={`relative flex-1 w-full overflow-hidden ${topDividerClass} ${containerThemeClass}`}>
+                  <div
+                    ref={listContainerRef}
+                    style={{
+                      width: "720px",
+                      height: `${exportListH}px`,
+                      transform: `scale(${stageScale})`,
+                      transformOrigin: "top left",
+                      padding: "34px 22px 0 22px",
+                      gap: "18px",
+                    }}
+                    className={`absolute top-0 left-0 flex flex-col overflow-y-auto overflow-x-hidden no-scrollbar ${containerThemeClass}`}
+                  >
+                    {project.subtitles.map((sub, subIdx) => {
+                      const isActive = activeSub?.id === sub.id;
+                      const localElapsed = Math.max(0, highlightTime - sub.startTime);
 
-                  return (
-                    <button
-                      key={sub.id}
-                      ref={(node) => {
-                        itemRefs.current[sub.id] = node;
-                      }}
-                      type="button"
-                      onClick={() => onSeek(sub.startTime)}
-                      style={{
-                        borderRadius: `${Math.max(6, Math.round(12 * uiScale))}px`,
-                        padding: `${Math.max(4, Math.round(11 * uiScale))}px ${Math.max(
-                          4,
-                          Math.round(12 * uiScale)
-                        )}px ${Math.max(4, Math.round(11 * uiScale))}px ${Math.max(
-                          7,
-                          Math.round(15 * uiScale)
-                        )}px`,
-                      }}
-                      className={`relative w-full text-left shrink-0 overflow-hidden transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 dark:focus-visible:ring-indigo-400 ${getCardThemeClass(
-                        isActive
-                      )}`}
-                    >
-                      {/* Educational Left Accent Bar */}
-                      <span
-                        aria-hidden="true"
-                        style={{
-                          left: `${Math.max(2, Math.round(6 * uiScale))}px`,
-                          top: `${Math.max(4, Math.round(11 * uiScale))}px`,
-                          bottom: `${Math.max(4, Math.round(11 * uiScale))}px`,
-                          width: `${Math.max(2, Math.round(4 * uiScale))}px`,
-                        }}
-                        className={`absolute rounded-full transition-colors ${getAccentBarClass(
-                          isActive
-                        )}`}
-                      />
+                      return (
+                        <button
+                          key={sub.id}
+                          ref={(node) => {
+                            itemRefs.current[sub.id] = node;
+                          }}
+                          type="button"
+                          onClick={() => onSeek(sub.startTime)}
+                          style={{
+                            borderRadius: "18px",
+                            padding: "16px 26px 20px 32px",
+                          }}
+                          className={`relative w-full text-left shrink-0 overflow-hidden transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 dark:focus-visible:ring-indigo-400 ${getCardThemeClass(
+                            isActive
+                          )}`}
+                        >
+                          {/* Educational Left Accent Bar matching exportVideo.ts (x=32, w=5) */}
+                          <span
+                            aria-hidden="true"
+                            style={{
+                              left: "10px",
+                              top: "18px",
+                              bottom: "18px",
+                              width: "5px",
+                              borderRadius: "3px",
+                            }}
+                            className={`absolute transition-colors ${getAccentBarClass(isActive)}`}
+                          />
 
-                      {/* Line 1: Thai in English phonetics with word-by-word sync */}
-                      <div
-                        style={{
-                          columnGap: `${Math.max(2, Math.round(6 * uiScale))}px`,
-                          rowGap: `${Math.max(2, Math.round(6 * uiScale))}px`,
-                        }}
-                        className="flex flex-wrap items-start leading-snug"
-                      >
-                        {sub.words.map((word, wi) => {
-                          const isLastWord = wi === sub.words.length - 1;
-                          const isWordSpoken =
-                            isActive &&
-                            localElapsed >= word.startOffsetSec &&
-                            (isLastWord
-                              ? localElapsed <= word.endOffsetSec
-                              : localElapsed < word.endOffsetSec);
-                          const wasWordSpoken =
-                            isActive &&
-                            (isLastWord
-                              ? localElapsed > word.endOffsetSec
-                              : localElapsed >= word.endOffsetSec);
+                          {/* Line 1: Thai in English phonetics with word-by-word sync */}
+                          <div
+                            style={{
+                              columnGap: "8px",
+                              rowGap: `${Math.round(10 * fontMultiplier)}px`,
+                            }}
+                            className="flex flex-wrap items-start"
+                          >
+                            {sub.words.map((word, wi) => {
+                              const isLastWord = wi === sub.words.length - 1;
+                              const isWordSpoken =
+                                isActive &&
+                                localElapsed >= word.startOffsetSec &&
+                                (isLastWord
+                                  ? localElapsed <= word.endOffsetSec
+                                  : localElapsed < word.endOffsetSec);
+                              const wasWordSpoken =
+                                isActive &&
+                                (isLastWord
+                                  ? localElapsed > word.endOffsetSec
+                                  : localElapsed >= word.endOffsetSec);
 
-                          return (
-                            <span
-                              key={`${sub.id}-w-${wi}`}
-                              className="inline-flex flex-col items-center max-w-full"
+                              return (
+                                <span
+                                  key={`${sub.id}-w-${wi}`}
+                                  className="inline-flex flex-col items-start max-w-full"
+                                >
+                                  <motion.span
+                                    animate={isWordSpoken ? { y: -1 } : { y: 0 }}
+                                    transition={{ duration: 0.05, ease: [0.16, 1, 0.3, 1] }}
+                                    style={{
+                                      fontSize: `${phoneticPx}px`,
+                                      padding: `${Math.round(4 * fontMultiplier)}px ${Math.round(
+                                        9 * fontMultiplier
+                                      )}px`,
+                                      borderRadius: "9px",
+                                      lineHeight: 1.2,
+                                    }}
+                                    className={`font-semibold tracking-tight max-w-full break-words ${getWordClass(
+                                      isWordSpoken,
+                                      isActive,
+                                      wasWordSpoken
+                                    )}`}
+                                  >
+                                    {word.phonetic}
+                                  </motion.span>
+                                  {showGloss && word.burmeseGloss && (
+                                    <span
+                                      style={{
+                                        fontSize: `${glossPx}px`,
+                                        marginTop: `${Math.round(4 * fontMultiplier)}px`,
+                                        paddingLeft: `${Math.round(9 * fontMultiplier)}px`,
+                                        lineHeight: 1.25,
+                                      }}
+                                      className={`font-myanmar max-w-full break-words ${getGlossClass(
+                                        isWordSpoken,
+                                        isActive
+                                      )}`}
+                                    >
+                                      {word.burmeseGloss}
+                                    </span>
+                                  )}
+                                </span>
+                              );
+                            })}
+                          </div>
+
+                          {/* Optional Thai Script Line */}
+                          {editSettings.showThaiScript && sub.thaiScript && (
+                            <p
+                              style={{
+                                marginTop: `${Math.round(12 * fontMultiplier)}px`,
+                                paddingLeft: "4px",
+                                fontSize: `${thaiPx}px`,
+                                fontFamily: "'Noto Sans Thai', 'Plus Jakarta Sans', sans-serif",
+                                lineHeight: 1.4,
+                              }}
+                              className={`min-w-0 break-words ${getThaiScriptClass(isActive)}`}
                             >
-                              <motion.span
-                                animate={
-                                  isWordSpoken
-                                    ? {
-                                        scale: 1.05,
-                                        y: -Math.max(0.5, Number((1 * uiScale).toFixed(1))),
-                                      }
-                                    : { scale: 1, y: 0 }
-                                }
-                                transition={{ duration: 0.05, ease: [0.16, 1, 0.3, 1] }}
+                              {sub.thaiScript}
+                            </p>
+                          )}
+
+                          {/* Line 2: Burmese translation */}
+                          {showBurmese && (
+                            <div
+                              style={{
+                                marginTop: `${Math.round(14 * fontMultiplier)}px`,
+                                paddingTop: `${Math.round(14 * fontMultiplier)}px`,
+                                gap: "12px",
+                              }}
+                              className={`border-t flex items-baseline ${getDividerClass(isActive)}`}
+                            >
+                              <span
                                 style={{
-                                  fontSize: `${Math.max(7, Number((15 * fScale).toFixed(1)))}px`,
-                                  padding: `${Math.max(1, Math.round(2 * uiScale))}px ${Math.max(
-                                    2,
-                                    Math.round(6 * uiScale)
-                                  )}px`,
-                                  borderRadius: `${Math.max(3, Math.round(6 * uiScale))}px`,
-                                  lineHeight: 1.2,
+                                  fontSize: `${indexPx}px`,
+                                  minWidth: "20px",
                                 }}
-                                className={`font-semibold tracking-tight max-w-full break-words ${getWordClass(
-                                  isWordSpoken,
-                                  isActive,
-                                  wasWordSpoken
+                                className={`font-mono-tabular font-semibold shrink-0 ${getIndexClass(
+                                  isActive
                                 )}`}
                               >
-                                {word.phonetic}
-                              </motion.span>
-                              {showGloss && word.burmeseGloss && (
-                                <span
-                                  style={{
-                                    fontSize: `${Math.max(
-                                      5.5,
-                                      Number((10 * fScale).toFixed(1))
-                                    )}px`,
-                                    marginTop: `${Math.max(1, Math.round(2 * uiScale))}px`,
-                                  }}
-                                  className={`font-myanmar leading-tight max-w-full break-words ${getGlossClass(
-                                    isWordSpoken,
-                                    isActive
-                                  )}`}
-                                >
-                                  {word.burmeseGloss}
-                                </span>
-                              )}
-                            </span>
-                          );
-                        })}
-                      </div>
-
-                      {/* Optional Thai Script Line */}
-                      {editSettings.showThaiScript && sub.thaiScript && (
-                        <p
-                          style={{
-                            marginTop: `${Math.max(3, Math.round(6 * uiScale))}px`,
-                            fontSize: `${Math.max(6.5, Number((12.5 * fScale).toFixed(1)))}px`,
-                            lineHeight: 1.4,
-                          }}
-                          className={`min-w-0 break-words ${getThaiScriptClass(isActive)}`}
-                        >
-                          {sub.thaiScript}
-                        </p>
-                      )}
-
-                      {/* Line 2: Burmese translation */}
-                      {showBurmese && (
-                        <div
-                          style={{
-                            marginTop: `${Math.max(3, Math.round(8 * uiScale))}px`,
-                            paddingTop: `${Math.max(3, Math.round(8 * uiScale))}px`,
-                            gap: `${Math.max(3, Math.round(8 * uiScale))}px`,
-                          }}
-                          className={`border-t flex items-baseline ${getDividerClass(isActive)}`}
-                        >
-                          <span
-                            style={{
-                              fontSize: `${Math.max(6, Number((10 * fScale).toFixed(1)))}px`,
-                            }}
-                            className={`font-mono-tabular font-semibold shrink-0 ${getIndexClass(
-                              isActive
-                            )}`}
-                          >
-                            {String(subIdx + 1).padStart(2, "0")}
-                          </span>
-                          <p
-                            style={{
-                              fontSize: `${Math.max(
-                                6.5,
-                                Number((13.5 * fScale).toFixed(1))
-                              )}px`,
-                              lineHeight: 1.45,
-                            }}
-                            className={`font-myanmar min-w-0 break-words ${getBurmeseClass(
-                              isActive
-                            )}`}
-                          >
-                            {sub.burmese}
-                          </p>
-                        </div>
-                      )}
-                    </button>
-                  );
-                })}
-                <div
-                  style={{ height: `${Math.max(24, Math.round(96 * uiScale))}px` }}
-                  className="shrink-0"
-                  aria-hidden="true"
-                />
-              </div>
+                                {String(subIdx + 1).padStart(2, "0")}
+                              </span>
+                              <p
+                                style={{
+                                  fontSize: `${burmesePx}px`,
+                                  lineHeight: 1.54,
+                                }}
+                                className={`font-myanmar min-w-0 break-words ${getBurmeseClass(
+                                  isActive
+                                )}`}
+                              >
+                                {sub.burmese}
+                              </p>
+                            </div>
+                          )}
+                        </button>
+                      );
+                    })}
+                    <div
+                      style={{ height: `${Math.round(exportListH * 0.45)}px` }}
+                      className="shrink-0"
+                      aria-hidden="true"
+                    />
+                  </div>
+                </div>
               );
             })()}
           </>
         )}
       </div>
 
-      {/* Minimal Transport Controls below 9:16 Stage */}
-      {project && project.scenes.length > 0 && (
+      {/* Transport Controls Row with integrated full-row vertical drag resize */}
+      {project && project.scenes.length > 0 ? (
         <div
-          className={`w-full ${transportWidthClass} flex items-center ${
-            compactMobile ? "gap-2 lg:gap-3" : "gap-3"
+          role={onChangePreviewScale ? "slider" : undefined}
+          tabIndex={onChangePreviewScale ? 0 : undefined}
+          aria-label={
+            onChangePreviewScale
+              ? "Playback controls and preview size drag bar (drag row up to shrink, down to enlarge, double-click for normal)"
+              : undefined
+          }
+          aria-orientation={onChangePreviewScale ? "vertical" : undefined}
+          aria-valuemin={onChangePreviewScale ? 0 : undefined}
+          aria-valuemax={onChangePreviewScale ? 100 : undefined}
+          aria-valuenow={onChangePreviewScale ? Math.round(clampedScale * 100) : undefined}
+          title={
+            onChangePreviewScale
+              ? "Drag this row up to shrink · Drag down to enlarge · Double-click for Normal"
+              : undefined
+          }
+          onPointerDown={onChangePreviewScale ? handleDragPointerDown : undefined}
+          onPointerMove={onChangePreviewScale ? handleDragPointerMove : undefined}
+          onPointerUp={onChangePreviewScale ? endDragResize : undefined}
+          onPointerCancel={onChangePreviewScale ? endDragResize : undefined}
+          onLostPointerCapture={onChangePreviewScale ? endDragResize : undefined}
+          onDoubleClick={onChangePreviewScale ? handleDragDoubleClick : undefined}
+          onKeyDown={onChangePreviewScale ? handleDragKeyDown : undefined}
+          className={`relative group flex flex-col border transition-all duration-150 ${
+            onChangePreviewScale
+              ? `w-[calc(100%+2rem)] -mx-4 sm:w-[calc(100%+3rem)] sm:-mx-6 lg:w-full lg:mx-0 rounded-none border-x-0 lg:rounded-xl lg:border-x cursor-ns-resize touch-none select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-950 dark:focus-visible:ring-white ${
+                  compactMobile
+                    ? "px-4 sm:px-6 lg:px-3 pt-1.5 pb-2"
+                    : "px-4 sm:px-6 lg:px-3 pt-1.5 pb-2"
+                } ${
+                  isResizing
+                    ? "border-neutral-950 dark:border-white bg-neutral-100 dark:bg-neutral-800/95 ring-2 ring-neutral-950/15 dark:ring-white/20 shadow-md"
+                    : "border-neutral-200 dark:border-neutral-800 bg-neutral-50/90 dark:bg-neutral-900/90 hover:border-neutral-400 dark:hover:border-neutral-600 hover:bg-neutral-100/80 dark:hover:bg-neutral-800/70"
+                }`
+              : "w-full border-transparent px-0 py-0"
           }`}
         >
-          <button
-            type="button"
-            onClick={() => {
-              if (playerRef.current) {
-                playerRef.current.togglePlay();
-              } else {
-                onTogglePlay();
-              }
-            }}
-            aria-label={isPlaying ? "Pause" : "Play"}
-            className={`${
-              compactMobile ? "w-8 h-8 lg:w-10 lg:h-10" : "w-10 h-10"
-            } rounded-lg bg-neutral-950 text-white dark:bg-white dark:text-neutral-950 flex items-center justify-center shrink-0 hover:opacity-90 transition-opacity cursor-pointer`}
-          >
-            {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 ml-0.5" />}
-          </button>
-
-          <div className="flex-1 flex flex-col gap-1">
-            <input
-              type="range"
-              min={0}
-              max={totalDuration}
-              step={0.1}
-              value={cutTime}
-              onChange={(e) => onSeek(parseFloat(e.target.value))}
-              aria-label="Timeline scrubber"
-              className="w-full h-1.5 rounded-full appearance-none bg-neutral-200 dark:bg-neutral-800 accent-neutral-950 dark:accent-white cursor-pointer"
-            />
-            <div className="flex items-center justify-between text-[11px] text-neutral-500 dark:text-neutral-400 font-mono-tabular">
-              <span>
-                {formatSec(displayCutTime)} / {formatSec(displayTotalDuration)}
-                {Math.abs(effectiveSpeed - 1) > 0.01 ? ` (${effectiveSpeed.toFixed(2).replace(/\.00$/, "")}x)` : ""}
-              </span>
-              <span>{Math.round(progressPct)}%</span>
+          {/* Visual Drag Bar Indicator along top of the Play row */}
+          {onChangePreviewScale && (
+            <div className="flex items-center justify-center pb-1 pointer-events-none">
+              <span
+                className={`h-1 rounded-full transition-all ${
+                  isResizing
+                    ? "w-14 bg-neutral-950 dark:bg-white"
+                    : "w-10 bg-neutral-300 dark:bg-neutral-700 group-hover:w-12 group-hover:bg-neutral-500 dark:group-hover:bg-neutral-400"
+                }`}
+              />
+              {isResizing && (
+                <span className="absolute -top-6 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded-md bg-neutral-950 text-white dark:bg-white dark:text-neutral-950 text-[10px] font-mono-tabular font-semibold whitespace-nowrap shadow-sm">
+                  {scaleLabel} · {Math.round(clampedScale * 100)}%
+                </span>
+              )}
             </div>
-          </div>
+          )}
 
-          <button
-            type="button"
-            onClick={onToggleMute}
-            aria-label={muted ? "Unmute original audio" : "Mute original audio"}
-            className={`${
-              compactMobile ? "w-8 h-8 lg:w-10 lg:h-10" : "w-10 h-10"
-            } rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 hover:bg-neutral-100 dark:hover:bg-neutral-900 flex items-center justify-center shrink-0 transition-colors cursor-pointer`}
+          <div
+            className={`w-full flex items-center ${
+              compactMobile ? "gap-2 lg:gap-2.5" : "gap-2.5"
+            }`}
           >
-            {muted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
-          </button>
+            <button
+              type="button"
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={() => {
+                if (playerRef.current) {
+                  playerRef.current.togglePlay();
+                } else {
+                  onTogglePlay();
+                }
+              }}
+              aria-label={isPlaying ? "Pause" : "Play"}
+              className={`${
+                compactMobile ? "w-8 h-8 lg:w-9 lg:h-9" : "w-9 h-9"
+              } rounded-lg bg-neutral-950 text-white dark:bg-white dark:text-neutral-950 flex items-center justify-center shrink-0 hover:opacity-90 transition-opacity cursor-pointer`}
+            >
+              {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 ml-0.5" />}
+            </button>
 
-          {onChangePreviewSize && (() => {
-            const steps: StagePreviewSize[] = ["compact", "normal", "big"];
-            const idx = Math.max(0, steps.indexOf(previewSize));
-            const canZoomOut = idx > 0;
-            const canZoomIn = idx < steps.length - 1;
-            const btnSize = compactMobile ? "w-8 h-8 lg:w-9 lg:h-10" : "w-9 h-10";
-            return (
-              <div
-                role="group"
-                aria-label="Preview size controls"
-                className="inline-flex items-center rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 overflow-hidden shrink-0"
-              >
-                <button
-                  type="button"
-                  disabled={!canZoomOut}
-                  onClick={() => {
-                    if (canZoomOut) onChangePreviewSize(steps[idx - 1]);
-                  }}
-                  title="Zoom out preview (Compact ← Normal ← Big)"
-                  aria-label="Shrink 9:16 preview size"
-                  className={`${btnSize} flex items-center justify-center text-neutral-700 dark:text-neutral-200 hover:bg-neutral-100 dark:hover:bg-neutral-900 disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors`}
-                >
-                  <ZoomOut className="w-4 h-4" />
-                </button>
-                <button
-                  type="button"
-                  disabled={!canZoomIn}
-                  onClick={() => {
-                    if (canZoomIn) onChangePreviewSize(steps[idx + 1]);
-                  }}
-                  title="Zoom in preview (Compact → Normal → Big)"
-                  aria-label="Enlarge 9:16 preview size"
-                  className={`${btnSize} border-l border-neutral-200 dark:border-neutral-800 flex items-center justify-center text-neutral-700 dark:text-neutral-200 hover:bg-neutral-100 dark:hover:bg-neutral-900 disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors`}
-                >
-                  <ZoomIn className="w-4 h-4" />
-                </button>
+            <div className="flex-1 flex flex-col gap-1 min-w-0">
+              <input
+                type="range"
+                min={0}
+                max={totalDuration}
+                step={0.1}
+                value={cutTime}
+                onPointerDown={(e) => e.stopPropagation()}
+                onChange={(e) => onSeek(parseFloat(e.target.value))}
+                aria-label="Timeline scrubber"
+                className="w-full h-1.5 rounded-full appearance-none bg-neutral-200 dark:bg-neutral-800 accent-neutral-950 dark:accent-white cursor-pointer"
+              />
+              <div className="flex items-center justify-between text-[11px] text-neutral-500 dark:text-neutral-400 font-mono-tabular">
+                <span className="truncate">
+                  {formatSec(displayCutTime)} / {formatSec(displayTotalDuration)}
+                  {Math.abs(effectiveSpeed - 1) > 0.01 ? ` (${effectiveSpeed.toFixed(2).replace(/\.00$/, "")}x)` : ""}
+                </span>
+                <span className="shrink-0 ml-1">{Math.round(progressPct)}%</span>
               </div>
-            );
-          })()}
+            </div>
+
+            <button
+              type="button"
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={onToggleMute}
+              aria-label={muted ? "Unmute original audio" : "Mute original audio"}
+              className={`${
+                compactMobile ? "w-8 h-8 lg:w-9 lg:h-9" : "w-9 h-9"
+              } rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 hover:bg-neutral-100 dark:hover:bg-neutral-900 flex items-center justify-center shrink-0 transition-colors cursor-pointer`}
+            >
+              {muted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+            </button>
+
+            {onChangePreviewScale && (
+              <div
+                aria-hidden="true"
+                className={`flex items-center justify-center shrink-0 rounded-md transition-colors ${
+                  compactMobile ? "w-5 h-8 lg:w-6 lg:h-9" : "w-6 h-9"
+                } ${
+                  isResizing
+                    ? "text-neutral-950 dark:text-white bg-neutral-200/80 dark:bg-neutral-700/80"
+                    : "text-neutral-400 dark:text-neutral-500 group-hover:text-neutral-700 dark:group-hover:text-neutral-200"
+                }`}
+              >
+                <ChevronsUpDown className="w-3.5 h-3.5" />
+              </div>
+            )}
+          </div>
         </div>
+      ) : (
+        onChangePreviewScale && (
+          <div
+            role="slider"
+            tabIndex={0}
+            aria-label="Resize 9:16 video preview (drag up to shrink, down to enlarge, double-click for normal)"
+            aria-orientation="vertical"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={Math.round(clampedScale * 100)}
+            title="Drag up to shrink · Drag down to enlarge · Double-click to reset Normal"
+            onPointerDown={handleDragPointerDown}
+            onPointerMove={handleDragPointerMove}
+            onPointerUp={endDragResize}
+            onPointerCancel={endDragResize}
+            onLostPointerCapture={endDragResize}
+            onDoubleClick={handleDragDoubleClick}
+            onKeyDown={handleDragKeyDown}
+            className={`relative group w-[calc(100%+2rem)] -mx-4 sm:w-[calc(100%+3rem)] sm:-mx-6 lg:w-full lg:mx-0 h-8 rounded-none border-x-0 lg:rounded-xl lg:border-x border flex items-center justify-center gap-1.5 cursor-ns-resize touch-none select-none transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-950 dark:focus-visible:ring-white ${
+              isResizing
+                ? "border-neutral-950 dark:border-white bg-neutral-100 dark:bg-neutral-800 text-neutral-950 dark:text-white ring-2 ring-neutral-950/15 dark:ring-white/20 shadow-md"
+                : "border-neutral-200 dark:border-neutral-800 bg-neutral-50/90 dark:bg-neutral-900/90 text-neutral-500 dark:text-neutral-400 hover:border-neutral-400 dark:hover:border-neutral-600 hover:text-neutral-800 dark:hover:text-neutral-100"
+            }`}
+          >
+            <GripHorizontal className="w-4 h-4" />
+            <ChevronsUpDown className="w-3.5 h-3.5" />
+            {isResizing && (
+              <span className="pointer-events-none ml-1 px-1.5 py-0.5 rounded bg-neutral-950 text-white dark:bg-white dark:text-neutral-950 text-[10px] font-mono-tabular font-semibold whitespace-nowrap">
+                {scaleLabel} · {Math.round(clampedScale * 100)}%
+              </span>
+            )}
+          </div>
+        )
       )}
     </div>
   );
