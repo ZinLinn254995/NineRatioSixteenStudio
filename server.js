@@ -8,352 +8,6 @@ import crypto from "crypto";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { GoogleGenAI, Type, ThinkingLevel } from "@google/genai";
-
-// src/utils/speechVad.ts
-function designBiquad(type, freqHz, sampleRate, q = Math.SQRT1_2) {
-  const nyquist = sampleRate * 0.5;
-  const clampedFreq = Math.max(10, Math.min(nyquist * 0.9, freqHz));
-  const w0 = 2 * Math.PI * clampedFreq / sampleRate;
-  const cosW0 = Math.cos(w0);
-  const sinW0 = Math.sin(w0);
-  const alpha = sinW0 / (2 * q);
-  let b0 = 0;
-  let b1 = 0;
-  let b2 = 0;
-  const a0 = 1 + alpha;
-  const a1 = -2 * cosW0;
-  const a2 = 1 - alpha;
-  if (type === "lowpass") {
-    b0 = (1 - cosW0) / 2;
-    b1 = 1 - cosW0;
-    b2 = (1 - cosW0) / 2;
-  } else {
-    b0 = (1 + cosW0) / 2;
-    b1 = -(1 + cosW0);
-    b2 = (1 + cosW0) / 2;
-  }
-  return {
-    b0: b0 / a0,
-    b1: b1 / a0,
-    b2: b2 / a0,
-    a1: a1 / a0,
-    a2: a2 / a0
-  };
-}
-function applyBiquadInPlaceOrOut(input, coeffs, out) {
-  const dst = out ?? new Float32Array(input.length);
-  const { b0, b1, b2, a1, a2 } = coeffs;
-  let z1 = 0;
-  let z2 = 0;
-  for (let i = 0; i < input.length; i++) {
-    const x = input[i];
-    const y = b0 * x + z1;
-    z1 = b1 * x - a1 * y + z2;
-    z2 = b2 * x - a2 * y;
-    dst[i] = y;
-  }
-  return dst;
-}
-function smooth3Tap(src) {
-  const n = src.length;
-  const out = new Float32Array(n);
-  for (let i = 0; i < n; i++) {
-    const a = src[Math.max(0, i - 1)];
-    const b = src[i];
-    const c = src[Math.min(n - 1, i + 1)];
-    out[i] = (a + b * 2 + c) / 4;
-  }
-  return out;
-}
-function percentileSorted(sorted, p, fallback) {
-  if (sorted.length === 0) return fallback;
-  const idx = Math.max(0, Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * p)));
-  return sorted[idx];
-}
-function pcmInt16BufferToFloat32(pcmBytes) {
-  const totalSamples = Math.floor(pcmBytes.byteLength / 2);
-  const out = new Float32Array(totalSamples);
-  const view = new DataView(pcmBytes.buffer, pcmBytes.byteOffset, pcmBytes.byteLength);
-  for (let i = 0; i < totalSamples; i++) {
-    out[i] = view.getInt16(i * 2, true) / 32768;
-  }
-  return out;
-}
-function analyzePcm10ms(samples, sampleRate) {
-  const sr = Math.max(4e3, sampleRate || 16e3);
-  const frameSamples = Math.max(16, Math.round(sr * 0.01));
-  const frameCount = Math.floor(samples.length / frameSamples);
-  if (frameCount <= 0) {
-    return {
-      sampleRate: sr,
-      frameCount: 0,
-      smoothFull: new Float32Array(0),
-      smoothSpeech: new Float32Array(0),
-      smoothBass: new Float32Array(0),
-      dbSpeech: new Float32Array(0),
-      zcr: new Float32Array(0)
-    };
-  }
-  const hpSpeech = applyBiquadInPlaceOrOut(samples, designBiquad("highpass", 260, sr));
-  const bpSpeech = applyBiquadInPlaceOrOut(hpSpeech, designBiquad("lowpass", 3200, sr), hpSpeech);
-  const lpBass = applyBiquadInPlaceOrOut(samples, designBiquad("lowpass", 200, sr));
-  const hpZcr = applyBiquadInPlaceOrOut(samples, designBiquad("highpass", 100, sr));
-  const fullRms = new Float32Array(frameCount);
-  const speechRms = new Float32Array(frameCount);
-  const bassRms = new Float32Array(frameCount);
-  const zcr = new Float32Array(frameCount);
-  for (let f = 0; f < frameCount; f++) {
-    const base = f * frameSamples;
-    let sumFull = 0;
-    let sumSpeech = 0;
-    let sumBass = 0;
-    let crossings = 0;
-    let prevSign = hpZcr[base] >= 0;
-    for (let i = 0; i < frameSamples; i++) {
-      const idx = base + i;
-      const sf = samples[idx];
-      const ss = bpSpeech[idx];
-      const sb = lpBass[idx];
-      sumFull += sf * sf;
-      sumSpeech += ss * ss;
-      sumBass += sb * sb;
-      if (i > 0) {
-        const curSign = hpZcr[idx] >= 0;
-        if (curSign !== prevSign) {
-          crossings++;
-          prevSign = curSign;
-        }
-      }
-    }
-    fullRms[f] = Math.sqrt(sumFull / frameSamples);
-    speechRms[f] = Math.sqrt(sumSpeech / frameSamples);
-    bassRms[f] = Math.sqrt(sumBass / frameSamples);
-    zcr[f] = crossings / Math.max(1, frameSamples - 1);
-  }
-  const smoothFull = smooth3Tap(fullRms);
-  const smoothSpeech = smooth3Tap(speechRms);
-  const smoothBass = smooth3Tap(bassRms);
-  const dbSpeech = new Float32Array(frameCount);
-  for (let f = 0; f < frameCount; f++) {
-    dbSpeech[f] = 20 * Math.log10(Math.max(smoothSpeech[f], 1e-5));
-  }
-  return {
-    sampleRate: sr,
-    frameCount,
-    smoothFull,
-    smoothSpeech,
-    smoothBass,
-    dbSpeech,
-    zcr
-  };
-}
-function computeVadReferenceStats(analyses) {
-  const allDb = [];
-  const allSpeechRms = [];
-  const allSpeechDom = [];
-  let sumDelta30ms = 0;
-  let deltaCount = 0;
-  for (const a of analyses) {
-    for (let f = 0; f < a.frameCount; f++) {
-      allDb.push(a.dbSpeech[f]);
-      allSpeechRms.push(a.smoothSpeech[f]);
-      allSpeechDom.push(a.smoothSpeech[f] / Math.max(a.smoothFull[f], 1e-6));
-      if (f + 3 < a.frameCount) {
-        sumDelta30ms += Math.abs(a.dbSpeech[f + 3] - a.dbSpeech[f]);
-        deltaCount++;
-      }
-    }
-  }
-  if (allDb.length < 20) {
-    return {
-      p15Db: -80,
-      p50Db: -75,
-      p96Db: -70,
-      p96SpeechRms: 1e-3,
-      hasSpeechDynamic: false
-    };
-  }
-  allDb.sort((a, b) => a - b);
-  allSpeechRms.sort((a, b) => a - b);
-  allSpeechDom.sort((a, b) => a - b);
-  const p15Db = percentileSorted(allDb, 0.15, -70);
-  const p50Db = percentileSorted(allDb, 0.5, -55);
-  const p96Db = percentileSorted(allDb, 0.96, -35);
-  const p96SpeechRms = Math.max(1e-3, percentileSorted(allSpeechRms, 0.96, 5e-3));
-  const medianSpeechDom = percentileSorted(allSpeechDom, 0.5, 0);
-  const meanDeltaDb = deltaCount > 0 ? sumDelta30ms / deltaCount : 0;
-  if (p96Db < -47) {
-    return {
-      p15Db,
-      p50Db,
-      p96Db,
-      p96SpeechRms,
-      hasSpeechDynamic: false
-    };
-  }
-  const hasPauseContrast = p96Db - p15Db >= 6;
-  const hasContinuousSpeechContrast = p96Db >= -34 && medianSpeechDom >= 0.46 && meanDeltaDb >= 1.35;
-  return {
-    p15Db,
-    p50Db,
-    p96Db,
-    p96SpeechRms,
-    hasSpeechDynamic: hasPauseContrast || hasContinuousSpeechContrast
-  };
-}
-function computeLocalBackgroundFloorDb(db) {
-  const n = db.length;
-  const out = new Float32Array(n);
-  const blockSize = 25;
-  const blockCount = Math.ceil(n / blockSize);
-  const blockP25 = new Float32Array(blockCount);
-  for (let b = 0; b < blockCount; b++) {
-    const start = b * blockSize;
-    const end = Math.min(n, start + blockSize);
-    const vals = [];
-    for (let i = start; i < end; i++) vals.push(db[i]);
-    vals.sort((a, bVal) => a - bVal);
-    blockP25[b] = percentileSorted(vals, 0.25, -80);
-  }
-  const radiusBlocks = 24;
-  for (let b = 0; b < blockCount; b++) {
-    const bStart = Math.max(0, b - radiusBlocks);
-    const bEnd = Math.min(blockCount - 1, b + radiusBlocks);
-    const windowVals = [];
-    for (let k = bStart; k <= bEnd; k++) {
-      windowVals.push(blockP25[k]);
-    }
-    windowVals.sort((a, bVal) => a - bVal);
-    const localFloor = percentileSorted(windowVals, 0.15, blockP25[b]);
-    const fStart = b * blockSize;
-    const fEnd = Math.min(n, fStart + blockSize);
-    for (let f = fStart; f < fEnd; f++) {
-      out[f] = localFloor;
-    }
-  }
-  return out;
-}
-function detectSpeechSegmentsFromAnalysis(analysis, clipDur, sharedRef) {
-  const n = analysis.frameCount;
-  if (n < 20 || clipDur <= 0.15) return [];
-  const ref = sharedRef ?? computeVadReferenceStats([analysis]);
-  if (!ref.hasSpeechDynamic) return [];
-  const { smoothFull, smoothSpeech, smoothBass, dbSpeech, zcr } = analysis;
-  const localFloorDb = computeLocalBackgroundFloorDb(dbSpeech);
-  const frameDur = 0.01;
-  const coreHit = new Uint8Array(n);
-  const edgeHit = new Uint8Array(n);
-  for (let f = 0; f < n; f++) {
-    const effectiveFloorDb = Math.min(localFloorDb[f], ref.p96Db - 11.5);
-    const coreThreshDb = Math.max(
-      -44,
-      ref.p15Db + 7.5,
-      ref.p96Db - 16.5,
-      effectiveFloorDb + 6.5
-    );
-    const edgeThreshDb = Math.max(
-      -47,
-      ref.p15Db + 5,
-      ref.p96Db - 20.5,
-      effectiveFloorDb + 4.2
-    );
-    const speechDom = smoothSpeech[f] / Math.max(smoothFull[f], 1e-6);
-    const notBassHeavy = smoothSpeech[f] >= smoothBass[f] * 0.9;
-    const notPureHiss = zcr[f] <= 0.44;
-    const isCoreSpectral = speechDom >= 0.4 && notBassHeavy && notPureHiss;
-    if (dbSpeech[f] >= coreThreshDb && isCoreSpectral) {
-      coreHit[f] = 1;
-      edgeHit[f] = 1;
-    } else if (dbSpeech[f] >= edgeThreshDb && smoothSpeech[f] >= smoothBass[f] * 0.55 && zcr[f] <= 0.58) {
-      edgeHit[f] = 1;
-    }
-  }
-  const raw = [];
-  let inSeg = false;
-  let startF = 0;
-  for (let f = 0; f < n; f++) {
-    if (edgeHit[f] && !inSeg) {
-      inSeg = true;
-      startF = f;
-    } else if (!edgeHit[f] && inSeg) {
-      inSeg = false;
-      raw.push({ startF, endF: f - 1 });
-    }
-  }
-  if (inSeg) {
-    raw.push({ startF, endF: n - 1 });
-  }
-  const merged = [];
-  for (const seg of raw) {
-    const prev = merged[merged.length - 1];
-    if (prev && (seg.startF - prev.endF - 1) * frameDur <= 0.15) {
-      prev.endF = seg.endF;
-    } else {
-      merged.push({ ...seg });
-    }
-  }
-  const valid = [];
-  for (const seg of merged) {
-    const frames = seg.endF - seg.startF + 1;
-    const dur = frames * frameDur;
-    if (dur < 0.16) continue;
-    let coreCount = 0;
-    let speechDomSum = 0;
-    const segDbs = [];
-    let deltaSum = 0;
-    let deltaPairs = 0;
-    for (let f = seg.startF; f <= seg.endF; f++) {
-      segDbs.push(dbSpeech[f]);
-      if (coreHit[f]) {
-        coreCount++;
-        speechDomSum += smoothSpeech[f] / Math.max(smoothFull[f], 1e-6);
-      }
-      if (f + 3 <= seg.endF) {
-        deltaSum += Math.abs(dbSpeech[f + 3] - dbSpeech[f]);
-        deltaPairs++;
-      }
-    }
-    const minCoreRequired = Math.min(5, Math.max(4, Math.ceil(frames * 0.22)));
-    if (coreCount < minCoreRequired) continue;
-    const meanCoreDom = speechDomSum / coreCount;
-    if (meanCoreDom < 0.44) continue;
-    if (dur >= 1.2) {
-      segDbs.sort((a, b) => a - b);
-      const p10 = percentileSorted(segDbs, 0.1, -60);
-      const p90 = percentileSorted(segDbs, 0.9, -60);
-      const meanDelta30ms = deltaPairs > 0 ? deltaSum / deltaPairs : 0;
-      if (p90 - p10 < 2.8 && meanDelta30ms < 0.55) {
-        continue;
-      }
-    }
-    const sSec = Number(Math.max(0, seg.startF * frameDur).toFixed(2));
-    const eSec = Number(Math.min(clipDur, (seg.endF + 1) * frameDur).toFixed(2));
-    if (eSec - sSec >= 0.14) {
-      valid.push({ startSec: sSec, endSec: eSec });
-    }
-  }
-  return valid;
-}
-function computeWaveformBinsFromAnalysis(analysis, sharedRef, groupFrames = 4) {
-  const n = analysis.frameCount;
-  if (n === 0) return [];
-  const ref = sharedRef ?? computeVadReferenceStats([analysis]);
-  const scaleRef = Math.max(0.012, ref.p96SpeechRms * 1.35);
-  const bins = [];
-  for (let i = 0; i < n; i += groupFrames) {
-    let peak = 0;
-    const end = Math.min(n, i + groupFrames);
-    for (let j = i; j < end; j++) {
-      const weighted = analysis.smoothSpeech[j] * 0.85 + analysis.smoothFull[j] * 0.15;
-      if (weighted > peak) peak = weighted;
-    }
-    const normalized = Math.max(0, Math.min(1, peak / scaleRef));
-    bins.push(Math.round(Math.pow(normalized, 0.72) * 100));
-  }
-  return bins;
-}
-
-// server.ts
 var execFileAsync = promisify(execFile);
 var FFMPEG_EXEC_OPTS = { maxBuffer: 16 * 1024 * 1024 };
 var app = express();
@@ -421,6 +75,45 @@ async function withUploadSessionLock(uploadId, fn, opts = {}) {
     }
   }
 }
+var COMPLETED_EXPORT_TTL_MS = 15 * 60 * 1e3;
+var completedExports = /* @__PURE__ */ new Map();
+function sanitizeExportFileName(rawName) {
+  const base = String(rawName || "thai-burmese-9x16.mp4").replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
+  if (!base) return "thai-burmese-9x16.mp4";
+  return base.toLowerCase().endsWith(".mp4") ? base : `${base}.mp4`;
+}
+async function registerCompletedExport(sourceMp4Path, fileName) {
+  const id = crypto.randomBytes(12).toString("hex");
+  const dirPath = await fs.promises.mkdtemp(path.join(os.tmpdir(), "thai-export-"));
+  const safeFileName = sanitizeExportFileName(fileName);
+  const destPath = path.join(dirPath, safeFileName);
+  try {
+    await fs.promises.rename(sourceMp4Path, destPath);
+  } catch {
+    await fs.promises.copyFile(sourceMp4Path, destPath);
+  }
+  const stat = await fs.promises.stat(destPath);
+  const entry = {
+    id,
+    filePath: destPath,
+    dirPath,
+    fileName: safeFileName,
+    sizeBytes: stat.size,
+    createdAt: Date.now()
+  };
+  completedExports.set(id, entry);
+  return entry;
+}
+async function sweepExpiredCompletedExports() {
+  const now = Date.now();
+  for (const [id, entry] of completedExports.entries()) {
+    if (now - entry.createdAt > COMPLETED_EXPORT_TTL_MS || !fs.existsSync(entry.filePath)) {
+      completedExports.delete(id);
+      await fs.promises.rm(entry.dirPath, { recursive: true, force: true }).catch(() => {
+      });
+    }
+  }
+}
 async function sweepExpiredUploadSessions() {
   const now = Date.now();
   const entries = Array.from(uploadSessions.values());
@@ -433,15 +126,19 @@ async function sweepExpiredUploadSessions() {
       await deleteUploadSessionNow(session);
     }
   }
+  await sweepExpiredCompletedExports();
 }
 async function sweepOrphanedTempFiles() {
   try {
     const tmpRoot = os.tmpdir();
-    const activePaths = new Set(Array.from(uploadSessions.values()).map((s) => s.filePath));
+    const activePaths = /* @__PURE__ */ new Set([
+      ...Array.from(uploadSessions.values()).map((s) => s.filePath),
+      ...Array.from(completedExports.values()).map((e) => e.dirPath)
+    ]);
     const names = await fs.promises.readdir(tmpRoot);
     const now = Date.now();
     for (const name of names) {
-      if (!name.startsWith("thai-studio-upload-") && !name.startsWith("upload-vid-") && !name.startsWith("thai-prep-") && !name.startsWith("thai-studio-")) {
+      if (!name.startsWith("thai-studio-upload-") && !name.startsWith("upload-vid-") && !name.startsWith("thai-prep-") && !name.startsWith("thai-studio-") && !name.startsWith("thai-export-")) {
         continue;
       }
       const fullPath = path.join(tmpRoot, name);
@@ -1311,6 +1008,22 @@ function normalizeSelectedScenes(rawScenes, maxDuration) {
   }
   return clean;
 }
+function computeRmsEnvelope10ms(pcmBuffer) {
+  const frameSamples = 160;
+  const totalSamples = Math.floor(pcmBuffer.length / 2);
+  const frameCount = Math.floor(totalSamples / frameSamples);
+  const rms = new Float32Array(frameCount);
+  for (let f = 0; f < frameCount; f++) {
+    let sumSq = 0;
+    const base = f * frameSamples * 2;
+    for (let i = 0; i < frameSamples; i++) {
+      const s = pcmBuffer.readInt16LE(base + i * 2) / 32768;
+      sumSq += s * s;
+    }
+    rms[f] = Math.sqrt(sumSq / frameSamples);
+  }
+  return rms;
+}
 function getEnvelopeStats(rms) {
   const n = rms.length;
   const smooth = new Float32Array(n);
@@ -1322,19 +1035,58 @@ function getEnvelopeStats(rms) {
   }
   const sorted = Array.from(smooth).sort((a, b) => a - b);
   const noiseFloor = sorted[Math.floor(sorted.length * 0.15)] || 1e-3;
-  const speechPeak = sorted[Math.floor(sorted.length * 0.96)] || 0.01;
-  const hasClearDynamicRange = speechPeak > Math.max(8e-3, noiseFloor * 2.2);
+  const speechPeak = sorted[Math.floor(sorted.length * 0.85)] || 0.01;
+  const hasClearDynamicRange = speechPeak > Math.max(0.01, noiseFloor * 2.5);
   const speechThreshold = Math.max(
-    noiseFloor * 2.2,
-    speechPeak * 0.16,
-    noiseFloor + (speechPeak - noiseFloor) * 0.14
+    noiseFloor * 1.85,
+    noiseFloor + (speechPeak - noiseFloor) * 0.085
   );
   const onsetThreshold = Math.max(
-    noiseFloor * 1.65,
-    speechPeak * 0.1,
-    noiseFloor + (speechPeak - noiseFloor) * 0.08
+    noiseFloor * 1.45,
+    noiseFloor + (speechPeak - noiseFloor) * 0.045
   );
   return { noiseFloor, speechPeak, speechThreshold, onsetThreshold, hasClearDynamicRange, smooth };
+}
+function detectSpeechSegments10ms(rms, clipDur) {
+  if (rms.length < 20) return [];
+  const { speechThreshold, hasClearDynamicRange, smooth } = getEnvelopeStats(rms);
+  if (!hasClearDynamicRange) return [];
+  const frameDur = 0.01;
+  const raw = [];
+  let inSpeech = false;
+  let startF = 0;
+  for (let f = 0; f < smooth.length; f++) {
+    const active = smooth[f] >= speechThreshold;
+    if (active && !inSpeech) {
+      inSpeech = true;
+      startF = f;
+    } else if (!active && inSpeech) {
+      inSpeech = false;
+      raw.push({
+        startSec: startF * frameDur,
+        endSec: Math.min(clipDur, (f + 1) * frameDur)
+      });
+    }
+  }
+  if (inSpeech) {
+    raw.push({
+      startSec: startF * frameDur,
+      endSec: clipDur
+    });
+  }
+  const merged = [];
+  for (const seg of raw) {
+    const prev = merged[merged.length - 1];
+    if (prev && seg.startSec - prev.endSec <= 0.32) {
+      prev.endSec = seg.endSec;
+    } else {
+      merged.push({ ...seg });
+    }
+  }
+  return merged.filter((s) => s.endSec - s.startSec >= 0.15).map((s) => ({
+    startSec: Number(Math.max(0, s.startSec - 0.07).toFixed(2)),
+    endSec: Number(Math.min(clipDur, s.endSec + 0.08).toFixed(2))
+  }));
 }
 function planAudioChunks(rms, speechWindows, clipDur, maxChunkSec = 30) {
   if (clipDur <= maxChunkSec + 5) {
@@ -1846,7 +1598,6 @@ async function processUploadedVideo(persistentPath, uploadId, title, durationSec
     }
     const ai = getGeminiClient();
     const embedded = await extractEmbeddedSubtitles(persistentPath, tmpDir);
-    const sceneSpeechCollections = scenes.map(() => []);
     const results = await Promise.all(
       scenes.map(async (sc, idx) => {
         const sceneCues = embedded ? embedded.cues.filter((c) => c.endSec > sc.startSec + 0.05 && c.startSec < sc.endSec - 0.05).map((c) => ({
@@ -1933,13 +1684,8 @@ async function processUploadedVideo(persistentPath, uploadId, title, durationSec
           return { hasDialogue: false, summary: "No audio", utterances: [] };
         }
         const fullPcm = await fs.promises.readFile(scenePcmPath);
-        const fullAnalysis = analyzePcm10ms(pcmInt16BufferToFloat32(fullPcm), 16e3);
-        const fullRms = fullAnalysis.smoothSpeech;
-        const fullSpeechWindows = detectSpeechSegmentsFromAnalysis(fullAnalysis, sc.durationSec);
-        sceneSpeechCollections[idx] = fullSpeechWindows.map((w) => ({
-          sourceStartSec: Number((sc.startSec + w.startSec).toFixed(2)),
-          sourceEndSec: Number((sc.startSec + w.endSec).toFixed(2))
-        }));
+        const fullRms = computeRmsEnvelope10ms(fullPcm);
+        const fullSpeechWindows = detectSpeechSegments10ms(fullRms, sc.durationSec);
         const subChunks = planAudioChunks(fullRms, fullSpeechWindows, sc.durationSec, 30);
         const pcmToWav = (pcmSlice, sampleRate = 16e3) => {
           const header = Buffer.alloc(44);
@@ -2029,8 +1775,7 @@ async function processUploadedVideo(persistentPath, uploadId, title, durationSec
         body: { error: "No spoken dialogue or subtitles were detected inside your selected scenes." }
       };
     }
-    const collectedSpeechRegions = sceneSpeechCollections.flat();
-    const speechRegions = collectedSpeechRegions.length > 0 ? collectedSpeechRegions : compiled.subtitles.map((s) => ({
+    const speechRegions = compiled.subtitles.map((s) => ({
       sourceStartSec: s.sourceStartSec,
       sourceEndSec: s.sourceEndSec
     }));
@@ -2821,9 +2566,8 @@ app.post("/api/resync-subtitles", async (req, res) => {
           FFMPEG_EXEC_OPTS
         );
         const mp3Buf = await fs.promises.readFile(cutMp3Path);
-        const analysis = analyzePcm10ms(pcmInt16BufferToFloat32(cutPcm), 16e3);
-        const rms = analysis.smoothSpeech;
-        const speechWindows = detectSpeechSegmentsFromAnalysis(analysis, totalCutDur);
+        const rms = computeRmsEnvelope10ms(cutPcm);
+        const speechWindows = detectSpeechSegments10ms(rms, totalCutDur);
         return {
           mp3Base64: mp3Buf.toString("base64"),
           rms,
@@ -3027,176 +2771,6 @@ app.get("/api/upload-exists/:uploadId", (req, res) => {
   }
   res.json({ exists });
 });
-app.post("/api/speech-envelope", async (req, res) => {
-  const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "thai-vad-"));
-  try {
-    const { uploadId, ranges = [] } = req.body || {};
-    if (!uploadId) {
-      res.status(404).json({ error: "Uploaded video file not found." });
-      return;
-    }
-    const cleanRanges = (Array.isArray(ranges) ? ranges : []).map((r) => ({
-      startSec: Math.max(0, Number(r.startSec) || 0),
-      endSec: Math.max(0, Number(r.endSec) || 0)
-    })).filter((r) => Number.isFinite(r.startSec) && Number.isFinite(r.endSec) && r.endSec - r.startSec >= 0.2).slice(0, 24);
-    if (cleanRanges.length === 0) {
-      res.json({ stepSec: 0.04, ranges: [] });
-      return;
-    }
-    const analyzed = await withUploadSessionLock(uploadId, async (uploadedPath) => {
-      const maxEndSec = Math.max(...cleanRanges.map((r) => r.endSec));
-      const preparedSlices = [];
-      if (maxEndSec <= 1200) {
-        const fullPcmPath = path.join(tmpDir, "env-full.pcm");
-        let fullPcm = Buffer.alloc(0);
-        try {
-          await execFileAsync(
-            "ffmpeg",
-            [
-              "-y",
-              "-vn",
-              "-i",
-              uploadedPath,
-              "-t",
-              String(maxEndSec + 0.5),
-              "-af",
-              "aresample=async=1:first_pts=0",
-              "-f",
-              "s16le",
-              "-ac",
-              "1",
-              "-ar",
-              "16000",
-              fullPcmPath
-            ],
-            FFMPEG_EXEC_OPTS
-          );
-          if (fs.existsSync(fullPcmPath)) {
-            fullPcm = await fs.promises.readFile(fullPcmPath);
-          }
-        } catch {
-          fullPcm = Buffer.alloc(0);
-        }
-        const totalFrames10ms = Math.floor(fullPcm.length / 320);
-        for (const rng of cleanRanges) {
-          const startFrame = Math.max(0, Math.round(rng.startSec * 100));
-          const endFrame = Math.min(
-            totalFrames10ms,
-            Math.max(startFrame + 20, Math.round(rng.endSec * 100))
-          );
-          const actualStart = Number((startFrame * 0.01).toFixed(2));
-          const actualEnd = Number((endFrame * 0.01).toFixed(2));
-          const dur = Math.max(0, actualEnd - actualStart);
-          if (totalFrames10ms < 20 || endFrame - startFrame < 20) {
-            preparedSlices.push({
-              startSec: rng.startSec,
-              endSec: Number(Math.max(rng.startSec, rng.endSec).toFixed(2)),
-              dur: 0,
-              analysis: null
-            });
-            continue;
-          }
-          const slicePcm = fullPcm.subarray(startFrame * 320, endFrame * 320);
-          preparedSlices.push({
-            startSec: actualStart,
-            endSec: actualEnd,
-            dur,
-            analysis: analyzePcm10ms(pcmInt16BufferToFloat32(slicePcm), 16e3)
-          });
-        }
-      } else {
-        await Promise.all(
-          cleanRanges.map(async (rng, idx) => {
-            const dur = Math.min(360, Math.max(0.2, rng.endSec - rng.startSec));
-            const pcmPath = path.join(tmpDir, `env-${idx}.pcm`);
-            try {
-              await execFileAsync(
-                "ffmpeg",
-                [
-                  "-y",
-                  "-vn",
-                  "-i",
-                  uploadedPath,
-                  "-af",
-                  "aresample=async=1:first_pts=0",
-                  "-ss",
-                  String(rng.startSec),
-                  "-t",
-                  String(dur),
-                  "-f",
-                  "s16le",
-                  "-ac",
-                  "1",
-                  "-ar",
-                  "16000",
-                  pcmPath
-                ],
-                FFMPEG_EXEC_OPTS
-              );
-              if (!fs.existsSync(pcmPath) || fs.statSync(pcmPath).size < 640) {
-                preparedSlices[idx] = {
-                  startSec: rng.startSec,
-                  endSec: Number((rng.startSec + dur).toFixed(2)),
-                  dur,
-                  analysis: null
-                };
-                return;
-              }
-              const pcm = await fs.promises.readFile(pcmPath);
-              preparedSlices[idx] = {
-                startSec: rng.startSec,
-                endSec: Number((rng.startSec + dur).toFixed(2)),
-                dur,
-                analysis: analyzePcm10ms(pcmInt16BufferToFloat32(pcm), 16e3)
-              };
-            } catch {
-              preparedSlices[idx] = {
-                startSec: rng.startSec,
-                endSec: Number((rng.startSec + dur).toFixed(2)),
-                dur,
-                analysis: null
-              };
-            }
-          })
-        );
-      }
-      const validAnalyses = preparedSlices.map((s) => s.analysis).filter((a) => Boolean(a && a.frameCount >= 20));
-      const sharedRef = validAnalyses.length > 0 ? computeVadReferenceStats(validAnalyses) : void 0;
-      return preparedSlices.map((s) => {
-        if (!s.analysis || s.analysis.frameCount < 20 || s.dur <= 0.15) {
-          return {
-            startSec: s.startSec,
-            endSec: s.endSec,
-            bins: [],
-            speechRegions: []
-          };
-        }
-        const bins = computeWaveformBinsFromAnalysis(s.analysis, sharedRef, 4);
-        const wins = detectSpeechSegmentsFromAnalysis(s.analysis, s.dur, sharedRef);
-        return {
-          startSec: s.startSec,
-          endSec: s.endSec,
-          bins,
-          speechRegions: wins.map((w) => ({
-            sourceStartSec: Number((s.startSec + w.startSec).toFixed(2)),
-            sourceEndSec: Number((s.startSec + w.endSec).toFixed(2))
-          }))
-        };
-      });
-    });
-    if (!analyzed) {
-      res.status(404).json({ error: "Uploaded video session expired or missing." });
-      return;
-    }
-    res.json({ stepSec: 0.04, ranges: analyzed });
-  } catch (err) {
-    console.error("Speech envelope error:", err);
-    res.status(500).json({ error: "Failed to analyze audio speech waveform." });
-  } finally {
-    await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {
-    });
-  }
-});
 app.post("/api/prepare-export-clip", async (req, res) => {
   const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "thai-prep-"));
   try {
@@ -3218,7 +2792,13 @@ app.post("/api/prepare-export-clip", async (req, res) => {
           (sc) => Number.isFinite(sc.startSec) && Number.isFinite(sc.durationSec) && sc.durationSec > 0.05
         );
         const outClipPath = path.join(tmpDir, "prepared-clip.mp4");
-        const perSceneScale = "scale=w='min(960,iw)':h='min(960,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1,setpts=PTS-STARTPTS";
+        const totalClipSec = validScenes.reduce((acc, s) => acc + s.durationSec, 0);
+        const useAllKeyframe = totalClipSec <= 95;
+        const maxDim = useAllKeyframe ? 640 : 540;
+        const gopSize = useAllKeyframe ? "1" : "2";
+        const crfVal = useAllKeyframe ? "26" : "27";
+        const perSceneScale = `scale=w='min(${maxDim},iw)':h='min(${maxDim},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1,setpts=PTS-STARTPTS`;
+        const prepExecOpts = { ...FFMPEG_EXEC_OPTS, timeout: 45e3 };
         if (validScenes.length <= 1) {
           const sc = validScenes[0];
           const seekArgs = sc ? ["-ss", String(sc.startSec), "-t", String(sc.durationSec)] : [];
@@ -3236,11 +2816,11 @@ app.post("/api/prepare-export-clip", async (req, res) => {
               "-preset",
               "ultrafast",
               "-crf",
-              "21",
+              crfVal,
               "-g",
-              "1",
+              gopSize,
               "-keyint_min",
-              "1",
+              gopSize,
               "-bf",
               "0",
               "-profile:v",
@@ -3250,7 +2830,7 @@ app.post("/api/prepare-export-clip", async (req, res) => {
               "-an",
               outClipPath
             ],
-            FFMPEG_EXEC_OPTS
+            prepExecOpts
           );
         } else {
           const inputArgs = [];
@@ -3277,11 +2857,11 @@ app.post("/api/prepare-export-clip", async (req, res) => {
               "-preset",
               "ultrafast",
               "-crf",
-              "21",
+              crfVal,
               "-g",
-              "1",
+              gopSize,
               "-keyint_min",
-              "1",
+              gopSize,
               "-bf",
               "0",
               "-profile:v",
@@ -3291,10 +2871,14 @@ app.post("/api/prepare-export-clip", async (req, res) => {
               "-an",
               outClipPath
             ],
-            FFMPEG_EXEC_OPTS
+            prepExecOpts
           );
         }
-        if (!fs.existsSync(outClipPath) || fs.statSync(outClipPath).size < 512) {
+        if (!fs.existsSync(outClipPath)) {
+          return null;
+        }
+        const stat = fs.statSync(outClipPath);
+        if (stat.size < 512 || stat.size > 26 * 1024 * 1024) {
           return null;
         }
         return fs.promises.readFile(outClipPath);
@@ -3306,7 +2890,7 @@ app.post("/api/prepare-export-clip", async (req, res) => {
       if (!sessionStillThere) {
         res.status(404).json({ error: "Uploaded video file not found. Please re-upload." });
       } else {
-        res.status(422).json({ error: "Could not prepare video stream from file." });
+        res.status(413).json({ error: "Prepared clip skipped; using direct local decoding." });
       }
       return;
     }
@@ -3443,6 +3027,7 @@ app.post("/api/mux-mp4", async (req, res) => {
       res.status(400).json({ error: "Missing rendered video payload." });
       return;
     }
+    const canStreamCopyVideo = videoFormat === "mp4" && !forceCfrFromFrames && recordedDurationSec === void 0;
     const videoFilterParts = [];
     const safeTargetDur = Number(targetDurationSec);
     if (forceCfrFromFrames) {
@@ -3458,15 +3043,15 @@ app.post("/api/mux-mp4", async (req, res) => {
       }
     }
     videoFilterParts.push("fps=24", "setsar=1");
-    const videoCodecArgs = [
+    const videoReencodeArgs = [
       "-vf",
       videoFilterParts.join(","),
       "-c:v",
       "libx264",
       "-preset",
-      "veryfast",
+      "superfast",
       "-crf",
-      "20",
+      "21",
       "-pix_fmt",
       "yuv420p",
       "-profile:v",
@@ -3478,14 +3063,37 @@ app.post("/api/mux-mp4", async (req, res) => {
       "-vsync",
       "cfr"
     ];
+    const videoCopyArgs = ["-c:v", "copy"];
     const runVideoOnlyMux = async () => {
+      if (canStreamCopyVideo) {
+        try {
+          await execFileAsync(
+            "ffmpeg",
+            [
+              "-y",
+              "-i",
+              inputVideoPath,
+              ...videoCopyArgs,
+              "-movflags",
+              "+faststart",
+              "-an",
+              outputMp4Path
+            ],
+            FFMPEG_EXEC_OPTS
+          );
+          if (fs.existsSync(outputMp4Path) && fs.statSync(outputMp4Path).size > 512) {
+            return;
+          }
+        } catch {
+        }
+      }
       await execFileAsync(
         "ffmpeg",
         [
           "-y",
           "-i",
           inputVideoPath,
-          ...videoCodecArgs,
+          ...videoReencodeArgs,
           "-movflags",
           "+faststart",
           "-an",
@@ -3510,8 +3118,8 @@ app.post("/api/mux-mp4", async (req, res) => {
           if (!sourceProbe.hasAudio) {
             return;
           }
-          const segFiles = [];
-          for (let i = 0; i < normalizedScenes.length; i++) {
+          const segResults = new Array(normalizedScenes.length).fill(null);
+          const extractOne = async (i) => {
             const sc = normalizedScenes[i];
             const segOut = path.join(tmpDir, `seg-${i}.wav`);
             let extracted = false;
@@ -3567,9 +3175,17 @@ app.post("/api/mux-mp4", async (req, res) => {
               }
             }
             if (extracted) {
-              segFiles.push(segOut);
+              segResults[i] = segOut;
             }
+          };
+          for (let batchStart = 0; batchStart < normalizedScenes.length; batchStart += 4) {
+            const batch = [];
+            for (let idx = batchStart; idx < Math.min(normalizedScenes.length, batchStart + 4); idx++) {
+              batch.push(extractOne(idx));
+            }
+            await Promise.all(batch);
           }
+          const segFiles = segResults.filter((s) => Boolean(s));
           if (segFiles.length === 0) {
             return;
           }
@@ -3601,36 +3217,43 @@ app.post("/api/mux-mp4", async (req, res) => {
             );
           }
           const audioFilters = buildVoiceAudioFilters(voiceSettings);
-          await execFileAsync(
-            "ffmpeg",
-            [
-              "-y",
-              "-i",
-              inputVideoPath,
-              "-i",
-              origWavPath,
-              "-map",
-              "0:v:0",
-              "-map",
-              "1:a:0",
-              ...videoCodecArgs,
-              "-af",
-              audioFilters.join(","),
-              "-c:a",
-              "aac",
-              "-b:a",
-              "192k",
-              "-ar",
-              "44100",
-              "-ac",
-              "2",
-              "-movflags",
-              "+faststart",
-              "-shortest",
-              outputMp4Path
-            ],
-            FFMPEG_EXEC_OPTS
-          );
+          const buildMuxWithAudioArgs = (vArgs) => [
+            "-y",
+            "-i",
+            inputVideoPath,
+            "-i",
+            origWavPath,
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            ...vArgs,
+            "-af",
+            audioFilters.join(","),
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-ar",
+            "44100",
+            "-ac",
+            "2",
+            "-movflags",
+            "+faststart",
+            "-shortest",
+            outputMp4Path
+          ];
+          if (canStreamCopyVideo) {
+            try {
+              await execFileAsync("ffmpeg", buildMuxWithAudioArgs(videoCopyArgs), FFMPEG_EXEC_OPTS);
+              if (fs.existsSync(outputMp4Path) && fs.statSync(outputMp4Path).size > 512) {
+                muxedWithAudio = true;
+                return;
+              }
+            } catch {
+            }
+          }
+          await execFileAsync("ffmpeg", buildMuxWithAudioArgs(videoReencodeArgs), FFMPEG_EXEC_OPTS);
           muxedWithAudio = true;
         },
         { markFinalized: true }
@@ -3639,9 +3262,21 @@ app.post("/api/mux-mp4", async (req, res) => {
     if (!muxedWithAudio) {
       await runVideoOnlyMux();
     }
+    const wantDownloadUrl = Boolean(req.body?.returnDownloadUrl);
+    const requestedFileName = req.body?.fileName;
+    if (wantDownloadUrl) {
+      const entry = await registerCompletedExport(outputMp4Path, requestedFileName);
+      res.json({
+        exportId: entry.id,
+        downloadUrl: `/api/download-export/${encodeURIComponent(entry.id)}`,
+        fileName: entry.fileName,
+        sizeBytes: entry.sizeBytes
+      });
+      return;
+    }
     const outBuffer = await fs.promises.readFile(outputMp4Path);
     res.setHeader("Content-Type", "video/mp4");
-    res.setHeader("Content-Disposition", 'attachment; filename="thai-burmese-9x16.mp4"');
+    res.setHeader("Content-Disposition", `attachment; filename="${sanitizeExportFileName(requestedFileName)}"`);
     res.send(outBuffer);
   } catch (err) {
     console.error("Mux MP4 error:", err);
@@ -3655,6 +3290,452 @@ app.post("/api/mux-mp4", async (req, res) => {
     await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {
     });
   }
+});
+function buildTopVideoFfmpegFilter(editSettings, width, topVideoH) {
+  const fitMode = editSettings?.fitMode === "contain" ? "contain" : "cover";
+  const zoom = Math.max(0.5, Math.min(3, Number(editSettings?.zoom) || 1));
+  const panXRatio = Math.max(-0.5, Math.min(0.5, (Number(editSettings?.panX) || 0) / 100));
+  const panYRatio = Math.max(-0.5, Math.min(0.5, (Number(editSettings?.panY) || 0) / 100));
+  const rotateDeg = Number(editSettings?.rotateDeg) || 0;
+  const flipH = Boolean(editSettings?.flipH);
+  const flipV = Boolean(editSettings?.flipV);
+  const targetW = Math.max(2, Math.round(width * zoom / 2) * 2);
+  const targetH = Math.max(2, Math.round(topVideoH * zoom / 2) * 2);
+  const ratioFlag = fitMode === "contain" ? "decrease" : "increase";
+  const parts = [
+    `scale=w=${targetW}:h=${targetH}:force_original_aspect_ratio=${ratioFlag}:force_divisible_by=2`,
+    "setsar=1"
+  ];
+  if (flipH) parts.push("hflip");
+  if (flipV) parts.push("vflip");
+  if (Math.abs(rotateDeg) >= 0.5) {
+    const rad = (rotateDeg * Math.PI / 180).toFixed(5);
+    parts.push(`rotate=${rad}:fillcolor=0x111111`);
+  }
+  parts.push(
+    `pad=w='max(iw,${width})':h='max(ih,${topVideoH})':x='(ow-iw)/2':y='(oh-ih)/2':color=0x111111`
+  );
+  parts.push(
+    `crop=w=${width}:h=${topVideoH}:x='max(0,min(iw-${width},(iw-${width})/2-(${panXRatio.toFixed(4)})*${width}))':y='max(0,min(ih-${topVideoH},(ih-${topVideoH})/2-(${panYRatio.toFixed(4)})*${topVideoH}))'`
+  );
+  const brightnessPct = editSettings?.brightness ?? 100;
+  const contrastPct = editSettings?.contrast ?? 100;
+  const satPct = editSettings?.saturation ?? 100;
+  const hueDeg = editSettings?.hueDeg ?? 0;
+  const grayscalePct = editSettings?.grayscale ?? 0;
+  const sepiaPct = editSettings?.sepia ?? 0;
+  const blurPx = editSettings?.blurPx ?? 0;
+  const vignettePct = editSettings?.vignette ?? 0;
+  if (Math.abs(brightnessPct - 100) >= 1 || Math.abs(contrastPct - 100) >= 1 || Math.abs(satPct - 100) >= 1 || grayscalePct >= 1) {
+    const eqBright = Math.max(-0.5, Math.min(0.5, (brightnessPct - 100) / 200));
+    const eqContrast = Math.max(0.2, Math.min(2.5, contrastPct / 100));
+    const effectiveSat = Math.max(0, Math.min(3, satPct / 100 * (1 - grayscalePct / 100)));
+    parts.push(
+      `eq=brightness=${eqBright.toFixed(3)}:contrast=${eqContrast.toFixed(3)}:saturation=${effectiveSat.toFixed(3)}`
+    );
+  }
+  if (Math.abs(hueDeg) >= 1) {
+    parts.push(`hue=h=${hueDeg.toFixed(1)}`);
+  }
+  if (sepiaPct >= 5) {
+    const s = Math.max(0, Math.min(1, sepiaPct / 100));
+    const rr = (1 - s + 0.393 * s).toFixed(3);
+    const rg = (0.769 * s).toFixed(3);
+    const rb = (0.189 * s).toFixed(3);
+    const gr = (0.349 * s).toFixed(3);
+    const gg = (1 - s + 0.686 * s).toFixed(3);
+    const gb = (0.168 * s).toFixed(3);
+    const br = (0.272 * s).toFixed(3);
+    const bg = (0.534 * s).toFixed(3);
+    const bb = (1 - s + 0.131 * s).toFixed(3);
+    parts.push(
+      `colorchannelmixer=${rr}:${rg}:${rb}:0:${gr}:${gg}:${gb}:0:${br}:${bg}:${bb}:0`
+    );
+  }
+  if (blurPx >= 0.4) {
+    parts.push(`gblur=sigma=${Math.min(8, blurPx).toFixed(2)}`);
+  }
+  if (editSettings?.adversarialNoise) {
+    const strength = Math.max(2, Math.min(12, Math.round((Number(editSettings.adversarialStrength) || 12) / 3)));
+    parts.push(`noise=alls=${strength}:allf=t+u`);
+  }
+  if (vignettePct >= 5) {
+    const angle = Math.max(0.25, Math.min(1.2, vignettePct / 100 * 0.9)).toFixed(3);
+    parts.push(`vignette=angle=${angle}`);
+  }
+  parts.push("setpts=PTS-STARTPTS");
+  return parts.join(",");
+}
+app.post("/api/export-fast-mp4", async (req, res) => {
+  const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "thai-studio-"));
+  const ffmpegAbort = new AbortController();
+  const onClientClose = () => {
+    if (!res.writableEnded) {
+      ffmpegAbort.abort();
+    }
+  };
+  res.on("close", onClientClose);
+  const {
+    uploadId,
+    scenes = [],
+    voiceSettings,
+    editSettings,
+    width = 720,
+    height = 1280,
+    topVideoH: rawTopVideoH,
+    subtitleBase64,
+    subtitleUploadId,
+    subtitleFormat = "mp4",
+    subtitleFps = 15,
+    subtitleForceCfr = false,
+    subtitleRecordedDurationSec,
+    targetDurationSec,
+    fileName
+  } = req.body || {};
+  try {
+    if (!uploadId) {
+      res.status(404).json({ error: "Uploaded video file not found. Please re-upload." });
+      return;
+    }
+    const outW = Math.max(360, Math.min(1080, Math.round((Number(width) || 720) / 2) * 2));
+    const outH = Math.max(640, Math.min(1920, Math.round((Number(height) || 1280) / 2) * 2));
+    let subtitlePath = null;
+    if (subtitleUploadId) {
+      const candidateSub = path.join(tmpDir, `sub.${subtitleFormat === "webm" ? "webm" : "mp4"}`);
+      const copied = await withUploadSessionLock(subtitleUploadId, async (p) => {
+        await fs.promises.copyFile(p, candidateSub);
+        return true;
+      });
+      if (copied && fs.existsSync(candidateSub) && fs.statSync(candidateSub).size > 256) {
+        subtitlePath = candidateSub;
+      }
+    } else if (subtitleBase64) {
+      const candidateSub = path.join(tmpDir, `sub.${subtitleFormat === "webm" ? "webm" : "mp4"}`);
+      await fs.promises.writeFile(candidateSub, Buffer.from(subtitleBase64, "base64"));
+      if (fs.existsSync(candidateSub) && fs.statSync(candidateSub).size > 256) {
+        subtitlePath = candidateSub;
+      }
+    }
+    const hasSubStrip = Boolean(subtitlePath);
+    const topVideoH = hasSubStrip ? Math.max(240, Math.min(outH - 240, Math.round((Number(rawTopVideoH) || Math.round(outH * 0.35)) / 2) * 2)) : outH;
+    const listH = outH - topVideoH;
+    const speed = Math.max(0.5, Math.min(2.5, Number(voiceSettings?.speed) || 1));
+    const outputMp4Path = path.join(tmpDir, "output.mp4");
+    const execOpts = { ...FFMPEG_EXEC_OPTS, signal: ffmpegAbort.signal, timeout: 11e4 };
+    const normalizedScenes = (Array.isArray(scenes) ? scenes : []).map((sc) => {
+      const startSec = Math.max(0, Number(sc.startSec) || 0);
+      const rawEnd = Number(sc.endSec);
+      const rawDur = Number(sc.durationSec);
+      const durationSec = Number.isFinite(rawEnd) && rawEnd > startSec ? Math.max(0.1, rawEnd - startSec) : Math.max(0.1, Number.isFinite(rawDur) ? rawDur : 0.1);
+      return { startSec, durationSec };
+    }).filter((sc) => Number.isFinite(sc.startSec) && Number.isFinite(sc.durationSec));
+    const entry = await withUploadSessionLock(
+      uploadId,
+      async (uploadedPath) => {
+        const sourceProbe = await probeMediaInfo(uploadedPath);
+        const topFilter = buildTopVideoFfmpegFilter(editSettings, outW, topVideoH);
+        const ffmpegInputs = [];
+        const filterChains = [];
+        const sceneCount = Math.max(1, normalizedScenes.length);
+        if (normalizedScenes.length === 0) {
+          ffmpegInputs.push("-i", uploadedPath);
+          const speedExpr = Math.abs(speed - 1) > 0.01 ? `,setpts=PTS/${speed.toFixed(4)}` : "";
+          filterChains.push(`[0:v]${topFilter}${speedExpr},fps=24,format=yuv420p[topv]`);
+        } else if (normalizedScenes.length === 1) {
+          const sc = normalizedScenes[0];
+          ffmpegInputs.push("-ss", String(sc.startSec), "-t", String(sc.durationSec), "-i", uploadedPath);
+          const speedExpr = Math.abs(speed - 1) > 0.01 ? `,setpts=PTS/${speed.toFixed(4)}` : "";
+          filterChains.push(`[0:v]${topFilter}${speedExpr},fps=24,format=yuv420p[topv]`);
+        } else {
+          const concatLabels = [];
+          for (let i = 0; i < normalizedScenes.length; i++) {
+            const sc = normalizedScenes[i];
+            ffmpegInputs.push("-ss", String(sc.startSec), "-t", String(sc.durationSec), "-i", uploadedPath);
+            filterChains.push(`[${i}:v]${topFilter}[v${i}]`);
+            concatLabels.push(`[v${i}]`);
+          }
+          const speedExpr = Math.abs(speed - 1) > 0.01 ? `,setpts=PTS/${speed.toFixed(4)}` : "";
+          filterChains.push(
+            `${concatLabels.join("")}concat=n=${normalizedScenes.length}:v=1:a=0${speedExpr},fps=24,format=yuv420p[topv]`
+          );
+        }
+        let nextInputIdx = sceneCount;
+        let finalVideoLabel = "[topv]";
+        if (hasSubStrip && subtitlePath) {
+          const subIdx = nextInputIdx++;
+          ffmpegInputs.push("-i", subtitlePath);
+          const subParts = [];
+          const safeTargetDur = Number(targetDurationSec);
+          const safeSubFps = Math.max(8, Math.min(30, Number(subtitleFps) || 15));
+          if (subtitleForceCfr) {
+            subParts.push(`setpts=N/(${safeSubFps}*TB)`);
+          } else if (Number.isFinite(safeTargetDur) && safeTargetDur > 0.2 && subtitleRecordedDurationSec !== void 0) {
+            const subProbe = await probeMediaInfo(subtitlePath);
+            const actualDur = subProbe.durationSec > 0.2 ? subProbe.durationSec : Number(subtitleRecordedDurationSec);
+            if (Number.isFinite(actualDur) && actualDur > 0.2) {
+              const ptsScale = safeTargetDur / actualDur;
+              if (Math.abs(ptsScale - 1) > 0.02 && ptsScale > 0.1 && ptsScale < 10) {
+                subParts.push(`setpts=PTS*${ptsScale.toFixed(6)}`);
+              }
+            }
+          }
+          subParts.push(`scale=${outW}:${listH}`, "setsar=1", "fps=24", "format=yuv420p");
+          filterChains.push(`[${subIdx}:v]${subParts.join(",")}[subv]`);
+          filterChains.push(`[topv][subv]vstack=inputs=2:shortest=1[outv]`);
+          finalVideoLabel = "[outv]";
+        }
+        let origWavPath = null;
+        if (sourceProbe.hasAudio && normalizedScenes.length > 0) {
+          const segResults = new Array(normalizedScenes.length).fill(null);
+          const extractOne = async (i) => {
+            const sc = normalizedScenes[i];
+            const segOut = path.join(tmpDir, `seg-${i}.wav`);
+            let extracted = false;
+            try {
+              await execFileAsync(
+                "ffmpeg",
+                [
+                  "-y",
+                  "-vn",
+                  "-ss",
+                  String(sc.startSec),
+                  "-t",
+                  String(sc.durationSec),
+                  "-i",
+                  uploadedPath,
+                  "-af",
+                  `aresample=44100:async=1,apad,atrim=0:${sc.durationSec.toFixed(4)}`,
+                  "-ac",
+                  "2",
+                  "-ar",
+                  "44100",
+                  segOut
+                ],
+                execOpts
+              );
+              extracted = fs.existsSync(segOut) && fs.statSync(segOut).size > 44;
+            } catch {
+              extracted = false;
+            }
+            if (!extracted && !ffmpegAbort.signal.aborted) {
+              try {
+                await execFileAsync(
+                  "ffmpeg",
+                  [
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "anullsrc=r=44100:cl=stereo",
+                    "-t",
+                    sc.durationSec.toFixed(4),
+                    "-ac",
+                    "2",
+                    "-ar",
+                    "44100",
+                    segOut
+                  ],
+                  execOpts
+                );
+                extracted = fs.existsSync(segOut) && fs.statSync(segOut).size > 44;
+              } catch {
+                extracted = false;
+              }
+            }
+            if (extracted) segResults[i] = segOut;
+          };
+          for (let batchStart = 0; batchStart < normalizedScenes.length; batchStart += 4) {
+            if (ffmpegAbort.signal.aborted) break;
+            const batch = [];
+            for (let idx = batchStart; idx < Math.min(normalizedScenes.length, batchStart + 4); idx++) {
+              batch.push(extractOne(idx));
+            }
+            await Promise.all(batch);
+          }
+          const segFiles = segResults.filter((s) => Boolean(s));
+          if (segFiles.length === 1) {
+            origWavPath = segFiles[0];
+          } else if (segFiles.length > 1) {
+            const mergedWav = path.join(tmpDir, "original-cuts.wav");
+            const concatInputArgs = [];
+            const concatLabels = [];
+            for (let i = 0; i < segFiles.length; i++) {
+              concatInputArgs.push("-i", segFiles[i]);
+              concatLabels.push(`[${i}:a]`);
+            }
+            await execFileAsync(
+              "ffmpeg",
+              [
+                "-y",
+                ...concatInputArgs,
+                "-filter_complex",
+                `${concatLabels.join("")}concat=n=${segFiles.length}:v=0:a=1[outa]`,
+                "-map",
+                "[outa]",
+                "-ac",
+                "2",
+                "-ar",
+                "44100",
+                mergedWav
+              ],
+              execOpts
+            );
+            origWavPath = mergedWav;
+          }
+        }
+        const audioArgs = [];
+        if (origWavPath) {
+          const audioIdx = nextInputIdx++;
+          ffmpegInputs.push("-i", origWavPath);
+          const audioFilters = buildVoiceAudioFilters(voiceSettings);
+          audioArgs.push(
+            "-map",
+            `${audioIdx}:a:0`,
+            "-af",
+            audioFilters.join(","),
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-ar",
+            "44100",
+            "-ac",
+            "2",
+            "-shortest"
+          );
+        } else {
+          audioArgs.push("-an");
+        }
+        await execFileAsync(
+          "ffmpeg",
+          [
+            "-y",
+            ...ffmpegInputs,
+            "-filter_complex",
+            filterChains.join(";"),
+            "-map",
+            finalVideoLabel,
+            ...audioArgs,
+            "-c:v",
+            "libx264",
+            "-preset",
+            "superfast",
+            "-crf",
+            "25",
+            "-maxrate",
+            "1800k",
+            "-bufsize",
+            "3600k",
+            "-pix_fmt",
+            "yuv420p",
+            "-profile:v",
+            "main",
+            "-level",
+            "4.0",
+            "-r",
+            "24",
+            "-vsync",
+            "cfr",
+            "-movflags",
+            "+faststart",
+            outputMp4Path
+          ],
+          execOpts
+        );
+        if (!fs.existsSync(outputMp4Path) || fs.statSync(outputMp4Path).size < 512) {
+          return null;
+        }
+        return registerCompletedExport(outputMp4Path, fileName);
+      },
+      { markFinalized: true }
+    );
+    if (ffmpegAbort.signal.aborted) {
+      return;
+    }
+    if (!entry) {
+      res.status(404).json({ error: "Uploaded video file not found or export failed." });
+      return;
+    }
+    res.json({
+      exportId: entry.id,
+      downloadUrl: `/api/download-export/${encodeURIComponent(entry.id)}`,
+      fileName: entry.fileName,
+      sizeBytes: entry.sizeBytes
+    });
+  } catch (err) {
+    if (ffmpegAbort.signal.aborted) {
+      return;
+    }
+    console.error("Fast export MP4 error:", err);
+    res.status(500).json({
+      error: err instanceof Error ? err.message : "Failed to export 9:16 MP4."
+    });
+  } finally {
+    res.off("close", onClientClose);
+    if (subtitleUploadId) {
+      await deleteUploadSession(subtitleUploadId);
+    }
+    await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {
+    });
+  }
+});
+app.get("/api/download-export/:exportId", (req, res) => {
+  const exportId = String(req.params.exportId || "");
+  if (!/^[a-zA-Z0-9_-]{8,64}$/.test(exportId)) {
+    res.status(400).json({ error: "Invalid export ID." });
+    return;
+  }
+  const entry = completedExports.get(exportId);
+  if (!entry || !fs.existsSync(entry.filePath)) {
+    completedExports.delete(exportId);
+    res.status(404).json({ error: "Exported video expired or not found. Please export again." });
+    return;
+  }
+  entry.createdAt = Date.now();
+  const totalSize = entry.sizeBytes;
+  const rangeHeader = typeof req.headers.range === "string" ? req.headers.range.trim() : "";
+  res.setHeader("Accept-Ranges", "bytes");
+  res.setHeader("Content-Type", "video/mp4");
+  res.setHeader("Content-Disposition", `attachment; filename="${entry.fileName}"`);
+  res.setHeader("Cache-Control", "no-store");
+  if (rangeHeader) {
+    const match = /^bytes=(\d*)-(\d*)$/i.exec(rangeHeader);
+    if (!match) {
+      res.status(416).setHeader("Content-Range", `bytes */${totalSize}`).end();
+      return;
+    }
+    const start = match[1] ? Number(match[1]) : 0;
+    const requestedEnd = match[2] ? Number(match[2]) : totalSize - 1;
+    if (!Number.isFinite(start) || !Number.isFinite(requestedEnd) || start < 0 || start >= totalSize || requestedEnd < start) {
+      res.status(416).setHeader("Content-Range", `bytes */${totalSize}`).end();
+      return;
+    }
+    const end = Math.min(totalSize - 1, requestedEnd);
+    const chunkLength = end - start + 1;
+    res.status(206);
+    res.setHeader("Content-Range", `bytes ${start}-${end}/${totalSize}`);
+    res.setHeader("Content-Length", String(chunkLength));
+    const stream2 = fs.createReadStream(entry.filePath, { start, end });
+    stream2.on("error", () => {
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Failed to stream exported video chunk." });
+      } else {
+        res.end();
+      }
+    });
+    stream2.pipe(res);
+    return;
+  }
+  res.setHeader("Content-Length", String(totalSize));
+  const stream = fs.createReadStream(entry.filePath);
+  stream.on("error", () => {
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Failed to stream exported video." });
+    } else {
+      res.end();
+    }
+  });
+  stream.pipe(res);
 });
 app.use("/api", (_req, res) => {
   res.status(404).json({ error: "API endpoint not found." });

@@ -68,6 +68,7 @@ export type WorkspaceTab =
 interface WorkspaceSidebarProps {
   activeTab: WorkspaceTab;
   onTabChange: (tab: WorkspaceTab) => void;
+  isWorkspaceVisible?: boolean;
   videos: YouTubeVideo[];
   selectedVideoId?: string;
   activeQuery: string;
@@ -199,6 +200,7 @@ function formatRangeSec(sec: number): string {
 export function WorkspaceSidebar({
   activeTab,
   onTabChange,
+  isWorkspaceVisible = true,
   videos,
   selectedVideoId,
   activeQuery,
@@ -383,7 +385,7 @@ export function WorkspaceSidebar({
   return (
     <div className="flex flex-col h-full min-h-0">
       {/* Minimal Segmented Switch */}
-      <div className="flex items-center justify-between gap-4 pb-3 border-b border-neutral-200 dark:border-neutral-800 shrink-0">
+      <div className={`flex items-center justify-between gap-4 border-b border-neutral-200 dark:border-neutral-800 shrink-0 ${inlineStage ? "pb-2" : "pb-3"}`}>
         <div className="inline-flex items-center p-1 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 overflow-x-auto no-scrollbar max-w-full">
           <button
             type="button"
@@ -480,7 +482,7 @@ export function WorkspaceSidebar({
       {/* Tab Body */}
       <div
         ref={scrollRootRef}
-        className={`flex-1 overflow-y-auto pr-1 min-h-0 ${inlineStage ? "pt-3" : "pt-4"}`}
+        className={`flex-1 overflow-y-auto overscroll-y-contain pr-1 min-h-0 ${inlineStage ? "pt-2" : "pt-4"}`}
       >
         {isProcessing && (
           <div className="mb-4 px-4 py-3 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-900 flex items-center justify-between gap-3 text-sm text-neutral-800 dark:text-neutral-200">
@@ -739,6 +741,7 @@ export function WorkspaceSidebar({
             hasMoreVideos={hasMoreVideos}
             isLoadingMore={isLoadingMore}
             isSearching={isSearching}
+            isWorkspaceVisible={isWorkspaceVisible}
             initialSec={ytPreviewSec}
             seekRequest={ytSeekRequest}
             onSelectPreviewVideo={onSelectVideo}
@@ -754,7 +757,7 @@ export function WorkspaceSidebar({
               media={localMedia}
               scenes={selectedScenes}
               isProcessing={isProcessing}
-              isTabActive={activeTab === "scenes"}
+              isTabActive={isWorkspaceVisible && activeTab === "scenes"}
               translationTone={editSettings.translationTone}
               onChangeTranslationTone={(tone) =>
                 onChangeEditSettings({ ...editSettings, translationTone: tone })
@@ -775,6 +778,7 @@ export function WorkspaceSidebar({
             media={null}
             scenes={selectedScenes}
             isProcessing={isProcessing}
+            isTabActive={isWorkspaceVisible && activeTab === "scenes"}
             translationTone={editSettings.translationTone}
             onChangeTranslationTone={(tone) =>
               onChangeEditSettings({ ...editSettings, translationTone: tone })
@@ -808,7 +812,7 @@ export function WorkspaceSidebar({
             project={project}
             cutTime={cutTime}
             isPlaying={isPlaying}
-            isTabActive={activeTab === "edit"}
+            isTabActive={isWorkspaceVisible && activeTab === "edit"}
             timelineDirty={timelineDirty}
             onChange={onChangeEditSettings}
             onChangeVoiceSettings={onChangeVoiceSettings}

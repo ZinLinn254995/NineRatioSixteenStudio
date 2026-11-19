@@ -94,6 +94,8 @@ export function LocalVideoTimelineEditor({
 }: LocalVideoTimelineEditorProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
+  const isTabActiveRef = useRef(isTabActive);
+  isTabActiveRef.current = isTabActive;
 
   const [sourceDuration, setSourceDuration] = useState<number>(() =>
     Math.max(1, media.durationSec || 30)
@@ -113,7 +115,6 @@ export function LocalVideoTimelineEditor({
     nextStartSec: number;
     nextEndSec: number;
   } | null>(null);
-  const [dragState, setDragState] = useState<DragMode | null>(null);
   const [frozenTrackTime, setFrozenTrackTime] = useState<number | null>(null);
   const [dragBadge, setDragBadge] = useState<{ label: string; sec: number } | null>(null);
   const [thumbnails, setThumbnails] = useState<string[]>([]);
@@ -121,9 +122,11 @@ export function LocalVideoTimelineEditor({
   const [playError, setPlayError] = useState<string | null>(null);
 
   const dragStateRef = useRef<DragMode | null>(null);
+  const windowDragCleanupRef = useRef<(() => void) | null>(null);
+  const pointerMoveHandlerRef = useRef<(e: PointerEvent) => void>(() => {});
+  const pointerUpHandlerRef = useRef<(e: PointerEvent) => void>(() => {});
   const updateDragState = useCallback((next: DragMode | null) => {
     dragStateRef.current = next;
-    setDragState(next);
   }, []);
   const frozenTrackTimeRef = useRef<number | null>(null);
   const trimPreviewRef = useRef<{
@@ -221,13 +224,27 @@ export function LocalVideoTimelineEditor({
     setSourceDuration(Math.max(1, safeDur));
   }, [media.localUrl]);
 
-  // Pause timeline playback when user switches away from Watch & Scenes tab
+  // Pause timeline playback and clean up active drag/pointer state when tab or workspace is hidden
   useEffect(() => {
-    if (!isTabActive && videoRef.current && !videoRef.current.paused) {
-      videoRef.current.pause();
+    if (!isTabActive) {
+      if (videoRef.current && !videoRef.current.paused) {
+        videoRef.current.pause();
+      }
       setIsPlaying(false);
+      windowDragCleanupRef.current?.();
+      windowDragCleanupRef.current = null;
+      activePointersRef.current.clear();
+      pinchStartRef.current = null;
+      tappedClipRef.current = null;
+      trimPreUndoRef.current = null;
+      trimPreviewRef.current = null;
+      setTrimPreview(null);
+      frozenTrackTimeRef.current = null;
+      setFrozenTrackTime(null);
+      setDragBadge(null);
+      updateDragState(null);
     }
-  }, [isTabActive]);
+  }, [isTabActive, updateDragState]);
 
   // Clear activeSceneId only if the selected scene was removed (never auto-select clips)
   useEffect(() => {
@@ -445,6 +462,7 @@ export function LocalVideoTimelineEditor({
 
   const playFromCutTime = useCallback(
     (explicitCutTime?: number) => {
+      if (!isTabActiveRef.current) return;
       const vid = videoRef.current;
       const segs = segmentsRef.current;
       if (!vid || segs.length === 0) return;
@@ -481,14 +499,28 @@ export function LocalVideoTimelineEditor({
         setIsPlaying(true);
         playPromise
           .then(() => {
+            if (!isTabActiveRef.current) {
+              vid.pause();
+              setIsPlaying(false);
+              return;
+            }
             setIsPlaying(!vid.paused);
           })
           .catch(() => {
+            if (!isTabActiveRef.current) {
+              setIsPlaying(false);
+              return;
+            }
             if (!vid.muted) {
               vid.muted = true;
               vid
                 .play()
                 .then(() => {
+                  if (!isTabActiveRef.current) {
+                    vid.pause();
+                    setIsPlaying(false);
+                    return;
+                  }
                   setIsPlaying(!vid.paused);
                 })
                 .catch(() => {
@@ -501,6 +533,11 @@ export function LocalVideoTimelineEditor({
             }
           });
       } else {
+        if (!isTabActiveRef.current) {
+          vid.pause();
+          setIsPlaying(false);
+          return;
+        }
         setIsPlaying(!vid.paused);
       }
     },
@@ -508,6 +545,7 @@ export function LocalVideoTimelineEditor({
   );
 
   const togglePlay = useCallback(() => {
+    if (!isTabActiveRef.current) return;
     const vid = videoRef.current;
     if (!vid || segmentsRef.current.length === 0) return;
     if (vid.paused || vid.ended) {
@@ -720,6 +758,42 @@ export function LocalVideoTimelineEditor({
     }
   };
 
+  const stopWindowPointerTracking = useCallback(() => {
+    windowDragCleanupRef.current?.();
+    windowDragCleanupRef.current = null;
+  }, []);
+
+  const startWindowPointerTracking = useCallback(() => {
+    if (windowDragCleanupRef.current) return;
+    const onWinMove = (ev: PointerEvent) => {
+      pointerMoveHandlerRef.current(ev);
+    };
+    const onWinEnd = (ev: PointerEvent) => {
+      pointerUpHandlerRef.current(ev);
+    };
+    const onWinTouchMove = (ev: TouchEvent) => {
+      if (dragStateRef.current || activePointersRef.current.size > 0) {
+        if (ev.cancelable) ev.preventDefault();
+      }
+    };
+    window.addEventListener("pointermove", onWinMove, { passive: false });
+    window.addEventListener("pointerup", onWinEnd);
+    window.addEventListener("pointercancel", onWinEnd);
+    window.addEventListener("touchmove", onWinTouchMove, { passive: false });
+    windowDragCleanupRef.current = () => {
+      window.removeEventListener("pointermove", onWinMove);
+      window.removeEventListener("pointerup", onWinEnd);
+      window.removeEventListener("pointercancel", onWinEnd);
+      window.removeEventListener("touchmove", onWinTouchMove);
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      stopWindowPointerTracking();
+    };
+  }, [stopWindowPointerTracking]);
+
   // Multi-touch pinch + scrub start on timeline viewport (including empty scroll track below clips)
   const handlePointerDownViewport = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0 && e.pointerType === "mouse") return;
@@ -735,6 +809,8 @@ export function LocalVideoTimelineEditor({
     } catch {
       // ignore if capture unavailable
     }
+
+    startWindowPointerTracking();
 
     if (activePointersRef.current.size >= 2) {
       // Switch cleanly into two-finger pinch-to-zoom mode
@@ -781,6 +857,7 @@ export function LocalVideoTimelineEditor({
     } catch {
       // ignore
     }
+    startWindowPointerTracking();
     if (videoRef.current && !videoRef.current.paused) {
       videoRef.current.pause();
     }
@@ -811,13 +888,14 @@ export function LocalVideoTimelineEditor({
     });
   };
 
-  const handlePointerMoveViewport = (e: React.PointerEvent<HTMLElement>) => {
+  const handlePointerMoveViewport = (e: PointerEvent | React.PointerEvent<HTMLElement>) => {
     if (activePointersRef.current.has(e.pointerId)) {
       activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
     }
 
     // Two-finger touchscreen pinch-to-zoom
     if (activePointersRef.current.size >= 2 && pinchStartRef.current) {
+      if ("cancelable" in e && e.cancelable) e.preventDefault();
       const pts = Array.from(activePointersRef.current.values());
       const dist = Math.max(10, Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y));
       const nextZoom = clampZoom(
@@ -829,18 +907,23 @@ export function LocalVideoTimelineEditor({
 
     const activeDrag = dragStateRef.current;
     if (!activeDrag) return;
+    if ("cancelable" in e && e.cancelable) e.preventDefault();
     const dx = e.clientX - activeDrag.startClientX;
 
     if (activeDrag.type === "scrub") {
       if (activeDrag.axis === "pending") {
         const dy = e.clientY - activeDrag.startClientY;
+        const absDx = Math.abs(dx);
+        const absDy = Math.abs(dy);
         const dist = Math.hypot(dx, dy);
-        if (dist < 8 && Math.abs(dx) < 6) return;
+        if (dist < 7) return;
         const canScrollVertically = hasVerticalScrollRoom(viewportRef.current);
-        if (canScrollVertically && Math.abs(dy) >= 10 && Math.abs(dy) > Math.abs(dx) * 1.4) {
+        if (canScrollVertically && absDy > absDx * 1.15) {
           activeDrag.axis = "y";
+          scrollVerticalAncestors(viewportRef.current, -dy);
           activeDrag.lastClientY = e.clientY;
           tappedClipRef.current = null;
+          return;
         } else {
           activeDrag.axis = "x";
           if (videoRef.current && !videoRef.current.paused) {
@@ -930,6 +1013,9 @@ export function LocalVideoTimelineEditor({
       const activeDrag = dragStateRef.current;
       if (!activeDrag) {
         tappedClipRef.current = null;
+        if (activePointersRef.current.size === 0) {
+          stopWindowPointerTracking();
+        }
         return;
       }
       dragStateRef.current = null;
@@ -1009,21 +1095,15 @@ export function LocalVideoTimelineEditor({
       }
       setDragBadge(null);
       updateDragState(null);
+      if (activePointersRef.current.size === 0) {
+        stopWindowPointerTracking();
+      }
     },
-    [onUpdateScene, sourceDuration, updateDragState]
+    [onUpdateScene, sourceDuration, stopWindowPointerTracking, updateDragState]
   );
 
-  // Safety fallback if pointerup happens outside captured element
-  useEffect(() => {
-    if (!dragState) return;
-    const onWinUp = (ev: PointerEvent) => handlePointerUpAny(ev);
-    window.addEventListener("pointerup", onWinUp);
-    window.addEventListener("pointercancel", onWinUp);
-    return () => {
-      window.removeEventListener("pointerup", onWinUp);
-      window.removeEventListener("pointercancel", onWinUp);
-    };
-  }, [dragState, handlePointerUpAny]);
+  pointerMoveHandlerRef.current = handlePointerMoveViewport;
+  pointerUpHandlerRef.current = handlePointerUpAny;
 
   // Two-finger trackpad pinch-to-zoom (ctrlKey + wheel) & two-finger horizontal/vertical scroll scrub
   const wheelStateRef = useRef({ pxPerSec, seekCutTo });
@@ -1058,8 +1138,15 @@ export function LocalVideoTimelineEditor({
       wheelTargetCutRef.current = { cutTime: next, expiresAt: now + 240 };
       seek(next, true);
     };
+    const onTouchMove = (e: TouchEvent) => {
+      if (e.cancelable) e.preventDefault();
+    };
     el.addEventListener("wheel", onWheel, { passive: false });
-    return () => el.removeEventListener("wheel", onWheel);
+    el.addEventListener("touchmove", onTouchMove, { passive: false });
+    return () => {
+      el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("touchmove", onTouchMove);
+    };
   }, []);
 
   return (
@@ -1279,9 +1366,6 @@ export function LocalVideoTimelineEditor({
       <div
         ref={viewportRef}
         onPointerDown={handlePointerDownViewport}
-        onPointerMove={handlePointerMoveViewport}
-        onPointerUp={handlePointerUpAny}
-        onPointerCancel={handlePointerUpAny}
         className="relative h-48 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-neutral-100 dark:bg-neutral-900 overflow-hidden select-none touch-none [&_*]:touch-none cursor-grab active:cursor-grabbing"
       >
         {/* Full-Width Stationary Ruler Bar Background */}

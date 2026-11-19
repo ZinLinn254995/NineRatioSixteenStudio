@@ -156,7 +156,6 @@ export function ProjectTimelineEditor({
     nextStartSec: number;
     nextEndSec: number;
   } | null>(null);
-  const [dragState, setDragState] = useState<DragMode | null>(null);
   const [liveScrubCutTime, setLiveScrubCutTime] = useState<number | null>(null);
   const [frozenTrackTime, setFrozenTrackTime] = useState<number | null>(null);
   const [dragBadge, setDragBadge] = useState<{ label: string; sec: number } | null>(null);
@@ -165,9 +164,11 @@ export function ProjectTimelineEditor({
   const [undoStack, setUndoStack] = useState<UndoEntry[]>([]);
 
   const dragStateRef = useRef<DragMode | null>(null);
+  const windowDragCleanupRef = useRef<(() => void) | null>(null);
+  const pointerMoveHandlerRef = useRef<(e: PointerEvent) => void>(() => {});
+  const pointerUpHandlerRef = useRef<(e: PointerEvent) => void>(() => {});
   const updateDragState = useCallback((next: DragMode | null) => {
     dragStateRef.current = next;
-    setDragState(next);
   }, []);
   const liveScrubCutRef = useRef<number | null>(null);
   liveScrubCutRef.current = liveScrubCutTime;
@@ -674,6 +675,42 @@ export function ProjectTimelineEditor({
     }
   };
 
+  const stopWindowPointerTracking = useCallback(() => {
+    windowDragCleanupRef.current?.();
+    windowDragCleanupRef.current = null;
+  }, []);
+
+  const startWindowPointerTracking = useCallback(() => {
+    if (windowDragCleanupRef.current) return;
+    const onWinMove = (ev: PointerEvent) => {
+      pointerMoveHandlerRef.current(ev);
+    };
+    const onWinEnd = (ev: PointerEvent) => {
+      pointerUpHandlerRef.current(ev);
+    };
+    const onWinTouchMove = (ev: TouchEvent) => {
+      if (dragStateRef.current || activePointersRef.current.size > 0) {
+        if (ev.cancelable) ev.preventDefault();
+      }
+    };
+    window.addEventListener("pointermove", onWinMove, { passive: false });
+    window.addEventListener("pointerup", onWinEnd);
+    window.addEventListener("pointercancel", onWinEnd);
+    window.addEventListener("touchmove", onWinTouchMove, { passive: false });
+    windowDragCleanupRef.current = () => {
+      window.removeEventListener("pointermove", onWinMove);
+      window.removeEventListener("pointerup", onWinEnd);
+      window.removeEventListener("pointercancel", onWinEnd);
+      window.removeEventListener("touchmove", onWinTouchMove);
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      stopWindowPointerTracking();
+    };
+  }, [stopWindowPointerTracking]);
+
   const handlePointerDownViewport = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0 && e.pointerType === "mouse") return;
     blurFocusedButton();
@@ -688,6 +725,8 @@ export function ProjectTimelineEditor({
     } catch {
       // ignore if capture unavailable
     }
+
+    startWindowPointerTracking();
 
     if (activePointersRef.current.size >= 2) {
       if (isPlaying) onPause();
@@ -732,6 +771,7 @@ export function ProjectTimelineEditor({
     } catch {
       // ignore
     }
+    startWindowPointerTracking();
     if (isPlaying) onPause();
 
     const curProj = projectRef.current;
@@ -785,6 +825,7 @@ export function ProjectTimelineEditor({
     } catch {
       // ignore
     }
+    startWindowPointerTracking();
     if (isPlaying) onPause();
 
     const curProj = projectRef.current;
@@ -816,12 +857,13 @@ export function ProjectTimelineEditor({
     });
   };
 
-  const handlePointerMoveViewport = (e: React.PointerEvent<HTMLElement>) => {
+  const handlePointerMoveViewport = (e: PointerEvent | React.PointerEvent<HTMLElement>) => {
     if (activePointersRef.current.has(e.pointerId)) {
       activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
     }
 
     if (activePointersRef.current.size >= 2 && pinchStartRef.current) {
+      if ("cancelable" in e && e.cancelable) e.preventDefault();
       const pts = Array.from(activePointersRef.current.values());
       const dist = Math.max(10, Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y));
       const nextZoom = clampZoom(
@@ -833,19 +875,24 @@ export function ProjectTimelineEditor({
 
     const activeDrag = dragStateRef.current;
     if (!activeDrag) return;
+    if ("cancelable" in e && e.cancelable) e.preventDefault();
     const dx = e.clientX - activeDrag.startClientX;
 
     if (activeDrag.type === "scrub") {
       if (activeDrag.axis === "pending") {
         const dy = e.clientY - activeDrag.startClientY;
+        const absDx = Math.abs(dx);
+        const absDy = Math.abs(dy);
         const dist = Math.hypot(dx, dy);
-        if (dist < 8 && Math.abs(dx) < 6) return;
+        if (dist < 7) return;
         const canScrollVertically = hasVerticalScrollRoom(viewportRef.current);
-        if (canScrollVertically && Math.abs(dy) >= 10 && Math.abs(dy) > Math.abs(dx) * 1.4) {
+        if (canScrollVertically && absDy > absDx * 1.15) {
           activeDrag.axis = "y";
+          scrollVerticalAncestors(viewportRef.current, -dy);
           activeDrag.lastClientY = e.clientY;
           tappedClipRef.current = null;
           tappedSubRef.current = null;
+          return;
         } else {
           activeDrag.axis = "x";
           if (isPlaying) onPause();
@@ -992,6 +1039,9 @@ export function ProjectTimelineEditor({
       if (!activeDrag) {
         tappedClipRef.current = null;
         tappedSubRef.current = null;
+        if (activePointersRef.current.size === 0) {
+          stopWindowPointerTracking();
+        }
         return;
       }
       dragStateRef.current = null;
@@ -1098,21 +1148,15 @@ export function ProjectTimelineEditor({
 
       setDragBadge(null);
       updateDragState(null);
+      if (activePointersRef.current.size === 0) {
+        stopWindowPointerTracking();
+      }
     },
-    [dispatchSeek, onUpdateScenes, onUpdateSubtitleTiming, updateDragState]
+    [dispatchSeek, onUpdateScenes, onUpdateSubtitleTiming, stopWindowPointerTracking, updateDragState]
   );
 
-  // Safety fallback if pointerup happens outside captured element
-  useEffect(() => {
-    if (!dragState) return;
-    const onWinUp = (ev: PointerEvent) => handlePointerUpAny(ev);
-    window.addEventListener("pointerup", onWinUp);
-    window.addEventListener("pointercancel", onWinUp);
-    return () => {
-      window.removeEventListener("pointerup", onWinUp);
-      window.removeEventListener("pointercancel", onWinUp);
-    };
-  }, [dragState, handlePointerUpAny]);
+  pointerMoveHandlerRef.current = handlePointerMoveViewport;
+  pointerUpHandlerRef.current = handlePointerUpAny;
 
   // Two-finger trackpad pinch-to-zoom (ctrlKey + wheel) & horizontal/vertical scroll scrub
   const wheelStateRef = useRef({ pxPerSec, dispatchSeek, isPlaying, onPause });
@@ -1165,8 +1209,15 @@ export function ProjectTimelineEditor({
         setLiveScrubCutTime(null);
       }, 220);
     };
+    const onTouchMove = (e: TouchEvent) => {
+      if (e.cancelable) e.preventDefault();
+    };
     el.addEventListener("wheel", onWheel, { passive: false });
-    return () => el.removeEventListener("wheel", onWheel);
+    el.addEventListener("touchmove", onTouchMove, { passive: false });
+    return () => {
+      el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("touchmove", onTouchMove);
+    };
   }, [projectIdentity]);
 
   // Empty "No video" state when subtitles have not been generated yet
@@ -1326,9 +1377,6 @@ export function ProjectTimelineEditor({
       <div
         ref={viewportRef}
         onPointerDown={handlePointerDownViewport}
-        onPointerMove={handlePointerMoveViewport}
-        onPointerUp={handlePointerUpAny}
-        onPointerCancel={handlePointerUpAny}
         className="relative h-64 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-neutral-100 dark:bg-neutral-900 overflow-hidden select-none touch-none [&_*]:touch-none cursor-grab active:cursor-grabbing"
       >
         {/* Full-Width Stationary Ruler Bar Background */}

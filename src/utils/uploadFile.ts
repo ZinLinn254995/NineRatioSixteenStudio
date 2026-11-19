@@ -1,4 +1,4 @@
-const CHUNK_SIZE_BYTES = 4 * 1024 * 1024; // 4 MB chunks (safely under proxy/Cloud Run 32 MB limit)
+const CHUNK_SIZE_BYTES = 8 * 1024 * 1024; // 8 MB chunks (safely under Express 16 MB & Cloud Run 32 MB limits)
 const MAX_UPLOAD_BYTES = 500 * 1024 * 1024; // 500 MB cumulative upload limit
 
 export async function safeReadJson<T = Record<string, unknown>>(resp: Response): Promise<T> {
@@ -40,10 +40,41 @@ async function abortUploadSession(uploadId: string): Promise<void> {
   }
 }
 
+function createTimedSignal(
+  timeoutMs: number,
+  externalSignal?: AbortSignal
+): { signal: AbortSignal; cleanup: () => void; didTimeout: () => boolean } {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = globalThis.setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+
+  const onExternalAbort = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      controller.abort();
+    } else {
+      externalSignal.addEventListener("abort", onExternalAbort, { once: true });
+    }
+  }
+
+  return {
+    signal: controller.signal,
+    didTimeout: () => timedOut,
+    cleanup: () => {
+      globalThis.clearTimeout(timer);
+      externalSignal?.removeEventListener("abort", onExternalAbort);
+    },
+  };
+}
+
 export async function uploadBlobInChunks(
   blob: Blob,
   fileName = "video.mp4",
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  onProgress?: (fraction: number) => void
 ): Promise<string> {
   if (!blob || blob.size <= 0) {
     throw new Error("Selected video file is empty or unreadable.");
@@ -55,12 +86,24 @@ export async function uploadBlobInChunks(
     throw new DOMException("Aborted", "AbortError");
   }
 
-  const initResp = await fetch("/api/upload-init", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ fileName, totalSize: blob.size }),
-    signal,
-  });
+  const initTimed = createTimedSignal(20_000, signal);
+  let initResp: Response;
+  try {
+    initResp = await fetch("/api/upload-init", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fileName, totalSize: blob.size }),
+      signal: initTimed.signal,
+    });
+  } catch (err) {
+    if (initTimed.didTimeout()) {
+      throw new Error("Timed out starting video upload. Please check your connection and try again.");
+    }
+    throw err;
+  } finally {
+    initTimed.cleanup();
+  }
+
   const initData = await safeReadJson<{ uploadId?: string; error?: string }>(initResp);
   if (!initResp.ok || !initData.uploadId) {
     throw new Error(initData.error || "Failed to start chunked upload.");
@@ -72,7 +115,8 @@ export async function uploadBlobInChunks(
       if (signal?.aborted) {
         throw new DOMException("Aborted", "AbortError");
       }
-      const chunk = blob.slice(offset, Math.min(blob.size, offset + CHUNK_SIZE_BYTES));
+      const chunkEnd = Math.min(blob.size, offset + CHUNK_SIZE_BYTES);
+      const chunk = blob.slice(offset, chunkEnd);
       let chunkUploaded = false;
       let lastErr: unknown = null;
 
@@ -80,6 +124,7 @@ export async function uploadBlobInChunks(
         if (signal?.aborted) {
           throw new DOMException("Aborted", "AbortError");
         }
+        const chunkTimed = createTimedSignal(45_000, signal);
         try {
           const chunkResp = await fetch("/api/upload-chunk", {
             method: "POST",
@@ -89,11 +134,12 @@ export async function uploadBlobInChunks(
               "x-chunk-offset": String(offset),
             },
             body: chunk,
-            signal,
+            signal: chunkTimed.signal,
           });
           const chunkData = await safeReadJson<{ ok?: boolean; error?: string }>(chunkResp);
           if (chunkResp.ok) {
             chunkUploaded = true;
+            onProgress?.(Math.min(1, chunkEnd / blob.size));
             break;
           }
           // Retry only on transient gateway/server errors
@@ -103,11 +149,16 @@ export async function uploadBlobInChunks(
             throw lastErr;
           }
         } catch (err) {
-          if (signal?.aborted || (err instanceof DOMException && err.name === "AbortError")) {
+          if (signal?.aborted) {
             throw err;
           }
-          lastErr = err;
-          if (attempt === 2) throw err;
+          const resolvedErr = chunkTimed.didTimeout()
+            ? new Error("Video upload chunk timed out. Please check your network and try again.")
+            : err;
+          lastErr = resolvedErr;
+          if (attempt === 2) throw resolvedErr;
+        } finally {
+          chunkTimed.cleanup();
         }
         await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
       }

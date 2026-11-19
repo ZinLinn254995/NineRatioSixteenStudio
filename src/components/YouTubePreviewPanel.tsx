@@ -5,11 +5,39 @@ import { loadYouTubeIframeAPI } from "../utils/youtubeApi";
 
 interface YTPreviewPlayer {
   seekTo: (seconds: number, allowSeekAhead: boolean) => void;
+  pauseVideo?: () => void;
   setPlaybackRate?: (rate: number) => void;
   getCurrentTime: () => number;
   getDuration: () => number;
   getIframe?: () => HTMLIFrameElement;
   destroy: () => void;
+}
+
+export interface YouTubePlayerInstanceGuard {
+  nextToken: () => number;
+  isCurrent: (token: number) => boolean;
+  invalidate: () => number;
+  getCurrentToken: () => number;
+}
+
+/**
+ * Pure monotonic instance token guard ensuring stale async YouTube IFrame callbacks
+ * or cleanups can never mutate, play, or destroy a newer player instance.
+ */
+export function createYouTubePlayerInstanceGuard(): YouTubePlayerInstanceGuard {
+  let token = 0;
+  return {
+    nextToken: () => {
+      token += 1;
+      return token;
+    },
+    isCurrent: (candidate: number) => candidate > 0 && candidate === token,
+    invalidate: () => {
+      token += 1;
+      return token;
+    },
+    getCurrentToken: () => token,
+  };
 }
 
 interface YouTubePreviewPanelProps {
@@ -18,6 +46,7 @@ interface YouTubePreviewPanelProps {
   hasMoreVideos: boolean;
   isLoadingMore: boolean;
   isSearching: boolean;
+  isWorkspaceVisible?: boolean;
   initialSec?: number;
   seekRequest?: { sec: number; nonce: number } | null;
   onSelectPreviewVideo: (video: YouTubeVideo) => void;
@@ -32,6 +61,7 @@ export function YouTubePreviewPanel({
   hasMoreVideos,
   isLoadingMore,
   isSearching,
+  isWorkspaceVisible = true,
   initialSec = 0,
   seekRequest,
   onSelectPreviewVideo,
@@ -42,6 +72,8 @@ export function YouTubePreviewPanel({
   const ytHostRef = useRef<HTMLDivElement | null>(null);
   const ytPlayerRef = useRef<YTPreviewPlayer | null>(null);
   const ytReadyRef = useRef(false);
+  const instanceGuardRef = useRef<YouTubePlayerInstanceGuard>(createYouTubePlayerInstanceGuard());
+  const savedTimeRef = useRef<number>(initialSec > 0 ? initialSec : 0);
   const pendingSeekRef = useRef<number | null>(initialSec > 0 ? initialSec : null);
   const pendingNextAfterLoadRef = useRef(false);
 
@@ -69,7 +101,9 @@ export function YouTubePreviewPanel({
 
   useEffect(() => {
     setCopiedLink(false);
-    pendingSeekRef.current = initialSec > 0 ? initialSec : null;
+    const startSec = initialSec > 0 ? initialSec : 0;
+    savedTimeRef.current = startSec;
+    pendingSeekRef.current = startSec > 0 ? startSec : null;
   }, [media?.videoId]);
 
   useEffect(() => {
@@ -122,9 +156,44 @@ export function YouTubePreviewPanel({
   };
 
   useEffect(() => {
-    if (!media || media.sourceType !== "youtube" || !media.videoId || !ytHostRef.current) return;
+    const guard = instanceGuardRef.current;
 
-    let cancelled = false;
+    // When workspace is hidden or no YouTube video is active, safely pause & tear down
+    // the active iframe instance while preserving the current playback timestamp.
+    if (!isWorkspaceVisible || !media || media.sourceType !== "youtube" || !media.videoId || !ytHostRef.current) {
+      if (ytPlayerRef.current && ytReadyRef.current) {
+        try {
+          const t = ytPlayerRef.current.getCurrentTime?.();
+          if (typeof t === "number" && Number.isFinite(t) && t >= 0) {
+            savedTimeRef.current = t;
+            onCurrentSecChangeRef.current?.(Math.floor(t));
+          }
+        } catch {
+          // ignore
+        }
+      }
+      guard.invalidate();
+      ytReadyRef.current = false;
+      const existing = ytPlayerRef.current;
+      ytPlayerRef.current = null;
+      if (existing) {
+        try {
+          existing.pauseVideo?.();
+          existing.destroy();
+        } catch {
+          // ignore
+        }
+      }
+      if (ytHostRef.current) {
+        ytHostRef.current.innerHTML = "";
+      }
+      return;
+    }
+
+    const myToken = guard.nextToken();
+    let localPlayer: YTPreviewPlayer | null = null;
+    let localReady = false;
+
     ytReadyRef.current = false;
     setYtError(null);
     const mountEl = document.createElement("div");
@@ -134,9 +203,15 @@ export function YouTubePreviewPanel({
 
     loadYouTubeIframeAPI()
       .then(() => {
-        if (cancelled || !window.YT?.Player) return;
-        const startAt = pendingSeekRef.current ?? initialSec;
+        if (!guard.isCurrent(myToken) || !window.YT?.Player) return;
+        const startAt =
+          pendingSeekRef.current !== null
+            ? pendingSeekRef.current
+            : savedTimeRef.current > 0
+              ? savedTimeRef.current
+              : initialSec;
         const playerVars: Record<string, string | number> = {
+          autoplay: 0,
           controls: 1,
           rel: 0,
           modestbranding: 1,
@@ -146,14 +221,23 @@ export function YouTubePreviewPanel({
         if (window.location.origin.startsWith("http")) {
           playerVars.origin = window.location.origin;
         }
-        const p = new window.YT.Player(mountEl, {
+        const created = new window.YT.Player(mountEl, {
           width: "100%",
           height: "100%",
           videoId: media.videoId!,
           playerVars,
           events: {
             onReady: (e) => {
-              if (cancelled) return;
+              if (!guard.isCurrent(myToken)) {
+                try {
+                  e.target.pauseVideo?.();
+                  created.destroy();
+                } catch {
+                  // ignore
+                }
+                return;
+              }
+              localReady = true;
               ytReadyRef.current = true;
               try {
                 const iframe = e.target.getIframe?.();
@@ -168,17 +252,12 @@ export function YouTubePreviewPanel({
               if (d && Number.isFinite(d) && d > 0) {
                 onDetectedDurationRef.current?.(Math.round(d));
               }
-              if (pendingSeekRef.current !== null && pendingSeekRef.current > 0.5) {
-                try {
-                  e.target.seekTo(pendingSeekRef.current, true);
-                } catch {
-                  // ignore
-                }
-              }
+              // Position is already cued at playerVars.start with autoplay: 0;
+              // avoid calling seekTo on mount/recreate so YouTube never autoplays unexpectedly.
               pendingSeekRef.current = null;
             },
             onError: (e) => {
-              if (cancelled) return;
+              if (!guard.isCurrent(myToken)) return;
               if (e.data === 101 || e.data === 150) {
                 setYtError("Video owner disabled embedded playback. Try Next video or another clip.");
               } else {
@@ -187,18 +266,32 @@ export function YouTubePreviewPanel({
             },
           },
         }) as unknown as YTPreviewPlayer;
-        ytPlayerRef.current = p;
+
+        localPlayer = created;
+        if (!guard.isCurrent(myToken)) {
+          try {
+            created.pauseVideo?.();
+            created.destroy();
+          } catch {
+            // ignore
+          }
+          localPlayer = null;
+          return;
+        }
+        ytPlayerRef.current = created;
       })
       .catch(() => {
-        if (!cancelled) {
+        if (guard.isCurrent(myToken)) {
           setYtError("Could not initialize YouTube player.");
         }
       });
 
     const interval = setInterval(() => {
+      if (!guard.isCurrent(myToken) || !localReady || !localPlayer) return;
       try {
-        const t = ytPlayerRef.current?.getCurrentTime?.();
-        if (typeof t === "number" && Number.isFinite(t)) {
+        const t = localPlayer.getCurrentTime?.();
+        if (typeof t === "number" && Number.isFinite(t) && t >= 0) {
+          savedTimeRef.current = t;
           onCurrentSecChangeRef.current?.(Math.floor(t));
         }
       } catch {
@@ -207,21 +300,40 @@ export function YouTubePreviewPanel({
     }, 300);
 
     return () => {
-      cancelled = true;
-      ytReadyRef.current = false;
       clearInterval(interval);
-      try {
-        ytPlayerRef.current?.destroy();
-      } catch {
-        // ignore
+      if (localReady && localPlayer) {
+        try {
+          const t = localPlayer.getCurrentTime?.();
+          if (typeof t === "number" && Number.isFinite(t) && t >= 0) {
+            savedTimeRef.current = t;
+            onCurrentSecChangeRef.current?.(Math.floor(t));
+          }
+        } catch {
+          // ignore
+        }
       }
-      ytPlayerRef.current = null;
+      if (guard.isCurrent(myToken)) {
+        guard.invalidate();
+        ytReadyRef.current = false;
+      }
+      if (ytPlayerRef.current === localPlayer) {
+        ytPlayerRef.current = null;
+      }
+      if (localPlayer) {
+        try {
+          localPlayer.pauseVideo?.();
+          localPlayer.destroy();
+        } catch {
+          // ignore
+        }
+      }
     };
-  }, [media?.sourceType, media?.videoId]);
+  }, [media?.sourceType, media?.videoId, isWorkspaceVisible]);
 
   useEffect(() => {
     if (!seekRequest) return;
-    if (ytReadyRef.current && ytPlayerRef.current) {
+    savedTimeRef.current = seekRequest.sec;
+    if (isWorkspaceVisible && ytReadyRef.current && ytPlayerRef.current) {
       try {
         ytPlayerRef.current.seekTo(seekRequest.sec, true);
         onCurrentSecChangeRef.current?.(Math.floor(seekRequest.sec));
@@ -231,7 +343,7 @@ export function YouTubePreviewPanel({
     } else {
       pendingSeekRef.current = seekRequest.sec;
     }
-  }, [seekRequest]);
+  }, [seekRequest, isWorkspaceVisible]);
 
   if (!media || media.sourceType !== "youtube" || !media.videoId) {
     return (

@@ -57,7 +57,26 @@ export function Stage9x16({
   const stageFrameRef = useRef<HTMLDivElement | null>(null);
   const listContainerRef = useRef<HTMLDivElement | null>(null);
   const itemRefs = useRef<Record<string, HTMLButtonElement | null>>({});
-  const dragStartRef = useRef<{ startY: number; startHeightPx: number } | null>(null);
+  const dragStartRef = useRef<{
+    startY: number;
+    startHeightPx: number;
+    pointerId: number | null;
+    source: "pointer" | "touch";
+  } | null>(null);
+  const dragCleanupRef = useRef<(() => void) | null>(null);
+  const resizeMetricsRef = useRef<{
+    minHeightPx: number;
+    maxHeightPx: number;
+    spanPx: number;
+    isCompactLayout: boolean;
+    onChangePreviewScale?: (scale: number) => void;
+  }>({
+    minHeightPx: 150,
+    maxHeightPx: 480,
+    spanPx: 330,
+    isCompactLayout: false,
+    onChangePreviewScale: undefined,
+  });
   const [outerWidth, setOuterWidth] = useState<number>(0);
   const [isResizing, setIsResizing] = useState(false);
   const [viewportMetrics, setViewportMetrics] = useState<{ height: number; isLg: boolean }>(() =>
@@ -137,10 +156,10 @@ export function Stage9x16({
   const clampedScale = Math.max(0, Math.min(1, previewScale));
   const isCompactLayout = compactMobile && !viewportMetrics.isLg;
   const minHeightPx = isCompactLayout
-    ? Math.max(150, Math.min(260, Math.round(viewportMetrics.height * 0.22)))
+    ? Math.max(120, Math.min(220, Math.round(viewportMetrics.height * 0.18)))
     : Math.max(240, Math.min(440, viewportMetrics.height - 340));
   const baseMaxHeightPx = isCompactLayout
-    ? Math.max(minHeightPx + 100, Math.min(520, Math.round(viewportMetrics.height * 0.56)))
+    ? Math.max(minHeightPx + 100, Math.min(480, Math.round(viewportMetrics.height * 0.5)))
     : Math.max(minHeightPx + 120, Math.min(840, viewportMetrics.height - 168));
   const maxHeightPx =
     outerWidth > 0
@@ -156,8 +175,113 @@ export function Stage9x16({
     outerWidth > 0 ? Math.min(targetStageWidthPx, outerWidth) : targetStageWidthPx;
   const stageScale = renderedStageWidthPx / 720;
 
+  resizeMetricsRef.current = {
+    minHeightPx,
+    maxHeightPx,
+    spanPx,
+    isCompactLayout,
+    onChangePreviewScale,
+  };
+
+  useEffect(() => {
+    return () => {
+      dragCleanupRef.current?.();
+      dragCleanupRef.current = null;
+      dragStartRef.current = null;
+    };
+  }, []);
+
   const scaleLabel =
     clampedScale < 0.28 ? "Small" : clampedScale > 0.72 ? "Large" : "Normal";
+
+  const applyDragClientY = (clientY: number) => {
+    const active = dragStartRef.current;
+    const {
+      minHeightPx: curMin,
+      maxHeightPx: curMax,
+      spanPx: curSpan,
+      isCompactLayout: compact,
+      onChangePreviewScale: notifyScale,
+    } = resizeMetricsRef.current;
+    if (!active || !notifyScale) return;
+    const dy = clientY - active.startY;
+    const sensitivity = compact ? 1.0 : 1.5;
+    const nextHeight = Math.max(
+      curMin,
+      Math.min(curMax, active.startHeightPx + dy * sensitivity)
+    );
+    const nextScale = Math.max(0, Math.min(1, (nextHeight - curMin) / curSpan));
+    notifyScale(Number(nextScale.toFixed(4)));
+  };
+
+  const endDragResize = () => {
+    dragCleanupRef.current?.();
+    dragCleanupRef.current = null;
+    if (!dragStartRef.current) return;
+    dragStartRef.current = null;
+    setIsResizing(false);
+  };
+
+  const beginDragSession = (
+    startY: number,
+    source: "pointer" | "touch",
+    pointerId: number | null
+  ) => {
+    dragCleanupRef.current?.();
+    dragStartRef.current = {
+      startY,
+      startHeightPx: frameHeightPx,
+      pointerId,
+      source,
+    };
+    setIsResizing(true);
+
+    const onWinPointerMove = (ev: PointerEvent) => {
+      const active = dragStartRef.current;
+      if (!active || active.source !== "pointer") return;
+      if (active.pointerId !== null && ev.pointerId !== active.pointerId) return;
+      if (ev.cancelable) ev.preventDefault();
+      applyDragClientY(ev.clientY);
+    };
+
+    const onWinPointerEnd = (ev: PointerEvent) => {
+      const active = dragStartRef.current;
+      if (!active || active.source !== "pointer") return;
+      if (active.pointerId !== null && ev.pointerId !== active.pointerId) return;
+      endDragResize();
+    };
+
+    const onWinTouchMove = (ev: TouchEvent) => {
+      const active = dragStartRef.current;
+      if (!active) return;
+      if (ev.cancelable) ev.preventDefault();
+      if (active.source === "touch" && ev.touches.length > 0) {
+        applyDragClientY(ev.touches[0].clientY);
+      }
+    };
+
+    const onWinTouchEnd = () => {
+      const active = dragStartRef.current;
+      if (!active) return;
+      endDragResize();
+    };
+
+    window.addEventListener("pointermove", onWinPointerMove, { passive: false });
+    window.addEventListener("pointerup", onWinPointerEnd);
+    window.addEventListener("pointercancel", onWinPointerEnd);
+    window.addEventListener("touchmove", onWinTouchMove, { passive: false });
+    window.addEventListener("touchend", onWinTouchEnd);
+    window.addEventListener("touchcancel", onWinTouchEnd);
+
+    dragCleanupRef.current = () => {
+      window.removeEventListener("pointermove", onWinPointerMove);
+      window.removeEventListener("pointerup", onWinPointerEnd);
+      window.removeEventListener("pointercancel", onWinPointerEnd);
+      window.removeEventListener("touchmove", onWinTouchMove);
+      window.removeEventListener("touchend", onWinTouchEnd);
+      window.removeEventListener("touchcancel", onWinTouchEnd);
+    };
+  };
 
   const handleDragPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!onChangePreviewScale) return;
@@ -168,31 +292,18 @@ export function Stage9x16({
     try {
       e.currentTarget.setPointerCapture(e.pointerId);
     } catch {
-      // ignore
+      // ignore if capture unavailable
     }
-    dragStartRef.current = {
-      startY: e.clientY,
-      startHeightPx: frameHeightPx,
-    };
-    setIsResizing(true);
+    beginDragSession(e.clientY, "pointer", e.pointerId);
   };
 
-  const handleDragPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!dragStartRef.current || !onChangePreviewScale) return;
-    const dy = e.clientY - dragStartRef.current.startY;
-    const sensitivity = isCompactLayout ? 1.0 : 1.5;
-    const nextHeight = Math.max(
-      minHeightPx,
-      Math.min(maxHeightPx, dragStartRef.current.startHeightPx + dy * sensitivity)
-    );
-    const nextScale = Math.max(0, Math.min(1, (nextHeight - minHeightPx) / spanPx));
-    onChangePreviewScale(Number(nextScale.toFixed(4)));
-  };
-
-  const endDragResize = () => {
-    if (!dragStartRef.current) return;
-    dragStartRef.current = null;
-    setIsResizing(false);
+  const handleDragTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
+    if (!onChangePreviewScale) return;
+    if (dragStartRef.current) return;
+    if (e.touches.length !== 1) return;
+    const target = e.target as HTMLElement | null;
+    if (target?.closest("button, input")) return;
+    beginDragSession(e.touches[0].clientY, "touch", null);
   };
 
   const handleDragDoubleClick = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -695,18 +806,17 @@ export function Stage9x16({
               : undefined
           }
           onPointerDown={onChangePreviewScale ? handleDragPointerDown : undefined}
-          onPointerMove={onChangePreviewScale ? handleDragPointerMove : undefined}
-          onPointerUp={onChangePreviewScale ? endDragResize : undefined}
-          onPointerCancel={onChangePreviewScale ? endDragResize : undefined}
-          onLostPointerCapture={onChangePreviewScale ? endDragResize : undefined}
+          onTouchStart={onChangePreviewScale ? handleDragTouchStart : undefined}
           onDoubleClick={onChangePreviewScale ? handleDragDoubleClick : undefined}
           onKeyDown={onChangePreviewScale ? handleDragKeyDown : undefined}
-          className={`relative group flex flex-col border transition-all duration-150 ${
+          className={`relative group flex flex-col border ${
+            isResizing ? "transition-none" : "transition-colors duration-150"
+          } ${
             onChangePreviewScale
               ? `w-[calc(100%+2rem)] -mx-4 sm:w-[calc(100%+3rem)] sm:-mx-6 lg:w-full lg:mx-0 rounded-none border-x-0 lg:rounded-xl lg:border-x cursor-ns-resize touch-none select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-950 dark:focus-visible:ring-white ${
                   compactMobile
-                    ? "px-4 sm:px-6 lg:px-3 pt-1.5 pb-2"
-                    : "px-4 sm:px-6 lg:px-3 pt-1.5 pb-2"
+                    ? "px-4 sm:px-6 lg:px-3 pt-1 pb-2"
+                    : "px-4 sm:px-6 lg:px-3 pt-1 pb-2"
                 } ${
                   isResizing
                     ? "border-neutral-950 dark:border-white bg-neutral-100 dark:bg-neutral-800/95 ring-2 ring-neutral-950/15 dark:ring-white/20 shadow-md"
@@ -715,18 +825,18 @@ export function Stage9x16({
               : "w-full border-transparent px-0 py-0"
           }`}
         >
-          {/* Visual Drag Bar Indicator along top of the Play row */}
+          {/* Dedicated touch-friendly Drag Bar Strip along top of the Play row */}
           {onChangePreviewScale && (
-            <div className="flex items-center justify-center pb-1 pointer-events-none">
+            <div className="flex items-center justify-center py-2 touch-none">
               <span
-                className={`h-1 rounded-full transition-all ${
+                className={`h-1.5 rounded-full transition-all ${
                   isResizing
-                    ? "w-14 bg-neutral-950 dark:bg-white"
-                    : "w-10 bg-neutral-300 dark:bg-neutral-700 group-hover:w-12 group-hover:bg-neutral-500 dark:group-hover:bg-neutral-400"
+                    ? "w-16 bg-neutral-950 dark:bg-white"
+                    : "w-12 bg-neutral-300 dark:bg-neutral-700 group-hover:w-14 group-hover:bg-neutral-500 dark:group-hover:bg-neutral-400"
                 }`}
               />
               {isResizing && (
-                <span className="absolute -top-6 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded-md bg-neutral-950 text-white dark:bg-white dark:text-neutral-950 text-[10px] font-mono-tabular font-semibold whitespace-nowrap shadow-sm">
+                <span className="pointer-events-none absolute -top-6 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded-md bg-neutral-950 text-white dark:bg-white dark:text-neutral-950 text-[10px] font-mono-tabular font-semibold whitespace-nowrap shadow-sm">
                   {scaleLabel} · {Math.round(clampedScale * 100)}%
                 </span>
               )}
@@ -741,6 +851,7 @@ export function Stage9x16({
             <button
               type="button"
               onPointerDown={(e) => e.stopPropagation()}
+              onTouchStart={(e) => e.stopPropagation()}
               onClick={() => {
                 if (playerRef.current) {
                   playerRef.current.togglePlay();
@@ -764,6 +875,7 @@ export function Stage9x16({
                 step={0.1}
                 value={cutTime}
                 onPointerDown={(e) => e.stopPropagation()}
+                onTouchStart={(e) => e.stopPropagation()}
                 onChange={(e) => onSeek(parseFloat(e.target.value))}
                 aria-label="Timeline scrubber"
                 className="w-full h-1.5 rounded-full appearance-none bg-neutral-200 dark:bg-neutral-800 accent-neutral-950 dark:accent-white cursor-pointer"
@@ -780,6 +892,7 @@ export function Stage9x16({
             <button
               type="button"
               onPointerDown={(e) => e.stopPropagation()}
+              onTouchStart={(e) => e.stopPropagation()}
               onClick={onToggleMute}
               aria-label={muted ? "Unmute original audio" : "Mute original audio"}
               className={`${
@@ -793,7 +906,7 @@ export function Stage9x16({
               <div
                 aria-hidden="true"
                 className={`flex items-center justify-center shrink-0 rounded-md transition-colors ${
-                  compactMobile ? "w-5 h-8 lg:w-6 lg:h-9" : "w-6 h-9"
+                  compactMobile ? "w-6 h-8 lg:w-6 lg:h-9" : "w-6 h-9"
                 } ${
                   isResizing
                     ? "text-neutral-950 dark:text-white bg-neutral-200/80 dark:bg-neutral-700/80"
@@ -817,16 +930,13 @@ export function Stage9x16({
             aria-valuenow={Math.round(clampedScale * 100)}
             title="Drag up to shrink · Drag down to enlarge · Double-click to reset Normal"
             onPointerDown={handleDragPointerDown}
-            onPointerMove={handleDragPointerMove}
-            onPointerUp={endDragResize}
-            onPointerCancel={endDragResize}
-            onLostPointerCapture={endDragResize}
+            onTouchStart={handleDragTouchStart}
             onDoubleClick={handleDragDoubleClick}
             onKeyDown={handleDragKeyDown}
-            className={`relative group w-[calc(100%+2rem)] -mx-4 sm:w-[calc(100%+3rem)] sm:-mx-6 lg:w-full lg:mx-0 h-8 rounded-none border-x-0 lg:rounded-xl lg:border-x border flex items-center justify-center gap-1.5 cursor-ns-resize touch-none select-none transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-950 dark:focus-visible:ring-white ${
+            className={`relative group w-[calc(100%+2rem)] -mx-4 sm:w-[calc(100%+3rem)] sm:-mx-6 lg:w-full lg:mx-0 h-9 rounded-none border-x-0 lg:rounded-xl lg:border-x border flex items-center justify-center gap-1.5 cursor-ns-resize touch-none select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-950 dark:focus-visible:ring-white ${
               isResizing
-                ? "border-neutral-950 dark:border-white bg-neutral-100 dark:bg-neutral-800 text-neutral-950 dark:text-white ring-2 ring-neutral-950/15 dark:ring-white/20 shadow-md"
-                : "border-neutral-200 dark:border-neutral-800 bg-neutral-50/90 dark:bg-neutral-900/90 text-neutral-500 dark:text-neutral-400 hover:border-neutral-400 dark:hover:border-neutral-600 hover:text-neutral-800 dark:hover:text-neutral-100"
+                ? "transition-none border-neutral-950 dark:border-white bg-neutral-100 dark:bg-neutral-800 text-neutral-950 dark:text-white ring-2 ring-neutral-950/15 dark:ring-white/20 shadow-md"
+                : "transition-colors duration-150 border-neutral-200 dark:border-neutral-800 bg-neutral-50/90 dark:bg-neutral-900/90 text-neutral-500 dark:text-neutral-400 hover:border-neutral-400 dark:hover:border-neutral-600 hover:text-neutral-800 dark:hover:text-neutral-100"
             }`}
           >
             <GripHorizontal className="w-4 h-4" />

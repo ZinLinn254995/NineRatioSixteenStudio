@@ -10,8 +10,213 @@ import { getEffectivePlaybackSpeed } from "./voicePresets";
 import { getSceneDurationSec } from "./projectTimeline";
 
 export interface ExportProgress {
-  phase: "preparing" | "rendering" | "muxing";
+  phase: "preparing" | "uploading" | "rendering" | "muxing" | "downloading";
   percent: number;
+  detail?: string;
+}
+
+export interface ExportedVideoResult {
+  blob: Blob;
+  blobUrl: string;
+  fileName: string;
+  sizeBytes: number;
+}
+
+function buildSafeMp4FileName(title: string): string {
+  const safeName = title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 36);
+  return `${safeName || "thai-burmese"}-9x16.mp4`;
+}
+
+function formatMb(bytes: number): string {
+  return (bytes / (1024 * 1024)).toFixed(1);
+}
+
+function isLikelyValidMp4Header(bytes: Uint8Array): boolean {
+  if (bytes.byteLength < 12) return false;
+  // ISO BMFF / MP4 box starts with 4-byte size + "ftyp" (0x66 0x74 0x79 0x70)
+  return (
+    bytes[4] === 0x66 &&
+    bytes[5] === 0x74 &&
+    bytes[6] === 0x79 &&
+    bytes[7] === 0x70
+  );
+}
+
+const DOWNLOAD_CHUNK_BYTES = 8 * 1024 * 1024; // 8 MB Range chunks (4x below Cloud Run 32 MB limit)
+
+async function fetchRangeChunkWithRetry(
+  downloadUrl: string,
+  start: number,
+  end: number,
+  signal?: AbortSignal
+): Promise<{ bytes: Uint8Array<ArrayBuffer>; totalSize: number }> {
+  let lastError: unknown = null;
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (signal?.aborted) {
+      throw new DOMException("Export cancelled by user.", "AbortError");
+    }
+
+    const ctrl = new AbortController();
+    let timedOut = false;
+    const timer = window.setTimeout(() => {
+      timedOut = true;
+      ctrl.abort();
+    }, 45_000);
+    const onExtAbort = () => ctrl.abort();
+    signal?.addEventListener("abort", onExtAbort, { once: true });
+
+    try {
+      const resp = await fetch(downloadUrl, {
+        method: "GET",
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: {
+          Range: `bytes=${start}-${end}`,
+        },
+        signal: ctrl.signal,
+      });
+
+      const contentType = (resp.headers.get("content-type") || "").toLowerCase();
+      if (contentType.includes("text/html")) {
+        throw new Error(
+          "Download was blocked by a browser session check. Please refresh and try again."
+        );
+      }
+
+      if (resp.status === 206 || resp.status === 200) {
+        const buf = await resp.arrayBuffer();
+        const bytes = new Uint8Array(buf);
+        let totalSize = 0;
+        const contentRange = resp.headers.get("content-range") || "";
+        const rangeMatch = /\/(\d+)$/.exec(contentRange);
+        if (rangeMatch) {
+          totalSize = Number(rangeMatch[1]) || 0;
+        } else if (resp.status === 200) {
+          totalSize = Number(resp.headers.get("content-length") || 0) || bytes.byteLength;
+        }
+        return { bytes, totalSize };
+      }
+
+      const retryable = resp.status >= 500 || resp.status === 429;
+      lastError = new Error(`Failed to fetch exported MP4 (HTTP ${resp.status}). Please try again.`);
+      if (!retryable || attempt === 2) {
+        throw lastError;
+      }
+    } catch (err) {
+      if (signal?.aborted) {
+        throw new DOMException("Export cancelled by user.", "AbortError");
+      }
+      const resolved = timedOut
+        ? new Error("Timed out while transferring the exported MP4. Please try again.")
+        : err;
+      lastError = resolved;
+      if (attempt === 2) {
+        throw resolved;
+      }
+    } finally {
+      window.clearTimeout(timer);
+      signal?.removeEventListener("abort", onExtAbort);
+    }
+
+    await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Failed to transfer exported MP4. Please try again.");
+}
+
+async function fetchVerifiedMp4Blob(
+  downloadUrl: string,
+  expectedSizeBytes: number,
+  fileName: string,
+  onProgress: (p: ExportProgress) => void,
+  signal?: AbortSignal
+): Promise<ExportedVideoResult> {
+  const chunks: BlobPart[] = [];
+  let offset = 0;
+  let totalSize = Math.max(0, expectedSizeBytes);
+
+  onProgress({
+    phase: "downloading",
+    percent: 84,
+    detail: totalSize > 0 ? `0.0 / ${formatMb(totalSize)} MB` : "Preparing file...",
+  });
+
+  while (true) {
+    if (signal?.aborted) {
+      throw new DOMException("Export cancelled by user.", "AbortError");
+    }
+
+    const chunkEnd =
+      totalSize > 0
+        ? Math.min(totalSize - 1, offset + DOWNLOAD_CHUNK_BYTES - 1)
+        : offset + DOWNLOAD_CHUNK_BYTES - 1;
+
+    const { bytes, totalSize: reportedTotal } = await fetchRangeChunkWithRetry(
+      downloadUrl,
+      offset,
+      chunkEnd,
+      signal
+    );
+
+    if (reportedTotal > 0) {
+      totalSize = reportedTotal;
+    }
+
+    if (offset === 0) {
+      if (bytes.byteLength < 12 || !isLikelyValidMp4Header(bytes)) {
+        throw new Error("Server returned an invalid file instead of MP4. Please retry.");
+      }
+    }
+
+    if (bytes.byteLength === 0) {
+      break;
+    }
+
+    chunks.push(bytes);
+    offset += bytes.byteLength;
+
+    const progressRatio = totalSize > 0 ? Math.min(1, offset / totalSize) : 1;
+    onProgress({
+      phase: "downloading",
+      percent: 84 + Math.min(15, Math.round(progressRatio * 15)),
+      detail:
+        totalSize > 0
+          ? `${formatMb(Math.min(offset, totalSize))} / ${formatMb(totalSize)} MB`
+          : `${formatMb(offset)} MB`,
+    });
+
+    if (totalSize > 0 && offset >= totalSize) {
+      break;
+    }
+    if (totalSize === 0 && bytes.byteLength < DOWNLOAD_CHUNK_BYTES) {
+      break;
+    }
+  }
+
+  if (offset < 256) {
+    throw new Error("Exported MP4 file was empty or incomplete. Please retry.");
+  }
+
+  const blob = new Blob(chunks, { type: "video/mp4" });
+  onProgress({
+    phase: "downloading",
+    percent: 100,
+    detail: `${formatMb(blob.size)} MB`,
+  });
+
+  return {
+    blob,
+    blobUrl: URL.createObjectURL(blob),
+    fileName,
+    sizeBytes: blob.size,
+  };
 }
 
 function uint8ToBase64(bytes: Uint8Array): string {
@@ -244,28 +449,66 @@ function mapCutTimeToSourceTime(project: VideoProject, cutTime: number): number 
   return 0;
 }
 
-async function waitForVideoReady(video: HTMLVideoElement): Promise<void> {
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new DOMException("Video export cancelled.", "AbortError");
+  }
+}
+
+async function waitForVideoReady(video: HTMLVideoElement, signal?: AbortSignal): Promise<void> {
+  throwIfAborted(signal);
   if (video.readyState >= 2 && video.videoWidth > 0) return;
-  await new Promise<void>((resolve) => {
+  await new Promise<void>((resolve, reject) => {
     let done = false;
+    let kickedDecode = false;
+    const cleanup = () => {
+      clearTimeout(timer);
+      video.removeEventListener("loadedmetadata", onMetadata);
+      video.removeEventListener("loadeddata", check);
+      video.removeEventListener("canplay", check);
+      video.removeEventListener("seeked", check);
+      video.removeEventListener("error", finish);
+      signal?.removeEventListener("abort", onAbort);
+    };
     const finish = () => {
       if (done) return;
       done = true;
-      clearTimeout(timer);
-      video.removeEventListener("loadeddata", check);
-      video.removeEventListener("canplay", check);
-      video.removeEventListener("error", finish);
+      cleanup();
       resolve();
+    };
+    const onAbort = () => {
+      if (done) return;
+      done = true;
+      cleanup();
+      reject(new DOMException("Video export cancelled.", "AbortError"));
     };
     const check = () => {
       if (video.readyState >= 2 && video.videoWidth > 0) {
         finish();
       }
     };
-    const timer = window.setTimeout(finish, 15000);
+    const onMetadata = () => {
+      if (video.readyState >= 2 && video.videoWidth > 0) {
+        finish();
+        return;
+      }
+      // On Android Chrome, a muted hidden <video> sometimes stays at HAVE_METADATA until nudged
+      if (!kickedDecode && video.readyState >= 1) {
+        kickedDecode = true;
+        try {
+          video.currentTime = 0.001;
+        } catch {
+          // ignore
+        }
+      }
+    };
+    const timer = window.setTimeout(finish, 8000);
+    video.addEventListener("loadedmetadata", onMetadata);
     video.addEventListener("loadeddata", check);
     video.addEventListener("canplay", check);
+    video.addEventListener("seeked", check);
     video.addEventListener("error", finish, { once: true });
+    signal?.addEventListener("abort", onAbort, { once: true });
     try {
       video.load();
     } catch {
@@ -274,32 +517,49 @@ async function waitForVideoReady(video: HTMLVideoElement): Promise<void> {
   });
 }
 
-async function seekVideoToTime(video: HTMLVideoElement, targetSec: number): Promise<void> {
+async function seekVideoToTime(
+  video: HTMLVideoElement,
+  targetSec: number,
+  signal?: AbortSignal
+): Promise<void> {
+  throwIfAborted(signal);
   const dur = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : targetSec + 1;
   const maxSeek = Math.max(0, dur - 0.04);
   const clamped = Math.max(0, Math.min(maxSeek, targetSec));
 
   if (Math.abs(video.currentTime - clamped) > 0.015 || video.seeking) {
-    await new Promise<void>((resolve) => {
+    await new Promise<void>((resolve, reject) => {
       let done = false;
+      const cleanup = () => {
+        clearTimeout(timer);
+        video.removeEventListener("seeked", onSeeked);
+        signal?.removeEventListener("abort", onAbort);
+      };
       const finish = () => {
         if (done) return;
         done = true;
-        clearTimeout(timer);
-        video.removeEventListener("seeked", onSeeked);
+        cleanup();
         resolve();
       };
+      const onAbort = () => {
+        if (done) return;
+        done = true;
+        cleanup();
+        reject(new DOMException("Video export cancelled.", "AbortError"));
+      };
       const onSeeked = () => finish();
-      const timer = window.setTimeout(finish, 2500);
+      const timer = window.setTimeout(finish, 1200);
       video.addEventListener("seeked", onSeeked, { once: true });
+      signal?.addEventListener("abort", onAbort, { once: true });
       video.currentTime = clamped;
     });
   }
 
   // Wait briefly until decoder confirms frame data is present and not mid-seek
   const waitStart = performance.now();
-  while ((video.seeking || video.readyState < 2) && performance.now() - waitStart < 450) {
-    await new Promise((r) => setTimeout(r, 10));
+  while ((video.seeking || video.readyState < 2) && performance.now() - waitStart < 300) {
+    throwIfAborted(signal);
+    await new Promise((r) => setTimeout(r, 4));
   }
 }
 
@@ -308,13 +568,17 @@ export async function exportProjectToMp4(
   darkMode: boolean,
   voiceSettings: VoiceSettings,
   editSettings: VideoEditSettings,
-  onProgress: (p: ExportProgress) => void
-): Promise<Blob> {
+  onProgress: (p: ExportProgress) => void,
+  signal?: AbortSignal
+): Promise<ExportedVideoResult> {
   const width = 720;
   const height = 1280;
   const hasSubtitles = project.subtitles.length > 0;
   const heightPct = Math.max(26, Math.min(52, editSettings.videoHeightPct || 35));
-  const topVideoH = hasSubtitles ? Math.round((height * heightPct) / 100) : height;
+  const rawTopH = hasSubtitles ? Math.round((height * heightPct) / 100) : height;
+  const topVideoH = hasSubtitles
+    ? Math.max(240, Math.min(height - 240, Math.round(rawTopH / 2) * 2))
+    : height;
   const listH = height - topVideoH;
   const fps = 24;
   const speed = getEffectivePlaybackSpeed(
@@ -326,6 +590,7 @@ export async function exportProjectToMp4(
   const sourceTotalDuration = Math.max(0.5, scenesDuration || project.targetDurationSec || 10);
   const totalDuration = sourceTotalDuration / speed;
   const totalFrames = Math.max(1, Math.ceil(totalDuration * fps));
+  const fileName = buildSafeMp4FileName(project.title);
 
   if (project.sourceType === "local" && !project.localUrl && !project.localFile) {
     throw new Error("Local video file is not linked. Please re-link or upload the video first.");
@@ -339,29 +604,693 @@ export async function exportProjectToMp4(
   let tempLocalUrl: string | null = null;
 
   try {
+    throwIfAborted(signal);
+    const makeTimedController = (timeoutMs: number) => {
+      const ctrl = new AbortController();
+      let timedOut = false;
+      const timer = window.setTimeout(() => {
+        timedOut = true;
+        ctrl.abort();
+      }, timeoutMs);
+      const onExtAbort = () => ctrl.abort();
+      if (signal) {
+        if (signal.aborted) ctrl.abort();
+        else signal.addEventListener("abort", onExtAbort, { once: true });
+      }
+      return {
+        signal: ctrl.signal,
+        didTimeout: () => timedOut,
+        cleanup: () => {
+          window.clearTimeout(timer);
+          signal?.removeEventListener("abort", onExtAbort);
+        },
+      };
+    };
+
     let resolvedUploadId = project.uploadId;
     if (project.sourceType === "local") {
       if (resolvedUploadId) {
+        const existsTimed = makeTimedController(6000);
         try {
-          const checkResp = await fetch(`/api/upload-exists/${encodeURIComponent(resolvedUploadId)}`);
+          const checkResp = await fetch(
+            `/api/upload-exists/${encodeURIComponent(resolvedUploadId)}`,
+            { signal: existsTimed.signal }
+          );
           if (checkResp.ok) {
             const checkData = (await checkResp.json()) as { exists?: boolean };
             if (!checkData.exists) {
               resolvedUploadId = undefined;
             }
           }
-        } catch {
-          // ignore network check error
+        } catch (err) {
+          throwIfAborted(signal);
+          void err;
+        } finally {
+          existsTimed.cleanup();
         }
       }
       if (!resolvedUploadId && project.localFile) {
-        resolvedUploadId = await uploadBlobInChunks(project.localFile, project.localFile.name);
+        throwIfAborted(signal);
+        const totalMb = formatMb(project.localFile.size);
+        onProgress({
+          phase: "uploading",
+          percent: 5,
+          detail: `0.0 / ${totalMb} MB`,
+        });
+        resolvedUploadId = await uploadBlobInChunks(
+          project.localFile,
+          project.localFile.name,
+          signal,
+          (fraction) => {
+            const sentMb = formatMb(project.localFile!.size * fraction);
+            onProgress({
+              phase: "uploading",
+              percent: 5 + Math.round(fraction * 23),
+              detail: `${sentMb} / ${totalMb} MB`,
+            });
+          }
+        );
         project.uploadId = resolvedUploadId;
       }
     }
 
-    // Ensure fonts are loaded before measuring canvas text
-    await document.fonts.ready;
+    throwIfAborted(signal);
+
+    // Ensure fonts are loaded before measuring canvas text, with a hard 2.5s timeout
+    if (document.fonts && document.fonts.ready) {
+      await Promise.race([
+        document.fonts.ready.catch(() => undefined),
+        new Promise<void>((resolve) => window.setTimeout(resolve, 2500)),
+      ]);
+    }
+
+    throwIfAborted(signal);
+    onProgress({ phase: "preparing", percent: 28, detail: "Initializing layout..." });
+
+    // FAST SERVER-COMPOSITE PATH FOR LOCAL VIDEOS:
+    // Eliminates downloading prepared clips & eliminates slow Android <video> frame-by-frame seeking!
+    // Phone renders ONLY the lightweight 2D subtitle strip (if subtitles exist) at 15fps,
+    // and server FFmpeg composites native source video + subtitle strip + voice audio in ONE fast pass.
+    if (project.sourceType === "local" && resolvedUploadId) {
+      let subtitleBase64: string | undefined;
+      let subtitleUploadId: string | undefined;
+      let subtitleFormat: "mp4" | "webm" = "mp4";
+      let subtitleForceCfr = false;
+      let subtitleRecordedDurationSec: number | undefined;
+      const subFps = 15;
+
+      if (hasSubtitles && listH >= 120) {
+        const subCanvas = document.createElement("canvas");
+        subCanvas.width = width;
+        subCanvas.height = listH;
+        const subCtx = subCanvas.getContext("2d", { alpha: false })!;
+
+        const subFontScale =
+          editSettings.subtitleFontScale === "sm"
+            ? 0.86
+            : editSettings.subtitleFontScale === "lg"
+              ? 1.16
+              : 1;
+        const subTheme: "light" | "dark" | "warm" =
+          editSettings.subtitleTheme === "warm"
+            ? "warm"
+            : editSettings.subtitleTheme === "light"
+              ? "light"
+              : editSettings.subtitleTheme === "dark"
+                ? "dark"
+                : darkMode
+                  ? "dark"
+                  : "light";
+        const subHl = editSettings.subtitleHighlightColor || "amber";
+        const showWordGloss = editSettings.showWordGloss !== false;
+        const showBurmeseLine = editSettings.showBurmeseLine !== false;
+
+        const { cards } = measureSubtitleList(subCtx, project.subtitles, width, {
+          showThaiScript: Boolean(editSettings.showThaiScript),
+          showWordGloss,
+          showBurmeseLine,
+          fontScale: subFontScale,
+        });
+
+        const getSubActiveCardIndex = (t: number): number => {
+          let activeIdx = -1;
+          let lastStartedIdx = -1;
+          for (let i = 0; i < cards.length; i++) {
+            const sub = cards[i].sub;
+            if (t >= sub.startTime) {
+              if (lastStartedIdx === -1 || sub.startTime >= cards[lastStartedIdx].sub.startTime) {
+                lastStartedIdx = i;
+              }
+              if (t <= sub.endTime) {
+                activeIdx = i;
+              }
+            }
+          }
+          return activeIdx >= 0 ? activeIdx : lastStartedIdx;
+        };
+
+        const getSubScrollYForTime = (t: number): number => {
+          let anchorIdx = getSubActiveCardIndex(t);
+          if (anchorIdx < 0) {
+            for (let i = 0; i < cards.length; i++) {
+              if (t >= cards[i].sub.startTime) anchorIdx = i;
+              else break;
+            }
+          }
+          const active = cards[Math.max(0, anchorIdx)];
+          if (!active) return 0;
+          const desiredCenter = active.topY + active.height * 0.5 - listH * 0.42;
+          return Math.max(0, desiredCenter);
+        };
+
+        let subScrollY = 0;
+        const isDarkPanel = subTheme === "dark";
+        const isWarmPanel = subTheme === "warm";
+        const phoneticPx = Math.round(28 * subFontScale);
+        const glossPx = Math.round(13 * subFontScale);
+        const thaiPx = Math.round(20 * subFontScale);
+        const thaiLineH = Math.round(28 * subFontScale);
+        const idxPx = Math.round(15 * subFontScale);
+        const burmesePx = Math.round(22 * subFontScale);
+        const burmeseLineH = Math.round(34 * subFontScale);
+        const pillFill =
+          subHl === "emerald"
+            ? "#6ee7b7"
+            : subHl === "indigo"
+              ? "#6366f1"
+              : subHl === "rose"
+                ? "#fda4af"
+                : isDarkPanel
+                  ? "#fbbf24"
+                  : "#fde047";
+        const pillTextFill = subHl === "indigo" ? "#ffffff" : "#0f172a";
+
+        const renderSubtitleOnlyFrame = (t: number) => {
+          subCtx.fillStyle = isDarkPanel ? "#0b1120" : isWarmPanel ? "#fbf7ef" : "#f8fafc";
+          subCtx.fillRect(0, 0, width, listH);
+
+          // Top 1px divider separating video and subtitle panel
+          subCtx.fillStyle = isDarkPanel ? "#1e293b" : isWarmPanel ? "#e7dcc8" : "#cbd5e1";
+          subCtx.fillRect(0, 0, width, 1);
+
+          const ht = Math.min(sourceTotalDuration, t + 0.06);
+          const targetScroll = getSubScrollYForTime(ht);
+          subScrollY += (targetScroll - subScrollY) * 0.22;
+
+          subCtx.save();
+          subCtx.beginPath();
+          subCtx.rect(0, 1, width, listH - 1);
+          subCtx.clip();
+          subCtx.translate(0, -subScrollY);
+
+          const activeCardIdx = getSubActiveCardIndex(ht);
+
+          for (let ci = 0; ci < cards.length; ci++) {
+            const card = cards[ci];
+            const screenTop = card.topY - subScrollY;
+            if (screenTop + card.height < -60 || screenTop > listH + 60) continue;
+
+            const isActive = ci === activeCardIdx;
+            subCtx.fillStyle = isActive
+              ? isDarkPanel
+                ? "#131c31"
+                : isWarmPanel
+                  ? "#fffdf8"
+                  : "#ffffff"
+              : isDarkPanel
+                ? "rgba(15, 23, 42, 0.55)"
+                : isWarmPanel
+                  ? "rgba(244, 237, 224, 0.72)"
+                  : "rgba(255, 255, 255, 0.72)";
+            drawRoundedRect(subCtx, 22, card.topY, width - 44, card.height, 18);
+            subCtx.fill();
+            subCtx.strokeStyle = isActive
+              ? isDarkPanel
+                ? "rgba(99, 102, 241, 0.45)"
+                : isWarmPanel
+                  ? "#fcd34d"
+                  : "#c7d2fe"
+              : isDarkPanel
+                ? "#1e293b"
+                : isWarmPanel
+                  ? "#e5dac6"
+                  : "#e2e8f0";
+            subCtx.lineWidth = isActive ? 1.75 : 1;
+            subCtx.stroke();
+
+            subCtx.fillStyle = isActive
+              ? isDarkPanel
+                ? "#818cf8"
+                : isWarmPanel
+                  ? "#d97706"
+                  : "#4f46e5"
+              : isDarkPanel
+                ? "#1e293b"
+                : isWarmPanel
+                  ? "#dfd3be"
+                  : "#e2e8f0";
+            drawRoundedRect(subCtx, 32, card.topY + 18, 5, Math.max(24, card.height - 36), 3);
+            subCtx.fill();
+
+            for (let wi = 0; wi < card.wordLayouts.length; wi++) {
+              const wl = card.wordLayouts[wi];
+              const isLastWord = wi === card.wordLayouts.length - 1;
+              const isSpoken =
+                isActive &&
+                ht >= wl.startTime &&
+                (isLastWord ? ht <= wl.endTime : ht < wl.endTime);
+              const wasSpoken = isActive && (isLastWord ? ht > wl.endTime : ht >= wl.endTime);
+
+              if (isSpoken) {
+                const pillH = Math.round(38 * subFontScale);
+                subCtx.fillStyle = pillFill;
+                drawRoundedRect(
+                  subCtx,
+                  wl.x - 4,
+                  wl.y - Math.round(26 * subFontScale),
+                  wl.w + 2,
+                  pillH,
+                  9
+                );
+                subCtx.fill();
+              }
+
+              subCtx.font = `600 ${phoneticPx}px 'Plus Jakarta Sans', sans-serif`;
+              if (isSpoken) {
+                subCtx.fillStyle = pillTextFill;
+              } else if (isActive) {
+                subCtx.fillStyle = isDarkPanel
+                  ? wasSpoken
+                    ? "#a5b4fc"
+                    : "#cbd5e1"
+                  : isWarmPanel
+                    ? wasSpoken
+                      ? "#92400e"
+                      : "#292524"
+                    : wasSpoken
+                      ? "#4338ca"
+                      : "#334155";
+              } else {
+                subCtx.fillStyle = isWarmPanel ? "#78716c" : "#64748b";
+              }
+              subCtx.fillText(wl.phonetic, wl.x + 5, wl.y);
+
+              if (wl.gloss) {
+                subCtx.font = `500 ${glossPx}px 'Noto Sans Myanmar', sans-serif`;
+                subCtx.fillStyle = isSpoken
+                  ? subHl === "emerald"
+                    ? isDarkPanel
+                      ? "#6ee7b7"
+                      : "#047857"
+                    : subHl === "indigo"
+                      ? isDarkPanel
+                        ? "#a5b4fc"
+                        : "#4338ca"
+                      : subHl === "rose"
+                        ? isDarkPanel
+                          ? "#fda4af"
+                          : "#be123c"
+                        : isDarkPanel
+                          ? "#fcd34d"
+                          : "#b45309"
+                  : isActive
+                    ? isDarkPanel
+                      ? "#5eead4"
+                      : "#0f766e"
+                    : isDarkPanel
+                      ? "#475569"
+                      : isWarmPanel
+                        ? "#a8a29e"
+                        : "#94a3b8";
+                subCtx.fillText(wl.gloss, wl.x + 5, wl.y + Math.round(22 * subFontScale));
+              }
+            }
+
+            if (card.thaiLines.length > 0) {
+              subCtx.font = `500 ${thaiPx}px 'Noto Sans Thai', 'Plus Jakarta Sans', sans-serif`;
+              subCtx.fillStyle = isActive
+                ? isDarkPanel
+                  ? "#e2e8f0"
+                  : isWarmPanel
+                    ? "#44403c"
+                    : "#334155"
+                : isWarmPanel
+                  ? "#78716c"
+                  : "#64748b";
+              card.thaiLines.forEach((line, li) => {
+                subCtx.fillText(line, 58, card.thaiStartY + li * thaiLineH);
+              });
+            }
+
+            if (showBurmeseLine) {
+              if (card.wordLayouts.length > 0 || card.thaiLines.length > 0) {
+                const dividerY = card.burmeseStartY - 30;
+                subCtx.fillStyle = isActive
+                  ? isDarkPanel
+                    ? "rgba(99, 102, 241, 0.22)"
+                    : isWarmPanel
+                      ? "#fde68a"
+                      : "#e0e7ff"
+                  : isDarkPanel
+                    ? "#1e293b"
+                    : isWarmPanel
+                      ? "#e7dcc8"
+                      : "#f1f5f9";
+                subCtx.fillRect(54, dividerY, width - 96, 1);
+              }
+
+              subCtx.font = `600 ${idxPx}px 'JetBrains Mono', monospace`;
+              subCtx.fillStyle = isActive
+                ? isDarkPanel
+                  ? "#818cf8"
+                  : isWarmPanel
+                    ? "#b45309"
+                    : "#6366f1"
+                : isDarkPanel
+                  ? "#475569"
+                  : isWarmPanel
+                    ? "#a8a29e"
+                    : "#94a3b8";
+              subCtx.fillText(String(ci + 1).padStart(2, "0"), 54, card.burmeseStartY - 1);
+
+              subCtx.font = `500 ${burmesePx}px 'Noto Sans Myanmar', 'Plus Jakarta Sans', sans-serif`;
+              subCtx.fillStyle = isActive
+                ? isDarkPanel
+                  ? "#99f6e4"
+                  : "#115e59"
+                : isWarmPanel
+                  ? "#57534e"
+                  : "#64748b";
+              card.burmeseLines.forEach((line, li) => {
+                subCtx.fillText(line, 86, card.burmeseStartY + li * burmeseLineH);
+              });
+            }
+          }
+          subCtx.restore();
+        };
+
+        const subTotalFrames = Math.max(1, Math.ceil(totalDuration * subFps));
+        const encodeSubStripWebCodecs = async (
+          hwAccel: HardwareAcceleration
+        ): Promise<Uint8Array | null> => {
+          if (typeof VideoEncoder === "undefined") return null;
+          const codecsToTry = [
+            "avc1.420028",
+            "avc1.4d0028",
+            "avc1.42001f",
+            "avc1.4d001f",
+          ];
+          let chosenConfig: VideoEncoderConfig | null = null;
+          for (const codec of codecsToTry) {
+            const cfg: VideoEncoderConfig = {
+              codec,
+              width,
+              height: listH,
+              bitrate: 1_200_000,
+              framerate: subFps,
+              latencyMode: "realtime",
+              hardwareAcceleration: hwAccel,
+              avc: { format: "avc" },
+            };
+            try {
+              const support = await VideoEncoder.isConfigSupported(cfg);
+              if (support.supported) {
+                chosenConfig = support.config || cfg;
+                break;
+              }
+            } catch {
+              // continue
+            }
+          }
+          if (!chosenConfig) return null;
+
+          subScrollY = 0;
+          let encoderError: Error | null = null;
+          const target = new ArrayBufferTarget();
+          const muxer = new Muxer({
+            target,
+            video: { codec: "avc", width, height: listH, frameRate: subFps },
+            fastStart: "in-memory",
+            firstTimestampBehavior: "offset",
+          });
+          const encoder = new VideoEncoder({
+            output: (chunk, meta) => {
+              try {
+                muxer.addVideoChunk(chunk, meta);
+              } catch (err) {
+                encoderError = err instanceof Error ? err : new Error(String(err));
+              }
+            },
+            error: (err) => {
+              encoderError = err instanceof Error ? err : new Error(String(err));
+            },
+          });
+          encoder.configure(chosenConfig);
+
+          try {
+            for (let frameIdx = 0; frameIdx < subTotalFrames; frameIdx++) {
+              throwIfAborted(signal);
+              if (encoderError || encoder.state !== "configured") return null;
+
+              const t = (frameIdx / subFps) * speed;
+              renderSubtitleOnlyFrame(t);
+
+              const frame = new VideoFrame(subCanvas, {
+                timestamp: Math.round((frameIdx * 1_000_000) / subFps),
+                duration: Math.round(1_000_000 / subFps),
+              });
+              try {
+                encoder.encode(frame, { keyFrame: frameIdx % (subFps * 2) === 0 });
+              } finally {
+                frame.close();
+              }
+
+              const queueWaitStart = performance.now();
+              while (encoder.encodeQueueSize > 8 && !encoderError) {
+                throwIfAborted(signal);
+                if (performance.now() - queueWaitStart > 4000) {
+                  encoderError = new Error("Subtitle encoder stalled.");
+                  break;
+                }
+                await new Promise((r) => setTimeout(r, 4));
+              }
+
+              if (frameIdx % 10 === 0) {
+                onProgress({
+                  phase: "rendering",
+                  percent: 28 + Math.round((frameIdx / subTotalFrames) * 34),
+                  detail: `Frame ${frameIdx} / ${subTotalFrames}`,
+                });
+                await new Promise((r) => setTimeout(r, 0));
+              }
+            }
+
+            if (encoderError) return null;
+            throwIfAborted(signal);
+            const flushResult = await Promise.race([
+              encoder.flush().then(() => "ok" as const),
+              new Promise<"timeout">((resolve) => window.setTimeout(() => resolve("timeout"), 8000)),
+            ]);
+            throwIfAborted(signal);
+            if (flushResult === "timeout" || encoderError) return null;
+
+            muxer.finalize();
+            const bytes = new Uint8Array(target.buffer);
+            return bytes.byteLength >= 512 && !encoderError ? bytes : null;
+          } finally {
+            try {
+              if (encoder.state !== "closed") encoder.close();
+            } catch {
+              // ignore
+            }
+          }
+        };
+
+        onProgress({ phase: "rendering", percent: 28, detail: "Rendering subtitles..." });
+        let subBytes = await encodeSubStripWebCodecs("no-preference");
+        throwIfAborted(signal);
+        if (!subBytes) {
+          subBytes = await encodeSubStripWebCodecs("prefer-software");
+        }
+        throwIfAborted(signal);
+
+        if (!subBytes && typeof MediaRecorder !== "undefined" && typeof subCanvas.captureStream === "function") {
+          subScrollY = 0;
+          renderSubtitleOnlyFrame(0);
+          const probeStream = subCanvas.captureStream(0);
+          const probeTrack = probeStream.getVideoTracks()[0] as
+            | (MediaStreamTrack & { requestFrame?: () => void })
+            | undefined;
+          const useManual = typeof probeTrack?.requestFrame === "function";
+          let stream = probeStream;
+          let track = probeTrack;
+          if (!useManual) {
+            probeStream.getTracks().forEach((tr) => tr.stop());
+            stream = subCanvas.captureStream(subFps);
+            track = stream.getVideoTracks()[0] as
+              | (MediaStreamTrack & { requestFrame?: () => void })
+              | undefined;
+          }
+          const candidates: { mime: string; format: "webm" | "mp4" }[] = [
+            { mime: "video/webm;codecs=vp8", format: "webm" },
+            { mime: "video/webm", format: "webm" },
+            { mime: "video/mp4", format: "mp4" },
+          ];
+          const chosen = candidates.find(
+            (c) => typeof MediaRecorder.isTypeSupported === "function" && MediaRecorder.isTypeSupported(c.mime)
+          );
+          subtitleFormat = chosen?.format ?? "webm";
+          const recorder = chosen
+            ? new MediaRecorder(stream, { mimeType: chosen.mime, videoBitsPerSecond: 1_200_000 })
+            : new MediaRecorder(stream, { videoBitsPerSecond: 1_200_000 });
+          const chunks: BlobPart[] = [];
+          recorder.ondataavailable = (e) => {
+            if (e.data.size > 0) chunks.push(e.data);
+          };
+          const donePromise = new Promise<Uint8Array>((resolve, reject) => {
+            recorder.onerror = () => reject(new Error("Subtitle strip recording failed."));
+            recorder.onstop = async () => {
+              try {
+                const blob = new Blob(chunks, { type: chosen?.mime || "video/webm" });
+                resolve(new Uint8Array(await blob.arrayBuffer()));
+              } catch (e) {
+                reject(e instanceof Error ? e : new Error("Failed reading subtitle strip."));
+              }
+            };
+          });
+          const recStart = performance.now();
+          recorder.start(250);
+          let recCancelled = false;
+          try {
+            const intervalMs = 1000 / subFps;
+            for (let frameIdx = 0; frameIdx < subTotalFrames; frameIdx++) {
+              throwIfAborted(signal);
+              const fStart = performance.now();
+              renderSubtitleOnlyFrame((frameIdx / subFps) * speed);
+              if (useManual) {
+                track?.requestFrame?.();
+                if (frameIdx % 4 === 0) await new Promise((r) => setTimeout(r, 0));
+              } else {
+                const waitMs = Math.max(4, intervalMs - (performance.now() - fStart));
+                await new Promise((r) => setTimeout(r, waitMs));
+              }
+              if (frameIdx % 10 === 0) {
+                onProgress({
+                  phase: "rendering",
+                  percent: 28 + Math.round((frameIdx / subTotalFrames) * 34),
+                  detail: `Frame ${frameIdx} / ${subTotalFrames}`,
+                });
+              }
+            }
+          } catch (err) {
+            recCancelled = Boolean(signal?.aborted);
+            throw err;
+          } finally {
+            if (recorder.state !== "inactive") recorder.stop();
+            subtitleRecordedDurationSec = Math.max(0.1, (performance.now() - recStart) / 1000);
+            try {
+              if (!recCancelled) subBytes = await donePromise;
+              else donePromise.catch(() => {});
+            } finally {
+              stream.getTracks().forEach((tr) => tr.stop());
+            }
+          }
+          subtitleForceCfr = useManual;
+        }
+
+        if (subBytes && subBytes.byteLength >= 512) {
+          if (subBytes.byteLength > 8 * 1024 * 1024) {
+            const subBlob = new Blob([subBytes.buffer as ArrayBuffer], {
+              type: "application/octet-stream",
+            });
+            subtitleUploadId = await uploadBlobInChunks(
+              subBlob,
+              `subtitles.${subtitleFormat}`,
+              signal
+            );
+          } else {
+            subtitleBase64 = uint8ToBase64(subBytes);
+          }
+        }
+      }
+
+      throwIfAborted(signal);
+      let encodePct = 64;
+      onProgress({ phase: "muxing", percent: encodePct, detail: "Encoding 9:16 MP4 on server..." });
+      const encodeTicker = window.setInterval(() => {
+        if (signal?.aborted) return;
+        encodePct = Math.min(82, encodePct + 1);
+        onProgress({
+          phase: "muxing",
+          percent: encodePct,
+          detail: "Encoding 9:16 MP4 on server...",
+        });
+      }, 900);
+
+      const fastTimed = makeTimedController(115_000);
+      try {
+        const fastResp = await fetch("/api/export-fast-mp4", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            uploadId: resolvedUploadId,
+            scenes: project.scenes,
+            voiceSettings: { ...voiceSettings, speed },
+            editSettings,
+            width,
+            height,
+            topVideoH,
+            subtitleBase64,
+            subtitleUploadId,
+            subtitleFormat,
+            subtitleFps: subFps,
+            subtitleForceCfr,
+            subtitleRecordedDurationSec,
+            targetDurationSec: totalDuration,
+            fileName,
+          }),
+          signal: fastTimed.signal,
+        });
+
+        window.clearInterval(encodeTicker);
+
+        if (fastResp.ok) {
+          const data = (await fastResp.json()) as {
+            downloadUrl?: string;
+            fileName?: string;
+            sizeBytes?: number;
+          };
+          if (data.downloadUrl) {
+            return await fetchVerifiedMp4Blob(
+              data.downloadUrl,
+              Number(data.sizeBytes) || 0,
+              data.fileName || fileName,
+              onProgress,
+              signal
+            );
+          }
+        } else if (fastResp.status !== 404) {
+          const errText = await fastResp.text();
+          let errMsg = errText;
+          try {
+            const parsed = JSON.parse(errText) as { error?: string };
+            if (parsed?.error) errMsg = parsed.error;
+          } catch {
+            // plain text
+          }
+          throw new Error(errMsg || "Failed to export 9:16 MP4.");
+        }
+      } catch (err) {
+        throwIfAborted(signal);
+        if (fastTimed.didTimeout()) {
+          throw new Error("Server video export timed out. Please try a shorter clip or retry.");
+        }
+        throw err;
+      } finally {
+        window.clearInterval(encodeTicker);
+        fastTimed.cleanup();
+      }
+    }
 
     const canvas = document.createElement("canvas");
     canvas.width = width;
@@ -384,9 +1313,10 @@ export async function exportProjectToMp4(
     const loadedFrames: HTMLImageElement[] = [];
 
     if (project.sourceType === "local") {
-      // Ask server ffmpeg to pre-extract an all-keyframe (GOP=1) yuv420p H.264 clip
-      // for instant, rock-solid frame seeking (also fixes HEVC/MKV/VFR mobile videos)
+      // Ask server ffmpeg to pre-extract an adaptive all-keyframe yuv420p H.264 clip (30s timeout)
+      // so every browser frame seek completes in a few ms; fall back cleanly to localUrl if unavailable.
       if (resolvedUploadId) {
+        const prepTimed = makeTimedController(30_000);
         try {
           const prepResp = await fetch("/api/prepare-export-clip", {
             method: "POST",
@@ -395,18 +1325,27 @@ export async function exportProjectToMp4(
               uploadId: resolvedUploadId,
               scenes: project.scenes,
             }),
+            signal: prepTimed.signal,
           });
           if (prepResp.ok) {
             const prepBlob = await prepResp.blob();
+            throwIfAborted(signal);
             if (prepBlob.size > 512) {
               preparedClipUrl = URL.createObjectURL(prepBlob);
               usingPreparedClip = true;
             }
           }
-        } catch {
+        } catch (err) {
+          throwIfAborted(signal);
+          void err;
           // Fall back to direct browser localUrl decoding below
+        } finally {
+          prepTimed.cleanup();
         }
       }
+
+      throwIfAborted(signal);
+      onProgress({ phase: "preparing", percent: 9 });
 
       let activeVideoSrc = preparedClipUrl || project.localUrl || "";
       if (!activeVideoSrc && project.localFile) {
@@ -416,8 +1355,9 @@ export async function exportProjectToMp4(
 
       if (activeVideoSrc) {
         hiddenVideoHost = document.createElement("div");
+        // Keep inside viewport at 2x2 opacity:0.001 so Android Chrome does not throttle offscreen <video> decoding
         hiddenVideoHost.style.cssText =
-          "position:fixed;left:-9999px;top:0;width:8px;height:8px;opacity:0.001;pointer-events:none;overflow:hidden;z-index:-1;";
+          "position:fixed;left:0;top:0;width:2px;height:2px;opacity:0.001;pointer-events:none;overflow:hidden;z-index:-1;";
         localVideoEl = document.createElement("video");
         localVideoEl.preload = "auto";
         localVideoEl.muted = true;
@@ -426,7 +1366,7 @@ export async function exportProjectToMp4(
         hiddenVideoHost.appendChild(localVideoEl);
         document.body.appendChild(hiddenVideoHost);
 
-        await waitForVideoReady(localVideoEl);
+        await waitForVideoReady(localVideoEl, signal);
 
         // If prepared clip failed to decode in browser for any reason, fall back to original localUrl
         if ((localVideoEl.readyState < 2 || localVideoEl.videoWidth === 0) && usingPreparedClip) {
@@ -438,13 +1378,13 @@ export async function exportProjectToMp4(
               : "");
           if (fallbackSrc) {
             localVideoEl.src = fallbackSrc;
-            await waitForVideoReady(localVideoEl);
+            await waitForVideoReady(localVideoEl, signal);
           }
         }
 
         if (localVideoEl.readyState >= 2 && localVideoEl.videoWidth > 0) {
           const initialTime = usingPreparedClip ? 0 : mapCutTimeToSourceTime(project, 0);
-          await seekVideoToTime(localVideoEl, initialTime);
+          await seekVideoToTime(localVideoEl, initialTime, signal);
           if (
             lastFrameCtx &&
             localVideoEl.readyState >= 2 &&
@@ -543,8 +1483,11 @@ export async function exportProjectToMp4(
     };
 
     let currentScrollY = 0;
+    const cssFilterStr = buildCssFilterString(editSettings);
+    const hasCssFilter = cssFilterStr !== "none";
 
     const renderFrameAtTime = async (t: number, frameIdx = 0) => {
+      throwIfAborted(signal);
       // 1. Background (matched to active subtitle theme)
       ctx.fillStyle =
         subTheme === "dark" ? "#0b1120" : subTheme === "warm" ? "#fbf7ef" : "#f8fafc";
@@ -582,15 +1525,19 @@ export async function exportProjectToMp4(
           editSettings.zoom * (editSettings.flipV ? -1 : 1)
         );
         ctx.rotate((editSettings.rotateDeg * Math.PI) / 180);
-        ctx.filter = buildCssFilterString(editSettings);
+        if (hasCssFilter) {
+          ctx.filter = cssFilterStr;
+        }
         ctx.drawImage(source, -dw / 2, -dh / 2, dw, dh);
         ctx.restore();
-        ctx.filter = "none";
+        if (hasCssFilter) {
+          ctx.filter = "none";
+        }
       };
 
       if (localVideoEl && localVideoEl.readyState >= 1) {
         const targetSrcTime = usingPreparedClip ? t : mapCutTimeToSourceTime(project, t);
-        await seekVideoToTime(localVideoEl, targetSrcTime);
+        await seekVideoToTime(localVideoEl, targetSrcTime, signal);
 
         if (
           lastFrameCtx &&
@@ -960,65 +1907,86 @@ export async function exportProjectToMp4(
 
       encoder.configure(chosenConfig);
 
-      for (let frameIdx = 0; frameIdx < totalFrames; frameIdx++) {
-        if (encoderError || encoder.state !== "configured") {
-          try {
-            encoder.close();
-          } catch {
-            // ignore
+      try {
+        for (let frameIdx = 0; frameIdx < totalFrames; frameIdx++) {
+          throwIfAborted(signal);
+          if (encoderError || encoder.state !== "configured") {
+            return null;
           }
+
+          const t = (frameIdx / fps) * speed;
+          await renderFrameAtTime(t, frameIdx);
+          throwIfAborted(signal);
+
+          const frame = new VideoFrame(canvas, {
+            timestamp: Math.round((frameIdx * 1_000_000) / fps),
+            duration: Math.round(1_000_000 / fps),
+          });
+          try {
+            encoder.encode(frame, { keyFrame: frameIdx % fps === 0 });
+          } finally {
+            frame.close();
+          }
+
+          const queueWaitStart = performance.now();
+          while (encoder.encodeQueueSize > 8 && !encoderError) {
+            throwIfAborted(signal);
+            if (performance.now() - queueWaitStart > 5000) {
+              encoderError = new Error("VideoEncoder queue stalled.");
+              break;
+            }
+            await new Promise((r) => setTimeout(r, 4));
+          }
+
+          if (frameIdx % 6 === 0) {
+            onProgress({
+              phase: "rendering",
+              percent: 10 + Math.round((frameIdx / totalFrames) * 75),
+            });
+            await new Promise((r) => setTimeout(r, 0));
+          }
+        }
+
+        if (encoderError) {
           return null;
         }
 
-        const t = (frameIdx / fps) * speed;
-        await renderFrameAtTime(t, frameIdx);
+        throwIfAborted(signal);
+        const flushResult = await Promise.race([
+          encoder.flush().then(() => "ok" as const),
+          new Promise<"timeout">((resolve) => window.setTimeout(() => resolve("timeout"), 10_000)),
+        ]);
+        throwIfAborted(signal);
+        if (flushResult === "timeout" || encoderError) {
+          return null;
+        }
 
-        const frame = new VideoFrame(canvas, {
-          timestamp: Math.round((frameIdx * 1_000_000) / fps),
-          duration: Math.round(1_000_000 / fps),
-        });
+        muxer.finalize();
+        const bytes = new Uint8Array(target.buffer);
+        if (bytes.byteLength < 1024 || encoderError) {
+          return null;
+        }
+        return bytes;
+      } finally {
         try {
-          encoder.encode(frame, { keyFrame: frameIdx % fps === 0 });
-        } finally {
-          frame.close();
-        }
-
-        while (encoder.encodeQueueSize > 4 && !encoderError) {
-          await new Promise((r) => setTimeout(r, 6));
-        }
-
-        if (frameIdx % 12 === 0) {
-          onProgress({
-            phase: "rendering",
-            percent: 10 + Math.round((frameIdx / totalFrames) * 75),
-          });
-          await new Promise((r) => setTimeout(r, 0));
-        }
-      }
-
-      if (encoderError) {
-        try {
-          encoder.close();
+          if (encoder.state !== "closed") {
+            encoder.close();
+          }
         } catch {
           // ignore
         }
-        return null;
       }
-
-      await encoder.flush();
-      encoder.close();
-      muxer.finalize();
-      const bytes = new Uint8Array(target.buffer);
-      if (bytes.byteLength < 1024 || encoderError) {
-        return null;
-      }
-      return bytes;
     };
 
+    throwIfAborted(signal);
+    onProgress({ phase: "rendering", percent: 10 });
+
     let videoBytes: Uint8Array | null = await encodeWithWebCodecs("no-preference");
+    throwIfAborted(signal);
     if (!videoBytes) {
       videoBytes = await encodeWithWebCodecs("prefer-software");
     }
+    throwIfAborted(signal);
 
     let videoFormat: "mp4" | "webm" = "mp4";
     let forceCfrFromFrames = false;
@@ -1105,12 +2073,15 @@ export async function exportProjectToMp4(
 
       const recStartMs = performance.now();
       recorder.start(250);
+      let recCancelled = false;
       try {
         const frameIntervalMs = 1000 / fps;
         for (let frameIdx = 0; frameIdx < totalFrames; frameIdx++) {
+          throwIfAborted(signal);
           const frameStart = performance.now();
           const t = (frameIdx / fps) * speed;
           await renderFrameAtTime(t, frameIdx);
+          throwIfAborted(signal);
           if (useManualCapture) {
             track?.requestFrame?.();
             if (frameIdx % 4 === 0) {
@@ -1121,20 +2092,27 @@ export async function exportProjectToMp4(
             const waitMs = Math.max(4, frameIntervalMs - elapsed);
             await new Promise((r) => setTimeout(r, waitMs));
           }
-          if (frameIdx % 12 === 0) {
+          if (frameIdx % 6 === 0) {
             onProgress({
               phase: "rendering",
               percent: 10 + Math.round((frameIdx / totalFrames) * 75),
             });
           }
         }
+      } catch (err) {
+        recCancelled = Boolean(signal?.aborted);
+        throw err;
       } finally {
         if (recorder.state !== "inactive") {
           recorder.stop();
         }
         recordedDurationSec = Math.max(0.1, (performance.now() - recStartMs) / 1000);
         try {
-          videoBytes = await donePromise;
+          if (!recCancelled) {
+            videoBytes = await donePromise;
+          } else {
+            donePromise.catch(() => {});
+          }
         } finally {
           stream.getTracks().forEach((tr) => tr.stop());
         }
@@ -1142,6 +2120,7 @@ export async function exportProjectToMp4(
       forceCfrFromFrames = useManualCapture;
     }
 
+    throwIfAborted(signal);
     if (!videoBytes || videoBytes.byteLength < 512) {
       throw new Error("Rendered video stream was empty. Please try exporting again.");
     }
@@ -1154,27 +2133,47 @@ export async function exportProjectToMp4(
       const renderedBlob = new Blob([videoBytes.buffer as ArrayBuffer], {
         type: "application/octet-stream",
       });
-      renderedVideoUploadId = await uploadBlobInChunks(renderedBlob, `rendered.${videoFormat}`);
+      renderedVideoUploadId = await uploadBlobInChunks(
+        renderedBlob,
+        `rendered.${videoFormat}`,
+        signal
+      );
     } else {
       videoBase64 = uint8ToBase64(videoBytes);
     }
 
-    const resp = await fetch("/api/mux-mp4", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        videoBase64,
-        renderedVideoUploadId,
-        videoFormat,
-        uploadId: resolvedUploadId,
-        scenes: project.scenes,
-        voiceSettings: { ...voiceSettings, speed },
-        targetDurationSec: totalDuration,
-        expectedFrameCount: totalFrames,
-        forceCfrFromFrames,
-        recordedDurationSec,
-      }),
-    });
+    throwIfAborted(signal);
+    const muxTimed = makeTimedController(120_000);
+    let resp: Response;
+    try {
+      resp = await fetch("/api/mux-mp4", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          videoBase64,
+          renderedVideoUploadId,
+          videoFormat,
+          uploadId: resolvedUploadId,
+          scenes: project.scenes,
+          voiceSettings: { ...voiceSettings, speed },
+          targetDurationSec: totalDuration,
+          expectedFrameCount: totalFrames,
+          forceCfrFromFrames,
+          recordedDurationSec,
+          returnDownloadUrl: true,
+          fileName,
+        }),
+        signal: muxTimed.signal,
+      });
+    } catch (err) {
+      throwIfAborted(signal);
+      if (muxTimed.didTimeout()) {
+        throw new Error("MP4 finalization timed out on the server. Please try again.");
+      }
+      throw err;
+    } finally {
+      muxTimed.cleanup();
+    }
 
     if (!resp.ok) {
       const errText = await resp.text();
@@ -1188,8 +2187,22 @@ export async function exportProjectToMp4(
       throw new Error(errMsg || "Failed to finalize MP4 download.");
     }
 
-    onProgress({ phase: "muxing", percent: 100 });
-    return await resp.blob();
+    const muxData = (await resp.json()) as {
+      downloadUrl?: string;
+      fileName?: string;
+      sizeBytes?: number;
+    };
+    if (!muxData.downloadUrl) {
+      throw new Error("Server did not return a download link for the exported MP4.");
+    }
+
+    return await fetchVerifiedMp4Blob(
+      muxData.downloadUrl,
+      Number(muxData.sizeBytes) || 0,
+      muxData.fileName || fileName,
+      onProgress,
+      signal
+    );
   } finally {
     if (localVideoEl) {
       try {

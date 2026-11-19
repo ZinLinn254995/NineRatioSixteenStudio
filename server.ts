@@ -11,6 +11,7 @@ import type {
   SpeakingScene,
   SubtitleItem,
   TranslationTone,
+  VideoEditSettings,
   VoiceSettings,
   YouTubeLicenseFilter,
   YouTubeVideo,
@@ -114,6 +115,63 @@ async function withUploadSessionLock<T>(
   }
 }
 
+interface CompletedExportEntry {
+  id: string;
+  filePath: string;
+  dirPath: string;
+  fileName: string;
+  sizeBytes: number;
+  createdAt: number;
+}
+
+const COMPLETED_EXPORT_TTL_MS = 15 * 60 * 1000;
+const completedExports = new Map<string, CompletedExportEntry>();
+
+function sanitizeExportFileName(rawName?: string): string {
+  const base = String(rawName || "thai-burmese-9x16.mp4")
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64);
+  if (!base) return "thai-burmese-9x16.mp4";
+  return base.toLowerCase().endsWith(".mp4") ? base : `${base}.mp4`;
+}
+
+async function registerCompletedExport(
+  sourceMp4Path: string,
+  fileName?: string
+): Promise<CompletedExportEntry> {
+  const id = crypto.randomBytes(12).toString("hex");
+  const dirPath = await fs.promises.mkdtemp(path.join(os.tmpdir(), "thai-export-"));
+  const safeFileName = sanitizeExportFileName(fileName);
+  const destPath = path.join(dirPath, safeFileName);
+  try {
+    await fs.promises.rename(sourceMp4Path, destPath);
+  } catch {
+    await fs.promises.copyFile(sourceMp4Path, destPath);
+  }
+  const stat = await fs.promises.stat(destPath);
+  const entry: CompletedExportEntry = {
+    id,
+    filePath: destPath,
+    dirPath,
+    fileName: safeFileName,
+    sizeBytes: stat.size,
+    createdAt: Date.now(),
+  };
+  completedExports.set(id, entry);
+  return entry;
+}
+
+async function sweepExpiredCompletedExports(): Promise<void> {
+  const now = Date.now();
+  for (const [id, entry] of completedExports.entries()) {
+    if (now - entry.createdAt > COMPLETED_EXPORT_TTL_MS || !fs.existsSync(entry.filePath)) {
+      completedExports.delete(id);
+      await fs.promises.rm(entry.dirPath, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+}
+
 async function sweepExpiredUploadSessions(): Promise<void> {
   const now = Date.now();
   const entries = Array.from(uploadSessions.values());
@@ -126,12 +184,16 @@ async function sweepExpiredUploadSessions(): Promise<void> {
       await deleteUploadSessionNow(session);
     }
   }
+  await sweepExpiredCompletedExports();
 }
 
 async function sweepOrphanedTempFiles(): Promise<void> {
   try {
     const tmpRoot = os.tmpdir();
-    const activePaths = new Set(Array.from(uploadSessions.values()).map((s) => s.filePath));
+    const activePaths = new Set<string>([
+      ...Array.from(uploadSessions.values()).map((s) => s.filePath),
+      ...Array.from(completedExports.values()).map((e) => e.dirPath),
+    ]);
     const names = await fs.promises.readdir(tmpRoot);
     const now = Date.now();
     for (const name of names) {
@@ -139,7 +201,8 @@ async function sweepOrphanedTempFiles(): Promise<void> {
         !name.startsWith("thai-studio-upload-") &&
         !name.startsWith("upload-vid-") &&
         !name.startsWith("thai-prep-") &&
-        !name.startsWith("thai-studio-")
+        !name.startsWith("thai-studio-") &&
+        !name.startsWith("thai-export-")
       ) {
         continue;
       }
@@ -3490,8 +3553,15 @@ app.post("/api/prepare-export-clip", async (req, res) => {
           );
 
         const outClipPath = path.join(tmpDir, "prepared-clip.mp4");
-        const perSceneScale =
-          "scale=w='min(960,iw)':h='min(960,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1,setpts=PTS-STARTPTS";
+        const totalClipSec = validScenes.reduce((acc, s) => acc + s.durationSec, 0);
+        // Use GOP=1 (instant every-frame browser seeking) at compact 640px/CRF26 for <=95s clips,
+        // and GOP=2 at 540px/CRF27 for longer clips so file size stays well under Cloud Run's 32MB cap.
+        const useAllKeyframe = totalClipSec <= 95;
+        const maxDim = useAllKeyframe ? 640 : 540;
+        const gopSize = useAllKeyframe ? "1" : "2";
+        const crfVal = useAllKeyframe ? "26" : "27";
+        const perSceneScale = `scale=w='min(${maxDim},iw)':h='min(${maxDim},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1,setpts=PTS-STARTPTS`;
+        const prepExecOpts = { ...FFMPEG_EXEC_OPTS, timeout: 45_000 };
 
         if (validScenes.length <= 1) {
           const sc = validScenes[0];
@@ -3510,11 +3580,11 @@ app.post("/api/prepare-export-clip", async (req, res) => {
               "-preset",
               "ultrafast",
               "-crf",
-              "21",
+              crfVal,
               "-g",
-              "1",
+              gopSize,
               "-keyint_min",
-              "1",
+              gopSize,
               "-bf",
               "0",
               "-profile:v",
@@ -3524,7 +3594,7 @@ app.post("/api/prepare-export-clip", async (req, res) => {
               "-an",
               outClipPath,
             ],
-            FFMPEG_EXEC_OPTS
+            prepExecOpts
           );
         } else {
           const inputArgs: string[] = [];
@@ -3553,11 +3623,11 @@ app.post("/api/prepare-export-clip", async (req, res) => {
               "-preset",
               "ultrafast",
               "-crf",
-              "21",
+              crfVal,
               "-g",
-              "1",
+              gopSize,
               "-keyint_min",
-              "1",
+              gopSize,
               "-bf",
               "0",
               "-profile:v",
@@ -3567,11 +3637,16 @@ app.post("/api/prepare-export-clip", async (req, res) => {
               "-an",
               outClipPath,
             ],
-            FFMPEG_EXEC_OPTS
+            prepExecOpts
           );
         }
 
-        if (!fs.existsSync(outClipPath) || fs.statSync(outClipPath).size < 512) {
+        if (!fs.existsSync(outClipPath)) {
+          return null;
+        }
+        const stat = fs.statSync(outClipPath);
+        // Stay safely under Cloud Run's 32 MB HTTP response limit; client falls back to local decoding cleanly
+        if (stat.size < 512 || stat.size > 26 * 1024 * 1024) {
           return null;
         }
         return fs.promises.readFile(outClipPath);
@@ -3584,7 +3659,7 @@ app.post("/api/prepare-export-clip", async (req, res) => {
       if (!sessionStillThere) {
         res.status(404).json({ error: "Uploaded video file not found. Please re-upload." });
       } else {
-        res.status(422).json({ error: "Could not prepare video stream from file." });
+        res.status(413).json({ error: "Prepared clip skipped; using direct local decoding." });
       }
       return;
     }
@@ -3754,6 +3829,11 @@ app.post("/api/mux-mp4", async (req, res) => {
       return;
     }
 
+    // WebCodecs + mp4-muxer already produces a clean 24fps CFR H.264 MP4 — stream copy (-c:v copy)
+    // avoids a redundant 30-60s full libx264 re-encode on the server!
+    const canStreamCopyVideo =
+      videoFormat === "mp4" && !forceCfrFromFrames && recordedDurationSec === undefined;
+
     // Normalize rendered video timestamps (especially MediaRecorder wall-clock drift vs target CFR timeline)
     const videoFilterParts: string[] = [];
     const safeTargetDur = Number(targetDurationSec);
@@ -3779,17 +3859,15 @@ app.post("/api/mux-mp4", async (req, res) => {
     }
     videoFilterParts.push("fps=24", "setsar=1");
 
-    // Always normalize output video to standard 24fps CFR yuv420p H.264 Main@L4.0
-    // so mobile gallery players, Android/iOS, and social apps never show black/blinking frames
-    const videoCodecArgs = [
+    const videoReencodeArgs = [
       "-vf",
       videoFilterParts.join(","),
       "-c:v",
       "libx264",
       "-preset",
-      "veryfast",
+      "superfast",
       "-crf",
-      "20",
+      "21",
       "-pix_fmt",
       "yuv420p",
       "-profile:v",
@@ -3801,15 +3879,39 @@ app.post("/api/mux-mp4", async (req, res) => {
       "-vsync",
       "cfr",
     ];
+    const videoCopyArgs = ["-c:v", "copy"];
 
     const runVideoOnlyMux = async () => {
+      if (canStreamCopyVideo) {
+        try {
+          await execFileAsync(
+            "ffmpeg",
+            [
+              "-y",
+              "-i",
+              inputVideoPath,
+              ...videoCopyArgs,
+              "-movflags",
+              "+faststart",
+              "-an",
+              outputMp4Path,
+            ],
+            FFMPEG_EXEC_OPTS
+          );
+          if (fs.existsSync(outputMp4Path) && fs.statSync(outputMp4Path).size > 512) {
+            return;
+          }
+        } catch {
+          // Fall back to full re-encode below
+        }
+      }
       await execFileAsync(
         "ffmpeg",
         [
           "-y",
           "-i",
           inputVideoPath,
-          ...videoCodecArgs,
+          ...videoReencodeArgs,
           "-movflags",
           "+faststart",
           "-an",
@@ -3842,8 +3944,9 @@ app.post("/api/mux-mp4", async (req, res) => {
             return;
           }
 
-          const segFiles: string[] = [];
-          for (let i = 0; i < normalizedScenes.length; i++) {
+          // Extract scene audio segments in parallel batches of 4 for faster multi-scene muxing
+          const segResults: (string | null)[] = new Array(normalizedScenes.length).fill(null);
+          const extractOne = async (i: number) => {
             const sc = normalizedScenes[i];
             const segOut = path.join(tmpDir, `seg-${i}.wav`);
             let extracted = false;
@@ -3902,10 +4005,23 @@ app.post("/api/mux-mp4", async (req, res) => {
             }
 
             if (extracted) {
-              segFiles.push(segOut);
+              segResults[i] = segOut;
             }
+          };
+
+          for (let batchStart = 0; batchStart < normalizedScenes.length; batchStart += 4) {
+            const batch: Promise<void>[] = [];
+            for (
+              let idx = batchStart;
+              idx < Math.min(normalizedScenes.length, batchStart + 4);
+              idx++
+            ) {
+              batch.push(extractOne(idx));
+            }
+            await Promise.all(batch);
           }
 
+          const segFiles = segResults.filter((s): s is string => Boolean(s));
           if (segFiles.length === 0) {
             return;
           }
@@ -3939,37 +4055,46 @@ app.post("/api/mux-mp4", async (req, res) => {
           }
 
           const audioFilters = buildVoiceAudioFilters(voiceSettings);
+          const buildMuxWithAudioArgs = (vArgs: string[]) => [
+            "-y",
+            "-i",
+            inputVideoPath,
+            "-i",
+            origWavPath,
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            ...vArgs,
+            "-af",
+            audioFilters.join(","),
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-ar",
+            "44100",
+            "-ac",
+            "2",
+            "-movflags",
+            "+faststart",
+            "-shortest",
+            outputMp4Path,
+          ];
 
-          await execFileAsync(
-            "ffmpeg",
-            [
-              "-y",
-              "-i",
-              inputVideoPath,
-              "-i",
-              origWavPath,
-              "-map",
-              "0:v:0",
-              "-map",
-              "1:a:0",
-              ...videoCodecArgs,
-              "-af",
-              audioFilters.join(","),
-              "-c:a",
-              "aac",
-              "-b:a",
-              "192k",
-              "-ar",
-              "44100",
-              "-ac",
-              "2",
-              "-movflags",
-              "+faststart",
-              "-shortest",
-              outputMp4Path,
-            ],
-            FFMPEG_EXEC_OPTS
-          );
+          if (canStreamCopyVideo) {
+            try {
+              await execFileAsync("ffmpeg", buildMuxWithAudioArgs(videoCopyArgs), FFMPEG_EXEC_OPTS);
+              if (fs.existsSync(outputMp4Path) && fs.statSync(outputMp4Path).size > 512) {
+                muxedWithAudio = true;
+                return;
+              }
+            } catch {
+              // Fall back to re-encode below
+            }
+          }
+
+          await execFileAsync("ffmpeg", buildMuxWithAudioArgs(videoReencodeArgs), FFMPEG_EXEC_OPTS);
           muxedWithAudio = true;
         },
         { markFinalized: true }
@@ -3980,9 +4105,22 @@ app.post("/api/mux-mp4", async (req, res) => {
       await runVideoOnlyMux();
     }
 
+    const wantDownloadUrl = Boolean((req.body as { returnDownloadUrl?: boolean })?.returnDownloadUrl);
+    const requestedFileName = (req.body as { fileName?: string })?.fileName;
+    if (wantDownloadUrl) {
+      const entry = await registerCompletedExport(outputMp4Path, requestedFileName);
+      res.json({
+        exportId: entry.id,
+        downloadUrl: `/api/download-export/${encodeURIComponent(entry.id)}`,
+        fileName: entry.fileName,
+        sizeBytes: entry.sizeBytes,
+      });
+      return;
+    }
+
     const outBuffer = await fs.promises.readFile(outputMp4Path);
     res.setHeader("Content-Type", "video/mp4");
-    res.setHeader("Content-Disposition", 'attachment; filename="thai-burmese-9x16.mp4"');
+    res.setHeader("Content-Disposition", `attachment; filename="${sanitizeExportFileName(requestedFileName)}"`);
     res.send(outBuffer);
   } catch (err) {
     console.error("Mux MP4 error:", err);
@@ -3995,6 +4133,534 @@ app.post("/api/mux-mp4", async (req, res) => {
     }
     await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   }
+});
+
+function buildTopVideoFfmpegFilter(
+  editSettings: Partial<VideoEditSettings> | undefined,
+  width: number,
+  topVideoH: number
+): string {
+  const fitMode = editSettings?.fitMode === "contain" ? "contain" : "cover";
+  const zoom = Math.max(0.5, Math.min(3, Number(editSettings?.zoom) || 1));
+  const panXRatio = Math.max(-0.5, Math.min(0.5, (Number(editSettings?.panX) || 0) / 100));
+  const panYRatio = Math.max(-0.5, Math.min(0.5, (Number(editSettings?.panY) || 0) / 100));
+  const rotateDeg = Number(editSettings?.rotateDeg) || 0;
+  const flipH = Boolean(editSettings?.flipH);
+  const flipV = Boolean(editSettings?.flipV);
+
+  const targetW = Math.max(2, Math.round((width * zoom) / 2) * 2);
+  const targetH = Math.max(2, Math.round((topVideoH * zoom) / 2) * 2);
+  const ratioFlag = fitMode === "contain" ? "decrease" : "increase";
+
+  const parts: string[] = [
+    `scale=w=${targetW}:h=${targetH}:force_original_aspect_ratio=${ratioFlag}:force_divisible_by=2`,
+    "setsar=1",
+  ];
+
+  if (flipH) parts.push("hflip");
+  if (flipV) parts.push("vflip");
+  if (Math.abs(rotateDeg) >= 0.5) {
+    const rad = ((rotateDeg * Math.PI) / 180).toFixed(5);
+    parts.push(`rotate=${rad}:fillcolor=0x111111`);
+  }
+
+  // Always pad to at least width x topVideoH, then safely clamped crop to exact width x topVideoH
+  parts.push(
+    `pad=w='max(iw,${width})':h='max(ih,${topVideoH})':x='(ow-iw)/2':y='(oh-ih)/2':color=0x111111`
+  );
+  parts.push(
+    `crop=w=${width}:h=${topVideoH}:x='max(0,min(iw-${width},(iw-${width})/2-(${panXRatio.toFixed(4)})*${width}))':y='max(0,min(ih-${topVideoH},(ih-${topVideoH})/2-(${panYRatio.toFixed(4)})*${topVideoH}))'`
+  );
+
+  // Optional color/filter adjustments (only appended when non-default for max speed)
+  const brightnessPct = editSettings?.brightness ?? 100;
+  const contrastPct = editSettings?.contrast ?? 100;
+  const satPct = editSettings?.saturation ?? 100;
+  const hueDeg = editSettings?.hueDeg ?? 0;
+  const grayscalePct = editSettings?.grayscale ?? 0;
+  const sepiaPct = editSettings?.sepia ?? 0;
+  const blurPx = editSettings?.blurPx ?? 0;
+  const vignettePct = editSettings?.vignette ?? 0;
+
+  if (
+    Math.abs(brightnessPct - 100) >= 1 ||
+    Math.abs(contrastPct - 100) >= 1 ||
+    Math.abs(satPct - 100) >= 1 ||
+    grayscalePct >= 1
+  ) {
+    const eqBright = Math.max(-0.5, Math.min(0.5, (brightnessPct - 100) / 200));
+    const eqContrast = Math.max(0.2, Math.min(2.5, contrastPct / 100));
+    const effectiveSat = Math.max(0, Math.min(3, (satPct / 100) * (1 - grayscalePct / 100)));
+    parts.push(
+      `eq=brightness=${eqBright.toFixed(3)}:contrast=${eqContrast.toFixed(3)}:saturation=${effectiveSat.toFixed(3)}`
+    );
+  }
+  if (Math.abs(hueDeg) >= 1) {
+    parts.push(`hue=h=${hueDeg.toFixed(1)}`);
+  }
+  if (sepiaPct >= 5) {
+    const s = Math.max(0, Math.min(1, sepiaPct / 100));
+    const rr = (1 - s + 0.393 * s).toFixed(3);
+    const rg = (0.769 * s).toFixed(3);
+    const rb = (0.189 * s).toFixed(3);
+    const gr = (0.349 * s).toFixed(3);
+    const gg = (1 - s + 0.686 * s).toFixed(3);
+    const gb = (0.168 * s).toFixed(3);
+    const br = (0.272 * s).toFixed(3);
+    const bg = (0.534 * s).toFixed(3);
+    const bb = (1 - s + 0.131 * s).toFixed(3);
+    parts.push(
+      `colorchannelmixer=${rr}:${rg}:${rb}:0:${gr}:${gg}:${gb}:0:${br}:${bg}:${bb}:0`
+    );
+  }
+  if (blurPx >= 0.4) {
+    parts.push(`gblur=sigma=${Math.min(8, blurPx).toFixed(2)}`);
+  }
+  if (editSettings?.adversarialNoise) {
+    const strength = Math.max(2, Math.min(12, Math.round((Number(editSettings.adversarialStrength) || 12) / 3)));
+    parts.push(`noise=alls=${strength}:allf=t+u`);
+  }
+  if (vignettePct >= 5) {
+    const angle = Math.max(0.25, Math.min(1.2, (vignettePct / 100) * 0.9)).toFixed(3);
+    parts.push(`vignette=angle=${angle}`);
+  }
+
+  parts.push("setpts=PTS-STARTPTS");
+  return parts.join(",");
+}
+
+// Fast single-pass native FFmpeg 9:16 exporter for local videos:
+// Cuts & frames top video directly on server + optionally vstacks lightweight subtitle strip + muxes audio.
+app.post("/api/export-fast-mp4", async (req, res) => {
+  const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "thai-studio-"));
+  const ffmpegAbort = new AbortController();
+  const onClientClose = () => {
+    if (!res.writableEnded) {
+      ffmpegAbort.abort();
+    }
+  };
+  res.on("close", onClientClose);
+
+  const {
+    uploadId,
+    scenes = [],
+    voiceSettings,
+    editSettings,
+    width = 720,
+    height = 1280,
+    topVideoH: rawTopVideoH,
+    subtitleBase64,
+    subtitleUploadId,
+    subtitleFormat = "mp4",
+    subtitleFps = 15,
+    subtitleForceCfr = false,
+    subtitleRecordedDurationSec,
+    targetDurationSec,
+    fileName,
+  } = (req.body || {}) as {
+    uploadId?: string;
+    scenes?: SpeakingScene[];
+    voiceSettings?: VoiceSettings;
+    editSettings?: Partial<VideoEditSettings>;
+    width?: number;
+    height?: number;
+    topVideoH?: number;
+    subtitleBase64?: string;
+    subtitleUploadId?: string;
+    subtitleFormat?: "mp4" | "webm";
+    subtitleFps?: number;
+    subtitleForceCfr?: boolean;
+    subtitleRecordedDurationSec?: number;
+    targetDurationSec?: number;
+    fileName?: string;
+  };
+
+  try {
+    if (!uploadId) {
+      res.status(404).json({ error: "Uploaded video file not found. Please re-upload." });
+      return;
+    }
+
+    const outW = Math.max(360, Math.min(1080, Math.round((Number(width) || 720) / 2) * 2));
+    const outH = Math.max(640, Math.min(1920, Math.round((Number(height) || 1280) / 2) * 2));
+
+    let subtitlePath: string | null = null;
+    if (subtitleUploadId) {
+      const candidateSub = path.join(tmpDir, `sub.${subtitleFormat === "webm" ? "webm" : "mp4"}`);
+      const copied = await withUploadSessionLock(subtitleUploadId, async (p) => {
+        await fs.promises.copyFile(p, candidateSub);
+        return true;
+      });
+      if (copied && fs.existsSync(candidateSub) && fs.statSync(candidateSub).size > 256) {
+        subtitlePath = candidateSub;
+      }
+    } else if (subtitleBase64) {
+      const candidateSub = path.join(tmpDir, `sub.${subtitleFormat === "webm" ? "webm" : "mp4"}`);
+      await fs.promises.writeFile(candidateSub, Buffer.from(subtitleBase64, "base64"));
+      if (fs.existsSync(candidateSub) && fs.statSync(candidateSub).size > 256) {
+        subtitlePath = candidateSub;
+      }
+    }
+
+    const hasSubStrip = Boolean(subtitlePath);
+    const topVideoH = hasSubStrip
+      ? Math.max(240, Math.min(outH - 240, Math.round((Number(rawTopVideoH) || Math.round(outH * 0.35)) / 2) * 2))
+      : outH;
+    const listH = outH - topVideoH;
+    const speed = Math.max(0.5, Math.min(2.5, Number(voiceSettings?.speed) || 1));
+
+    const outputMp4Path = path.join(tmpDir, "output.mp4");
+    const execOpts = { ...FFMPEG_EXEC_OPTS, signal: ffmpegAbort.signal, timeout: 110_000 };
+
+    const normalizedScenes = (Array.isArray(scenes) ? scenes : [])
+      .map((sc) => {
+        const startSec = Math.max(0, Number(sc.startSec) || 0);
+        const rawEnd = Number(sc.endSec);
+        const rawDur = Number(sc.durationSec);
+        const durationSec =
+          Number.isFinite(rawEnd) && rawEnd > startSec
+            ? Math.max(0.1, rawEnd - startSec)
+            : Math.max(0.1, Number.isFinite(rawDur) ? rawDur : 0.1);
+        return { startSec, durationSec };
+      })
+      .filter((sc) => Number.isFinite(sc.startSec) && Number.isFinite(sc.durationSec));
+
+    const entry = await withUploadSessionLock(
+      uploadId,
+      async (uploadedPath) => {
+        const sourceProbe = await probeMediaInfo(uploadedPath);
+        const topFilter = buildTopVideoFfmpegFilter(editSettings, outW, topVideoH);
+
+        const ffmpegInputs: string[] = [];
+        const filterChains: string[] = [];
+        const sceneCount = Math.max(1, normalizedScenes.length);
+
+        if (normalizedScenes.length === 0) {
+          ffmpegInputs.push("-i", uploadedPath);
+          const speedExpr = Math.abs(speed - 1) > 0.01 ? `,setpts=PTS/${speed.toFixed(4)}` : "";
+          filterChains.push(`[0:v]${topFilter}${speedExpr},fps=24,format=yuv420p[topv]`);
+        } else if (normalizedScenes.length === 1) {
+          const sc = normalizedScenes[0];
+          ffmpegInputs.push("-ss", String(sc.startSec), "-t", String(sc.durationSec), "-i", uploadedPath);
+          const speedExpr = Math.abs(speed - 1) > 0.01 ? `,setpts=PTS/${speed.toFixed(4)}` : "";
+          filterChains.push(`[0:v]${topFilter}${speedExpr},fps=24,format=yuv420p[topv]`);
+        } else {
+          const concatLabels: string[] = [];
+          for (let i = 0; i < normalizedScenes.length; i++) {
+            const sc = normalizedScenes[i];
+            ffmpegInputs.push("-ss", String(sc.startSec), "-t", String(sc.durationSec), "-i", uploadedPath);
+            filterChains.push(`[${i}:v]${topFilter}[v${i}]`);
+            concatLabels.push(`[v${i}]`);
+          }
+          const speedExpr = Math.abs(speed - 1) > 0.01 ? `,setpts=PTS/${speed.toFixed(4)}` : "";
+          filterChains.push(
+            `${concatLabels.join("")}concat=n=${normalizedScenes.length}:v=1:a=0${speedExpr},fps=24,format=yuv420p[topv]`
+          );
+        }
+
+        let nextInputIdx = sceneCount;
+        let finalVideoLabel = "[topv]";
+
+        if (hasSubStrip && subtitlePath) {
+          const subIdx = nextInputIdx++;
+          ffmpegInputs.push("-i", subtitlePath);
+          const subParts: string[] = [];
+          const safeTargetDur = Number(targetDurationSec);
+          const safeSubFps = Math.max(8, Math.min(30, Number(subtitleFps) || 15));
+          if (subtitleForceCfr) {
+            subParts.push(`setpts=N/(${safeSubFps}*TB)`);
+          } else if (
+            Number.isFinite(safeTargetDur) &&
+            safeTargetDur > 0.2 &&
+            subtitleRecordedDurationSec !== undefined
+          ) {
+            const subProbe = await probeMediaInfo(subtitlePath);
+            const actualDur =
+              subProbe.durationSec > 0.2 ? subProbe.durationSec : Number(subtitleRecordedDurationSec);
+            if (Number.isFinite(actualDur) && actualDur > 0.2) {
+              const ptsScale = safeTargetDur / actualDur;
+              if (Math.abs(ptsScale - 1) > 0.02 && ptsScale > 0.1 && ptsScale < 10) {
+                subParts.push(`setpts=PTS*${ptsScale.toFixed(6)}`);
+              }
+            }
+          }
+          subParts.push(`scale=${outW}:${listH}`, "setsar=1", "fps=24", "format=yuv420p");
+          filterChains.push(`[${subIdx}:v]${subParts.join(",")}[subv]`);
+          filterChains.push(`[topv][subv]vstack=inputs=2:shortest=1[outv]`);
+          finalVideoLabel = "[outv]";
+        }
+
+        // Extract audio scenes in parallel batches of 4 when source has audio
+        let origWavPath: string | null = null;
+        if (sourceProbe.hasAudio && normalizedScenes.length > 0) {
+          const segResults: (string | null)[] = new Array(normalizedScenes.length).fill(null);
+          const extractOne = async (i: number) => {
+            const sc = normalizedScenes[i];
+            const segOut = path.join(tmpDir, `seg-${i}.wav`);
+            let extracted = false;
+            try {
+              await execFileAsync(
+                "ffmpeg",
+                [
+                  "-y",
+                  "-vn",
+                  "-ss",
+                  String(sc.startSec),
+                  "-t",
+                  String(sc.durationSec),
+                  "-i",
+                  uploadedPath,
+                  "-af",
+                  `aresample=44100:async=1,apad,atrim=0:${sc.durationSec.toFixed(4)}`,
+                  "-ac",
+                  "2",
+                  "-ar",
+                  "44100",
+                  segOut,
+                ],
+                execOpts
+              );
+              extracted = fs.existsSync(segOut) && fs.statSync(segOut).size > 44;
+            } catch {
+              extracted = false;
+            }
+            if (!extracted && !ffmpegAbort.signal.aborted) {
+              try {
+                await execFileAsync(
+                  "ffmpeg",
+                  [
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "anullsrc=r=44100:cl=stereo",
+                    "-t",
+                    sc.durationSec.toFixed(4),
+                    "-ac",
+                    "2",
+                    "-ar",
+                    "44100",
+                    segOut,
+                  ],
+                  execOpts
+                );
+                extracted = fs.existsSync(segOut) && fs.statSync(segOut).size > 44;
+              } catch {
+                extracted = false;
+              }
+            }
+            if (extracted) segResults[i] = segOut;
+          };
+
+          for (let batchStart = 0; batchStart < normalizedScenes.length; batchStart += 4) {
+            if (ffmpegAbort.signal.aborted) break;
+            const batch: Promise<void>[] = [];
+            for (let idx = batchStart; idx < Math.min(normalizedScenes.length, batchStart + 4); idx++) {
+              batch.push(extractOne(idx));
+            }
+            await Promise.all(batch);
+          }
+
+          const segFiles = segResults.filter((s): s is string => Boolean(s));
+          if (segFiles.length === 1) {
+            origWavPath = segFiles[0];
+          } else if (segFiles.length > 1) {
+            const mergedWav = path.join(tmpDir, "original-cuts.wav");
+            const concatInputArgs: string[] = [];
+            const concatLabels: string[] = [];
+            for (let i = 0; i < segFiles.length; i++) {
+              concatInputArgs.push("-i", segFiles[i]);
+              concatLabels.push(`[${i}:a]`);
+            }
+            await execFileAsync(
+              "ffmpeg",
+              [
+                "-y",
+                ...concatInputArgs,
+                "-filter_complex",
+                `${concatLabels.join("")}concat=n=${segFiles.length}:v=0:a=1[outa]`,
+                "-map",
+                "[outa]",
+                "-ac",
+                "2",
+                "-ar",
+                "44100",
+                mergedWav,
+              ],
+              execOpts
+            );
+            origWavPath = mergedWav;
+          }
+        }
+
+        const audioArgs: string[] = [];
+        if (origWavPath) {
+          const audioIdx = nextInputIdx++;
+          ffmpegInputs.push("-i", origWavPath);
+          const audioFilters = buildVoiceAudioFilters(voiceSettings);
+          audioArgs.push(
+            "-map",
+            `${audioIdx}:a:0`,
+            "-af",
+            audioFilters.join(","),
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-ar",
+            "44100",
+            "-ac",
+            "2",
+            "-shortest"
+          );
+        } else {
+          audioArgs.push("-an");
+        }
+
+        await execFileAsync(
+          "ffmpeg",
+          [
+            "-y",
+            ...ffmpegInputs,
+            "-filter_complex",
+            filterChains.join(";"),
+            "-map",
+            finalVideoLabel,
+            ...audioArgs,
+            "-c:v",
+            "libx264",
+            "-preset",
+            "superfast",
+            "-crf",
+            "25",
+            "-maxrate",
+            "1800k",
+            "-bufsize",
+            "3600k",
+            "-pix_fmt",
+            "yuv420p",
+            "-profile:v",
+            "main",
+            "-level",
+            "4.0",
+            "-r",
+            "24",
+            "-vsync",
+            "cfr",
+            "-movflags",
+            "+faststart",
+            outputMp4Path,
+          ],
+          execOpts
+        );
+
+        if (!fs.existsSync(outputMp4Path) || fs.statSync(outputMp4Path).size < 512) {
+          return null;
+        }
+        return registerCompletedExport(outputMp4Path, fileName);
+      },
+      { markFinalized: true }
+    );
+
+    if (ffmpegAbort.signal.aborted) {
+      return;
+    }
+    if (!entry) {
+      res.status(404).json({ error: "Uploaded video file not found or export failed." });
+      return;
+    }
+
+    res.json({
+      exportId: entry.id,
+      downloadUrl: `/api/download-export/${encodeURIComponent(entry.id)}`,
+      fileName: entry.fileName,
+      sizeBytes: entry.sizeBytes,
+    });
+  } catch (err) {
+    if (ffmpegAbort.signal.aborted) {
+      return;
+    }
+    console.error("Fast export MP4 error:", err);
+    res.status(500).json({
+      error: err instanceof Error ? err.message : "Failed to export 9:16 MP4.",
+    });
+  } finally {
+    res.off("close", onClientClose);
+    if (subtitleUploadId) {
+      await deleteUploadSession(subtitleUploadId);
+    }
+    await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
+// Range-capable MP4 download endpoint (supports 8MB chunked fetches safely under Cloud Run's 32MB limit)
+app.get("/api/download-export/:exportId", (req, res) => {
+  const exportId = String(req.params.exportId || "");
+  if (!/^[a-zA-Z0-9_-]{8,64}$/.test(exportId)) {
+    res.status(400).json({ error: "Invalid export ID." });
+    return;
+  }
+  const entry = completedExports.get(exportId);
+  if (!entry || !fs.existsSync(entry.filePath)) {
+    completedExports.delete(exportId);
+    res.status(404).json({ error: "Exported video expired or not found. Please export again." });
+    return;
+  }
+  // Refresh TTL on download so user can re-save or finish chunked transfer safely
+  entry.createdAt = Date.now();
+  const totalSize = entry.sizeBytes;
+  const rangeHeader = typeof req.headers.range === "string" ? req.headers.range.trim() : "";
+
+  res.setHeader("Accept-Ranges", "bytes");
+  res.setHeader("Content-Type", "video/mp4");
+  res.setHeader("Content-Disposition", `attachment; filename="${entry.fileName}"`);
+  res.setHeader("Cache-Control", "no-store");
+
+  if (rangeHeader) {
+    const match = /^bytes=(\d*)-(\d*)$/i.exec(rangeHeader);
+    if (!match) {
+      res.status(416).setHeader("Content-Range", `bytes */${totalSize}`).end();
+      return;
+    }
+    const start = match[1] ? Number(match[1]) : 0;
+    const requestedEnd = match[2] ? Number(match[2]) : totalSize - 1;
+    if (
+      !Number.isFinite(start) ||
+      !Number.isFinite(requestedEnd) ||
+      start < 0 ||
+      start >= totalSize ||
+      requestedEnd < start
+    ) {
+      res.status(416).setHeader("Content-Range", `bytes */${totalSize}`).end();
+      return;
+    }
+    const end = Math.min(totalSize - 1, requestedEnd);
+    const chunkLength = end - start + 1;
+    res.status(206);
+    res.setHeader("Content-Range", `bytes ${start}-${end}/${totalSize}`);
+    res.setHeader("Content-Length", String(chunkLength));
+    const stream = fs.createReadStream(entry.filePath, { start, end });
+    stream.on("error", () => {
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Failed to stream exported video chunk." });
+      } else {
+        res.end();
+      }
+    });
+    stream.pipe(res);
+    return;
+  }
+
+  res.setHeader("Content-Length", String(totalSize));
+  const stream = fs.createReadStream(entry.filePath);
+  stream.on("error", () => {
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Failed to stream exported video." });
+    } else {
+      res.end();
+    }
+  });
+  stream.pipe(res);
 });
 
 // Ensure unknown /api/* routes and Express middleware errors always return JSON (never HTML)
