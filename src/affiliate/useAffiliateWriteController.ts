@@ -8,6 +8,7 @@ import {
   type AffiliateProduct,
   type AffiliateProductStatus,
   type CampaignStatus,
+  type FirebaseConnectionStatus,
   type MarketingCampaign,
   type OwnerCollectionKey,
   type OwnerCollectionMap,
@@ -66,6 +67,7 @@ export interface AffiliateWriteResult {
 export interface AffiliateWriteWorkspaceContext {
   connectionState: WorkspaceConnectionState;
   browserOnlineHint: boolean;
+  bootConnectionStatus?: FirebaseConnectionStatus;
   pendingDocIds: readonly string[];
   snapshotHasPendingWrites: boolean;
 }
@@ -236,6 +238,7 @@ export function createAffiliateWriteControllerCore(deps: AffiliateWriteControlle
     workspaceCtx = {
       connectionState: next.connectionState,
       browserOnlineHint: next.browserOnlineHint,
+      bootConnectionStatus: next.bootConnectionStatus ?? workspaceCtx.bootConnectionStatus,
       pendingDocIds: [...next.pendingDocIds],
       snapshotHasPendingWrites: next.snapshotHasPendingWrites,
     };
@@ -263,6 +266,13 @@ export function createAffiliateWriteControllerCore(deps: AffiliateWriteControlle
       tracker = { ...tracker, state: "sync_pending" };
       notify();
     }
+  };
+
+  const syncBootConnectionStatus = (bootConnectionStatus: FirebaseConnectionStatus) => {
+    workspaceCtx = {
+      ...workspaceCtx,
+      bootConnectionStatus,
+    };
   };
 
   const allocatePendingCreateDocId = (kind: "product" | "campaign"): string => {
@@ -337,18 +347,22 @@ export function createAffiliateWriteControllerCore(deps: AffiliateWriteControlle
       };
     }
 
-    // M4: Strict connected-only write guard (blocks cached, offline, sync_pending, error)
+    // M4 + D-01: Strict connected-only write guard (blocks checking, unconfigured, cached, offline, sync_pending, error)
     const allowedToWrite = canStartFirestoreWrite({
       isOwner: session.isOwner,
       hasOwnerProfile: session.hasOwnerProfile,
       connectionState: effectiveCtx.connectionState,
       browserOnlineHint: effectiveCtx.browserOnlineHint,
+      bootConnectionStatus: effectiveCtx.bootConnectionStatus,
     });
     if (!allowedToWrite) {
       const errorKey =
-        effectiveCtx.connectionState === "cached"
-          ? "errCachedWriteBlocked"
-          : "errOfflineWriteBlocked";
+        effectiveCtx.connectionState === "sync_pending"
+          ? "errWriteInFlightLocked"
+          : effectiveCtx.connectionState === "cached" ||
+              effectiveCtx.bootConnectionStatus === "checking"
+            ? "errCachedWriteBlocked"
+            : "errOfflineWriteBlocked";
       return {
         ok: false,
         docId,
@@ -772,6 +786,7 @@ export function createAffiliateWriteControllerCore(deps: AffiliateWriteControlle
     subscribe,
     syncOwnerSession,
     syncWorkspaceContext,
+    syncBootConnectionStatus,
     handleBrowserOnlineChange,
     allocatePendingCreateDocId,
     discardPendingCreateDocId,
@@ -839,7 +854,14 @@ export interface AffiliateWriteController {
  * final Saved/Failed feedback survive modal dismissal and Video <-> Affiliate switches.
  */
 export function useAffiliateWriteController(): AffiliateWriteController {
-  const { user, isOwner, ownerProfile, projectId, databaseId } = useFirebase();
+  const {
+    user,
+    isOwner,
+    ownerProfile,
+    connectionStatus: bootConnectionStatus,
+    projectId,
+    databaseId,
+  } = useFirebase();
   const userUid = user?.uid ?? null;
   const hasOwnerProfile = Boolean(ownerProfile);
 
@@ -892,6 +914,11 @@ export function useAffiliateWriteController(): AffiliateWriteController {
       hasOwnerProfile,
     });
   }, [core, userUid, isOwner, hasOwnerProfile]);
+
+  // Keep controller synchronized with live Firebase boot connection status
+  useEffect(() => {
+    core.syncBootConnectionStatus(bootConnectionStatus);
+  }, [core, bootConnectionStatus]);
 
   // Keep online/offline escalation active even when AffiliateWorkspace is unmounted
   useEffect(() => {

@@ -62,19 +62,53 @@ export function generateFirestoreDocId(prefix: string): string {
   return `${safePrefix}_${Date.now().toString(36)}_${rand}`;
 }
 
+export interface OwnerProfileSnapshotLike {
+  id: string;
+  exists: () => boolean;
+  data: () => unknown;
+  metadata?: { fromCache?: boolean };
+}
+
+/**
+ * Pure verifier for server-confirmed owner profile snapshots.
+ * Rejects cache-only reads and verifies both document ID and ownerUid match expectedUid.
+ */
+export function verifyOwnerProfileSnapshot(
+  snap: OwnerProfileSnapshotLike,
+  expectedUid: string
+): WithId<UserProfile> | null {
+  if (snap.metadata?.fromCache) {
+    throw new Error("Owner profile verification requires a live Firestore server response.");
+  }
+  if (!snap.exists()) {
+    return null;
+  }
+  const data = snap.data() as Partial<UserProfile> | undefined;
+  if (!data || data.ownerUid !== expectedUid || snap.id !== expectedUid) {
+    throw new Error("Owner profile UID verification failed.");
+  }
+  return { id: snap.id, ...(data as UserProfile) };
+}
+
 /**
  * Ensures the authenticated owner's root profile document exists at /users/{uid}.
+ * Uses getDocFromServer so cache-only reads are never mistaken for live server
+ * connectivity or an absent profile, and verifies ownerUid matches the live UID.
  * Required by the Master Gate rule before creating subcollection documents.
  */
 export async function ensureOwnerProfile(user: User): Promise<WithId<UserProfile>> {
   const { db, auth, uid } = requireDbAndUid(user.uid);
+  if (!auth.currentUser || auth.currentUser.uid !== uid) {
+    throw new Error("Authenticated owner UID mismatch during profile initialization.");
+  }
   const profilePath = `users/${uid}`;
   const ref = doc(db, "users", uid);
 
   try {
-    const snap = await getDoc(ref);
-    if (snap.exists()) {
-      return { id: snap.id, ...(snap.data() as UserProfile) };
+    const snap = await getDocFromServer(ref);
+    const existing = verifyOwnerProfileSnapshot(snap, uid);
+    if (existing) {
+      return existing;
     }
 
     const email = sanitizeBoundedString(user.email || "", FIELD_LIMITS.email);
@@ -92,8 +126,12 @@ export async function ensureOwnerProfile(user: User): Promise<WithId<UserProfile
     });
 
     await setDoc(ref, payload);
-    const createdSnap = await getDoc(ref);
-    return { id: createdSnap.id, ...(createdSnap.data() as UserProfile) };
+    const createdSnap = await getDocFromServer(ref);
+    const verifiedCreated = verifyOwnerProfileSnapshot(createdSnap, uid);
+    if (!verifiedCreated) {
+      throw new Error("Owner profile could not be verified on server after creation.");
+    }
+    return verifiedCreated;
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, profilePath, auth);
   }

@@ -317,6 +317,7 @@ export function useAffiliateWorkspaceData(
     hasOwnerProfile,
     connectionState,
     browserOnlineHint,
+    bootConnectionStatus,
   });
 
   // Keep App-level write controller synced with live Firestore snapshot metadata
@@ -324,6 +325,7 @@ export function useAffiliateWorkspaceData(
     writeController.syncWorkspaceContext({
       connectionState,
       browserOnlineHint,
+      bootConnectionStatus,
       pendingDocIds: snapshotPendingDocIds,
       snapshotHasPendingWrites,
     });
@@ -331,12 +333,17 @@ export function useAffiliateWorkspaceData(
     writeController,
     connectionState,
     browserOnlineHint,
+    bootConnectionStatus,
     snapshotPendingDocIds,
     snapshotHasPendingWrites,
   ]);
 
   const retryConnection = useCallback(() => {
     setListenerError(null);
+    // Mark prior snapshot metadata as cached before re-subscribing so stale
+    // server snapshots from torn-down listeners cannot unlock writes mid-reconnect.
+    setProductsMeta((prev) => (prev ? { ...prev, fromCache: true } : null));
+    setCampaignsMeta((prev) => (prev ? { ...prev, fromCache: true } : null));
     setRetryNonce((n) => n + 1);
     void retryBootConnection();
   }, [retryBootConnection]);
@@ -345,10 +352,17 @@ export function useAffiliateWorkspaceData(
     () => ({
       connectionState,
       browserOnlineHint,
+      bootConnectionStatus,
       pendingDocIds: snapshotPendingDocIds,
       snapshotHasPendingWrites,
     }),
-    [connectionState, browserOnlineHint, snapshotPendingDocIds, snapshotHasPendingWrites]
+    [
+      connectionState,
+      browserOnlineHint,
+      bootConnectionStatus,
+      snapshotPendingDocIds,
+      snapshotHasPendingWrites,
+    ]
   );
 
   const createProduct = useCallback(

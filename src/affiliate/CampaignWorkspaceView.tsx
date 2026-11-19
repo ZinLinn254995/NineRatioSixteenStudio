@@ -136,9 +136,11 @@ export function CampaignWorkspaceView({
     if (!effectiveCanWriteNow) {
       if (connectionState) {
         setInlineError(
-          connectionState === "cached"
-            ? labels.errCachedWriteBlocked
-            : labels.errOfflineWriteBlocked
+          connectionState === "sync_pending"
+            ? labels.errWriteInFlightLocked
+            : connectionState === "cached"
+              ? labels.errCachedWriteBlocked
+              : labels.errOfflineWriteBlocked
         );
         return;
       }
@@ -165,9 +167,11 @@ export function CampaignWorkspaceView({
     if (!effectiveCanWriteNow) {
       if (connectionState) {
         setModalError(
-          connectionState === "cached"
-            ? labels.errCachedWriteBlocked
-            : labels.errOfflineWriteBlocked
+          connectionState === "sync_pending"
+            ? labels.errWriteInFlightLocked
+            : connectionState === "cached"
+              ? labels.errCachedWriteBlocked
+              : labels.errOfflineWriteBlocked
         );
         setModalWriteState("failed");
         return;

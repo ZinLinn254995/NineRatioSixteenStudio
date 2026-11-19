@@ -35,6 +35,7 @@ import {
   canEditRecord,
   canStartFirestoreWrite,
   classifyWorkspaceConnectionState,
+  evaluateAffiliateFormWriteGuard,
   hasExistingDocumentWithId,
   isSafeHttpUrl,
   normalizeSearchText,
@@ -58,10 +59,21 @@ import { getAffiliateLabels } from "./src/affiliate/affiliateLabels";
 import { ConfirmActionModal } from "./src/affiliate/ConfirmActionModal";
 import { ProductWorkspaceView } from "./src/affiliate/ProductWorkspaceView";
 import { CampaignWorkspaceView } from "./src/affiliate/CampaignWorkspaceView";
+import { ProductFormModal } from "./src/affiliate/ProductFormModal";
+import { CampaignFormModal } from "./src/affiliate/CampaignFormModal";
+import {
+  OwnerProfileGateView,
+  resolveGate4ViewMode,
+} from "./src/affiliate/AffiliateWorkspace";
 import {
   createFirebaseRecoveryCoordinator,
   matchesOwnerAccount,
 } from "./src/firebase/FirebaseContext";
+import {
+  classifyFirestoreConnectionError,
+  isFirestoreOfflineError,
+} from "./src/firebase/client";
+import { verifyOwnerProfileSnapshot } from "./src/firebase/firestoreService";
 import type { User } from "firebase/auth";
 import type {
   AffiliateProduct,
@@ -1649,6 +1661,1166 @@ async function main() {
     assert.match(workspaceSrc, /labels\.signOut/);
     assert.match(firebaseCtxSrc, /window\.addEventListener\("online"/);
     assert.match(dataHookSrc, /retryBootConnection\(\)/);
+  });
+
+  // 22. DEFECT A: Connection state transitions (connected -> checking w/ old snapshots, checking -> offline/error/connected, unconfigured w/ snapshots)
+  await runTest("DEFECT A: Connection checking and unconfigured states never unlock writes from stale server snapshots", async () => {
+    // 22a. connected -> checking with old server snapshots (hasSnapshot: true, fromCache: false)
+    const connectedState = classifyWorkspaceConnectionState({
+      browserOnlineHint: true,
+      bootConnectionStatus: "connected",
+      listenerError: null,
+      hasSnapshot: true,
+      fromCache: false,
+      hasPendingWrites: false,
+      hasInFlightWrite: false,
+    });
+    assert.equal(connectedState, "connected");
+    assert.equal(
+      canStartFirestoreWrite({
+        isOwner: true,
+        hasOwnerProfile: true,
+        connectionState: connectedState,
+        browserOnlineHint: true,
+        bootConnectionStatus: "connected",
+      }),
+      true
+    );
+
+    const checkingWithOldSnapshots = classifyWorkspaceConnectionState({
+      browserOnlineHint: true,
+      bootConnectionStatus: "checking",
+      listenerError: null,
+      hasSnapshot: true,
+      fromCache: false,
+      hasPendingWrites: false,
+      hasInFlightWrite: false,
+    });
+    assert.equal(
+      checkingWithOldSnapshots,
+      "cached",
+      "Stale server snapshots must NEVER report 'connected' while bootConnectionStatus is 'checking'"
+    );
+    assert.equal(
+      canStartFirestoreWrite({
+        isOwner: true,
+        hasOwnerProfile: true,
+        connectionState: checkingWithOldSnapshots,
+        browserOnlineHint: true,
+        bootConnectionStatus: "checking",
+      }),
+      false,
+      "Writes must remain blocked while bootConnectionStatus is 'checking'"
+    );
+    // Even if someone passes a stale connectionState="connected", bootConnectionStatus="checking" must still block
+    assert.equal(
+      canStartFirestoreWrite({
+        isOwner: true,
+        hasOwnerProfile: true,
+        connectionState: "connected",
+        browserOnlineHint: true,
+        bootConnectionStatus: "checking",
+      }),
+      false
+    );
+
+    // 22b. unconfigured with existing snapshots
+    const unconfiguredWithSnapshots = classifyWorkspaceConnectionState({
+      browserOnlineHint: true,
+      bootConnectionStatus: "unconfigured",
+      listenerError: null,
+      hasSnapshot: true,
+      fromCache: false,
+      hasPendingWrites: false,
+      hasInFlightWrite: false,
+    });
+    assert.equal(unconfiguredWithSnapshots, "offline");
+    assert.equal(
+      canStartFirestoreWrite({
+        isOwner: true,
+        hasOwnerProfile: true,
+        connectionState: "connected",
+        browserOnlineHint: true,
+        bootConnectionStatus: "unconfigured",
+      }),
+      false,
+      "Writes must remain blocked when bootConnectionStatus is 'unconfigured'"
+    );
+
+    // 22c. Coordinator transitions: connected -> checking -> offline, checking -> error, checking -> connected
+    const responses: Array<ReturnType<typeof createDeferred<{ status: "connected" | "offline" | "error" }>>> = [
+      createDeferred(),
+      createDeferred(),
+      createDeferred(),
+      createDeferred(),
+    ];
+    let callIdx = 0;
+
+    const coordinator = createFirebaseRecoveryCoordinator({
+      isConfigured: true,
+      expectedOwnerEmail: "owner@example.com",
+      testConnection: () => {
+        const d = responses[callIdx++];
+        return d.promise;
+      },
+      ensureOwnerProfile: async () => {
+        throw new Error("not used");
+      },
+      getCurrentUser: () => null,
+    });
+
+    // Initial boot: checking -> connected
+    const p1 = coordinator.retryBootConnection();
+    assert.equal(coordinator.getState().connectionStatus, "checking");
+    responses[0].resolve({ status: "connected" });
+    assert.equal(await p1, "connected");
+    assert.equal(coordinator.getState().connectionStatus, "connected");
+
+    // Explicit reconnect from connected MUST transition to "checking" first, then checking -> offline
+    const p2 = coordinator.retryBootConnection();
+    assert.equal(
+      coordinator.getState().connectionStatus,
+      "checking",
+      "Reconnect from connected must immediately transition bootConnectionStatus to 'checking'"
+    );
+    assert.equal(
+      classifyWorkspaceConnectionState({
+        browserOnlineHint: true,
+        bootConnectionStatus: coordinator.getState().connectionStatus,
+        listenerError: null,
+        hasSnapshot: true,
+        fromCache: false,
+        hasPendingWrites: false,
+        hasInFlightWrite: false,
+      }),
+      "cached"
+    );
+    responses[1].resolve({ status: "offline" });
+    assert.equal(await p2, "offline");
+    assert.equal(coordinator.getState().connectionStatus, "offline");
+    assert.equal(
+      classifyWorkspaceConnectionState({
+        browserOnlineHint: true,
+        bootConnectionStatus: coordinator.getState().connectionStatus,
+        listenerError: null,
+        hasSnapshot: true,
+        fromCache: false,
+        hasPendingWrites: false,
+        hasInFlightWrite: false,
+      }),
+      "offline"
+    );
+
+    // checking -> error
+    const p3 = coordinator.retryBootConnection();
+    assert.equal(coordinator.getState().connectionStatus, "checking");
+    responses[2].resolve({ status: "error" });
+    assert.equal(await p3, "error");
+    assert.equal(coordinator.getState().connectionStatus, "error");
+    assert.equal(
+      classifyWorkspaceConnectionState({
+        browserOnlineHint: true,
+        bootConnectionStatus: coordinator.getState().connectionStatus,
+        listenerError: null,
+        hasSnapshot: true,
+        fromCache: false,
+        hasPendingWrites: false,
+        hasInFlightWrite: false,
+      }),
+      "error"
+    );
+
+    // checking -> browser offline event mid-check cancels stale pre-offline connected result
+    const p4 = coordinator.retryBootConnection();
+    assert.equal(coordinator.getState().connectionStatus, "checking");
+    coordinator.handleBrowserOffline();
+    assert.equal(coordinator.getState().connectionStatus, "offline");
+    assert.equal(coordinator.getState().isCheckingConnection, false);
+    responses[3].resolve({ status: "connected" });
+    assert.equal(await p4, "offline");
+    assert.equal(
+      coordinator.getState().connectionStatus,
+      "offline",
+      "Stale pre-offline check resolution must not overwrite offline state"
+    );
+
+    coordinator.dispose();
+  });
+
+  // 23. DEFECT A: ProductFormModal, CampaignFormModal & ConfirmActionModal defensive guards and accurate sync_pending messaging
+  await runTest("DEFECT A: Form modals block submission while checking/cached and show accurate sync_pending message", () => {
+    const labels = getAffiliateLabels("en");
+
+    // 23a. Defensive form submit guard blocks even if stale canWriteNow=true while connectionState is cached/offline/error/sync_pending
+    assert.deepEqual(
+      evaluateAffiliateFormWriteGuard({
+        canWriteNow: true,
+        connectionState: "cached",
+        isWriteBusy: false,
+      }),
+      { allowed: false, errorKey: "errCachedWriteBlocked" }
+    );
+    assert.deepEqual(
+      evaluateAffiliateFormWriteGuard({
+        canWriteNow: false,
+        connectionState: "offline",
+        isWriteBusy: false,
+      }),
+      { allowed: false, errorKey: "errOfflineWriteBlocked" }
+    );
+    assert.deepEqual(
+      evaluateAffiliateFormWriteGuard({
+        canWriteNow: false,
+        connectionState: "error",
+        isWriteBusy: false,
+      }),
+      { allowed: false, errorKey: "errOfflineWriteBlocked" }
+    );
+    assert.deepEqual(
+      evaluateAffiliateFormWriteGuard({
+        canWriteNow: false,
+        connectionState: "sync_pending",
+        isWriteBusy: false,
+      }),
+      { allowed: false, errorKey: "errWriteInFlightLocked" }
+    );
+    assert.deepEqual(
+      evaluateAffiliateFormWriteGuard({
+        canWriteNow: true,
+        connectionState: "connected",
+        isWriteBusy: true,
+      }),
+      { allowed: false, errorKey: "errWriteInFlightLocked" }
+    );
+    assert.deepEqual(
+      evaluateAffiliateFormWriteGuard({
+        canWriteNow: true,
+        connectionState: "connected",
+        isWriteBusy: false,
+      }),
+      { allowed: true }
+    );
+
+    const sampleProduct: WithId<AffiliateProduct> = {
+      id: "prod_modal_1",
+      ownerUid: "owner_uid_1",
+      name: "Thai Collagen Powder",
+      targetLanguage: "th",
+      status: "active",
+      createdAt: {} as AffiliateProduct["createdAt"],
+      updatedAt: {} as AffiliateProduct["updatedAt"],
+    };
+
+    // 23b. ProductFormModal while checking (connectionState="cached", even with stale canWriteNow=true)
+    const productCheckingHtml = renderToStaticMarkup(
+      React.createElement(ProductFormModal, {
+        open: true,
+        editingProduct: null,
+        pendingCreateDocId: "prod_pending_1",
+        uiLang: "en",
+        labels,
+        connectionState: "cached",
+        canWriteNow: true,
+        isWriteBusy: false,
+        writeState: "idle",
+        writeDocId: null,
+        writeError: null,
+        onEnsurePendingCreateDocId: () => "prod_pending_1",
+        onDiscardPendingCreateDocId: () => true,
+        onCreate: async () => ({ ok: false, error: "errCachedWriteBlocked" }),
+        onUpdateDetails: async () => ({ ok: false, error: "errCachedWriteBlocked" }),
+        onClose: () => {},
+      })
+    );
+    assert.match(
+      productCheckingHtml,
+      /data-testid="product-modal-connection-warning"/,
+      "ProductFormModal must display connection warning while checking/cached"
+    );
+    assert.ok(
+      productCheckingHtml.includes(labels.errCachedWriteBlocked),
+      "ProductFormModal must display cached/checking write-blocked message"
+    );
+    assert.match(
+      productCheckingHtml,
+      /<button[^>]*type="submit"[^>]*disabled=""/,
+      "ProductFormModal submit button must be disabled while connectionState is not 'connected'"
+    );
+
+    // 23c. CampaignFormModal while checking (connectionState="cached", even with stale canWriteNow=true)
+    const campaignCheckingHtml = renderToStaticMarkup(
+      React.createElement(CampaignFormModal, {
+        open: true,
+        editingCampaign: null,
+        pendingCreateDocId: "camp_pending_1",
+        products: [sampleProduct],
+        uiLang: "en",
+        labels,
+        connectionState: "cached",
+        canWriteNow: true,
+        isWriteBusy: false,
+        writeState: "idle",
+        writeDocId: null,
+        writeError: null,
+        onEnsurePendingCreateDocId: () => "camp_pending_1",
+        onDiscardPendingCreateDocId: () => true,
+        onCreate: async () => ({ ok: false, error: "errCachedWriteBlocked" }),
+        onUpdateDetails: async () => ({ ok: false, error: "errCachedWriteBlocked" }),
+        onClose: () => {},
+      })
+    );
+    assert.match(
+      campaignCheckingHtml,
+      /data-testid="campaign-modal-connection-warning"/,
+      "CampaignFormModal must display connection warning while checking/cached"
+    );
+    assert.ok(
+      campaignCheckingHtml.includes(labels.errCachedWriteBlocked),
+      "CampaignFormModal must display cached/checking write-blocked message"
+    );
+    assert.match(
+      campaignCheckingHtml,
+      /<button[^>]*type="submit"[^>]*disabled=""/,
+      "CampaignFormModal submit button must be disabled while connectionState is not 'connected'"
+    );
+
+    // 23d. sync_pending warning in ConfirmActionModal, ProductFormModal & CampaignFormModal must NOT falsely claim network unavailable
+    const confirmSyncPendingHtml = renderToStaticMarkup(
+      React.createElement(ConfirmActionModal, {
+        open: true,
+        title: "Archive Product?",
+        body: "Archive description",
+        itemName: "Thai Collagen Powder",
+        confirmLabel: "Archive Permanently",
+        tone: "archive",
+        writeState: "idle",
+        errorMessage: null,
+        canWriteNow: false,
+        connectionState: "sync_pending",
+        isWriteBusy: false,
+        labels,
+        onConfirm: () => {},
+        onClose: () => {},
+      })
+    );
+    assert.ok(
+      confirmSyncPendingHtml.includes(labels.errWriteInFlightLocked),
+      "ConfirmActionModal must show write-in-progress message for sync_pending"
+    );
+    assert.ok(
+      !confirmSyncPendingHtml.includes(labels.confirmConnectionUnavailable),
+      "ConfirmActionModal must NOT falsely claim network is unavailable for sync_pending"
+    );
+
+    const productSyncPendingHtml = renderToStaticMarkup(
+      React.createElement(ProductFormModal, {
+        open: true,
+        editingProduct: null,
+        pendingCreateDocId: "prod_pending_2",
+        uiLang: "en",
+        labels,
+        connectionState: "sync_pending",
+        canWriteNow: false,
+        isWriteBusy: false,
+        writeState: "idle",
+        writeDocId: null,
+        writeError: null,
+        onEnsurePendingCreateDocId: () => "prod_pending_2",
+        onDiscardPendingCreateDocId: () => true,
+        onCreate: async () => ({ ok: false }),
+        onUpdateDetails: async () => ({ ok: false }),
+        onClose: () => {},
+      })
+    );
+    assert.match(
+      productSyncPendingHtml,
+      /data-testid="product-modal-sync-locked-warning"/,
+      "ProductFormModal must show sync-locked warning during sync_pending"
+    );
+    assert.ok(
+      productSyncPendingHtml.includes(labels.errWriteInFlightLocked),
+      "ProductFormModal must explain another write is syncing during sync_pending"
+    );
+    assert.ok(
+      !productSyncPendingHtml.includes(labels.errOfflineWriteBlocked),
+      "ProductFormModal must NOT show offline network error during sync_pending"
+    );
+
+    const campaignSyncPendingHtml = renderToStaticMarkup(
+      React.createElement(CampaignFormModal, {
+        open: true,
+        editingCampaign: null,
+        pendingCreateDocId: "camp_pending_2",
+        products: [sampleProduct],
+        uiLang: "en",
+        labels,
+        connectionState: "sync_pending",
+        canWriteNow: false,
+        isWriteBusy: false,
+        writeState: "idle",
+        writeDocId: null,
+        writeError: null,
+        onEnsurePendingCreateDocId: () => "camp_pending_2",
+        onDiscardPendingCreateDocId: () => true,
+        onCreate: async () => ({ ok: false }),
+        onUpdateDetails: async () => ({ ok: false }),
+        onClose: () => {},
+      })
+    );
+    assert.match(
+      campaignSyncPendingHtml,
+      /data-testid="campaign-modal-sync-locked-warning"/,
+      "CampaignFormModal must show sync-locked warning during sync_pending"
+    );
+    assert.ok(
+      campaignSyncPendingHtml.includes(labels.errWriteInFlightLocked),
+      "CampaignFormModal must explain another write is syncing during sync_pending"
+    );
+    assert.ok(
+      !campaignSyncPendingHtml.includes(labels.errOfflineWriteBlocked),
+      "CampaignFormModal must NOT show offline network error during sync_pending"
+    );
+  });
+
+  // 24. DEFECT A: Controller-level write guards block writes while checking/unconfigured and never auto-replay after reconnection
+  await runTest("DEFECT A: Write controller blocks all mutations while checking/unconfigured and never queues or replays blocked writes", async () => {
+    let createCalls = 0;
+    let updateCalls = 0;
+    let deleteCalls = 0;
+
+    const deps: AffiliateWriteControllerDeps = {
+      generateDocId: (prefix) => `${prefix}_ctrl_1`,
+      createOwnerDocument: async () => {
+        createCalls += 1;
+        return "created_id";
+      },
+      updateOwnerDocument: async () => {
+        updateCalls += 1;
+      },
+      deleteOwnerDocument: async () => {
+        deleteCalls += 1;
+      },
+      getOwnerDocumentFromServer: async () => null,
+    };
+
+    const controller = createAffiliateWriteControllerCore(deps);
+
+    controller.syncOwnerSession({
+      ownerUid: "owner_uid_1",
+      isOwner: true,
+      hasOwnerProfile: true,
+    });
+
+    // Simulate bypassed UI where stale connectionState="connected" is supplied while bootConnectionStatus="checking"
+    controller.syncWorkspaceContext({
+      connectionState: "connected",
+      browserOnlineHint: true,
+      bootConnectionStatus: "checking",
+      pendingDocIds: [],
+      snapshotHasPendingWrites: false,
+    });
+
+    const sampleProduct: WithId<AffiliateProduct> = {
+      id: "prod_ctrl_existing",
+      ownerUid: "owner_uid_1",
+      name: "Existing Product",
+      targetLanguage: "th",
+      status: "active",
+      createdAt: {} as AffiliateProduct["createdAt"],
+      updatedAt: {} as AffiliateProduct["updatedAt"],
+    };
+    const sampleCampaign: WithId<MarketingCampaign> = {
+      id: "camp_ctrl_existing",
+      ownerUid: "owner_uid_1",
+      productId: "prod_ctrl_existing",
+      title: "Existing Campaign",
+      targetLanguage: "th",
+      status: "draft",
+      createdAt: {} as MarketingCampaign["createdAt"],
+      updatedAt: {} as MarketingCampaign["updatedAt"],
+    };
+
+    const r1 = await controller.createProduct(
+      {
+        name: "Blocked During Check",
+        category: "",
+        tiktokShopUrl: "",
+        priceThb: "",
+        commissionRatePct: "",
+        targetLanguage: "th",
+        sellingPoints: "",
+        complianceNotes: "",
+        tagsText: "",
+        status: "researching",
+      },
+      "prod_blocked_1"
+    );
+    assert.equal(r1.ok, false);
+    assert.equal(r1.error, "errCachedWriteBlocked");
+
+    const r2 = await controller.updateProductStatus(sampleProduct, "paused");
+    assert.equal(r2.ok, false);
+    assert.equal(r2.error, "errCachedWriteBlocked");
+
+    const r3 = await controller.createCampaign(
+      {
+        productId: "prod_ctrl_existing",
+        title: "Blocked Campaign",
+        goal: "",
+        targetLanguage: "th",
+        strategyNotes: "",
+        startDate: "",
+        endDate: "",
+        status: "draft",
+      },
+      "camp_blocked_1"
+    );
+    assert.equal(r3.ok, false);
+    assert.equal(r3.error, "errCachedWriteBlocked");
+
+    const r4 = await controller.deleteCampaign(sampleCampaign.id);
+    assert.equal(r4.ok, false);
+    assert.equal(r4.error, "errCachedWriteBlocked");
+
+    // Also test bootConnectionStatus="unconfigured"
+    controller.syncBootConnectionStatus("unconfigured");
+    const r5 = await controller.updateCampaignStatus(sampleCampaign, "active");
+    assert.equal(r5.ok, false);
+    assert.equal(r5.error, "errOfflineWriteBlocked");
+
+    // Also test sync_pending returns errWriteInFlightLocked (not offline error)
+    controller.syncWorkspaceContext({
+      connectionState: "sync_pending",
+      browserOnlineHint: true,
+      bootConnectionStatus: "connected",
+      pendingDocIds: [],
+      snapshotHasPendingWrites: true,
+    });
+    const r6 = await controller.updateProductStatus(sampleProduct, "paused");
+    assert.equal(r6.ok, false);
+    assert.equal(r6.error, "errWriteInFlightLocked");
+
+    assert.equal(createCalls, 0);
+    assert.equal(updateCalls, 0);
+    assert.equal(deleteCalls, 0);
+
+    // Reconnect to verified "connected" state -> blocked writes must NOT be queued or auto-replayed
+    controller.syncWorkspaceContext({
+      connectionState: "connected",
+      browserOnlineHint: true,
+      bootConnectionStatus: "connected",
+      pendingDocIds: [],
+      snapshotHasPendingWrites: false,
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(createCalls, 0, "Blocked create writes must never auto-replay after reconnect");
+    assert.equal(updateCalls, 0, "Blocked update writes must never auto-replay after reconnect");
+    assert.equal(deleteCalls, 0, "Blocked delete writes must never auto-replay after reconnect");
+    assert.equal(controller.getSnapshot().tracker.state, "idle");
+  });
+
+  // 25. DEFECT B: Profile failure -> close header error -> Gate 4 still shows Retry and Sign Out (no infinite spinner)
+  await runTest("DEFECT B: Dismissing header error never erases Gate 4 recoverable error UI or causes infinite spinner", async () => {
+    const labels = getAffiliateLabels("en");
+    const ownerUser = {
+      uid: "owner_uid_1",
+      email: "owner@example.com",
+      emailVerified: true,
+    } as User;
+
+    const coordinator = createFirebaseRecoveryCoordinator({
+      isConfigured: true,
+      expectedOwnerEmail: "owner@example.com",
+      testConnection: async () => ({ status: "connected" }),
+      ensureOwnerProfile: async () => {
+        throw new Error("The client is offline.");
+      },
+      getCurrentUser: () => ownerUser,
+    });
+
+    // Profile load fails
+    const failed = await coordinator.loadOwnerProfile(ownerUser);
+    assert.equal(failed, null);
+    assert.equal(coordinator.getState().ownerProfile, null);
+    assert.equal(coordinator.getState().isProfileLoading, false);
+    assert.ok(coordinator.getState().profileError);
+
+    // Even if header dropdown dismisses authError (or even if both authError & profileError are null),
+    // Gate 4 MUST remain in "error" mode with Retry Profile + Sign Out when ownerProfile is null & isProfileLoading is false.
+    assert.equal(
+      resolveGate4ViewMode({
+        ownerProfile: null,
+        isProfileLoading: false,
+        isRetryingProfile: false,
+      }),
+      "error"
+    );
+
+    const gate4AfterHeaderDismissHtml = renderToStaticMarkup(
+      React.createElement(OwnerProfileGateView, {
+        ownerProfile: null,
+        isProfileLoading: false,
+        isRetryingProfile: false,
+        profileError: null,
+        authError: null,
+        labels,
+        onRetry: () => {},
+        onSignOut: () => {},
+      })
+    );
+    assert.match(
+      gate4AfterHeaderDismissHtml,
+      /data-testid="gate4-profile-error"/,
+      "Gate 4 must still render recoverable error container even if both profileError and authError are null"
+    );
+    assert.ok(
+      gate4AfterHeaderDismissHtml.includes(labels.retry),
+      "Gate 4 must always expose Retry Profile action"
+    );
+    assert.ok(
+      gate4AfterHeaderDismissHtml.includes(labels.signOut),
+      "Gate 4 must always expose Sign Out action"
+    );
+    assert.ok(
+      !gate4AfterHeaderDismissHtml.includes(labels.syncingProfile),
+      "Gate 4 must NEVER fall back to an infinite syncing spinner when isProfileLoading is false"
+    );
+
+    // Verify AuthStatusControl closes dropdown via local dismissal rather than clearing Gate 4 profileError
+    const authControlSrc = fs.readFileSync(
+      path.resolve("src/firebase/AuthStatusControl.tsx"),
+      "utf8"
+    );
+    assert.match(authControlSrc, /dismissedError/);
+    const firebaseCtxSrc = fs.readFileSync(
+      path.resolve("src/firebase/FirebaseContext.tsx"),
+      "utf8"
+    );
+    assert.match(
+      firebaseCtxSrc,
+      /const inGate4 = Boolean\([\s\S]*?!coordinator\.getState\(\)\.ownerProfile[\s\S]*?if \(!inGate4\)/,
+      "clearAuthError must preserve Gate 4 profileError while ownerProfile is still null"
+    );
+
+    coordinator.dispose();
+  });
+
+  // 26. DEFECT B: Profile failure -> retry -> failure (restores error UI), AND profile failure -> retry -> success (workspace opens)
+  await runTest("DEFECT B: Profile retry shows retrying feedback, restores error UI on failure, and opens workspace on success", async () => {
+    const labels = getAffiliateLabels("en");
+    const ownerUser = {
+      uid: "owner_uid_1",
+      email: "owner@example.com",
+      emailVerified: true,
+    } as User;
+
+    let attempt = 0;
+    const retry1Deferred = createDeferred<WithId<UserProfile>>();
+    const retry2Deferred = createDeferred<WithId<UserProfile>>();
+
+    const coordinator = createFirebaseRecoveryCoordinator({
+      isConfigured: true,
+      expectedOwnerEmail: "owner@example.com",
+      testConnection: async () => ({ status: "connected" }),
+      ensureOwnerProfile: () => {
+        attempt += 1;
+        if (attempt === 1) {
+          return Promise.reject(new Error("unavailable: initial failure"));
+        }
+        if (attempt === 2) {
+          return retry1Deferred.promise;
+        }
+        return retry2Deferred.promise;
+      },
+      getCurrentUser: () => ownerUser,
+    });
+
+    // Initial load fails
+    await coordinator.loadOwnerProfile(ownerUser);
+    assert.equal(coordinator.getState().ownerProfile, null);
+    assert.equal(coordinator.getState().isProfileLoading, false);
+    assert.equal(coordinator.getState().isRetryingProfile, false);
+    assert.equal(coordinator.getState().connectionStatus, "offline");
+
+    // Retry #1 in flight -> accurate retrying feedback
+    const pRetryFail = coordinator.retryOwnerProfile();
+    assert.equal(coordinator.getState().isProfileLoading, true);
+    assert.equal(coordinator.getState().isRetryingProfile, true);
+    assert.equal(
+      resolveGate4ViewMode({
+        ownerProfile: coordinator.getState().ownerProfile,
+        isProfileLoading: coordinator.getState().isProfileLoading,
+        isRetryingProfile: coordinator.getState().isRetryingProfile,
+      }),
+      "retrying"
+    );
+    const retryingHtml = renderToStaticMarkup(
+      React.createElement(OwnerProfileGateView, {
+        ownerProfile: null,
+        isProfileLoading: true,
+        isRetryingProfile: true,
+        profileError: null,
+        authError: null,
+        labels,
+        onRetry: () => {},
+        onSignOut: () => {},
+      })
+    );
+    assert.ok(
+      retryingHtml.includes(labels.retryingProfile),
+      "Gate 4 must display retryingProfile feedback during active retry"
+    );
+
+    // Retry #1 fails -> restores recoverable error UI
+    retry1Deferred.reject(new Error("Firestore backend still unavailable"));
+    assert.equal(await pRetryFail, null);
+    assert.equal(coordinator.getState().isProfileLoading, false);
+    assert.equal(coordinator.getState().isRetryingProfile, false);
+    assert.ok(coordinator.getState().profileError);
+    assert.equal(
+      resolveGate4ViewMode({
+        ownerProfile: coordinator.getState().ownerProfile,
+        isProfileLoading: coordinator.getState().isProfileLoading,
+        isRetryingProfile: coordinator.getState().isRetryingProfile,
+      }),
+      "error"
+    );
+    const failedRetryHtml = renderToStaticMarkup(
+      React.createElement(OwnerProfileGateView, {
+        ownerProfile: coordinator.getState().ownerProfile,
+        isProfileLoading: coordinator.getState().isProfileLoading,
+        isRetryingProfile: coordinator.getState().isRetryingProfile,
+        profileError: coordinator.getState().profileError,
+        authError: null,
+        labels,
+        onRetry: () => {},
+        onSignOut: () => {},
+      })
+    );
+    assert.match(failedRetryHtml, /data-testid="gate4-profile-error"/);
+    assert.ok(failedRetryHtml.includes(labels.retry));
+    assert.ok(failedRetryHtml.includes(labels.signOut));
+
+    // Retry #2 succeeds -> workspace opens
+    const pRetrySuccess = coordinator.retryOwnerProfile();
+    assert.equal(coordinator.getState().isProfileLoading, true);
+    assert.equal(coordinator.getState().isRetryingProfile, true);
+    const validProfile: WithId<UserProfile> = {
+      id: "owner_uid_1",
+      ownerUid: "owner_uid_1",
+      email: "owner@example.com",
+      preferredUiLanguage: "my",
+      defaultContentLanguage: "th",
+      currency: "THB",
+      region: "TH",
+      createdAt: {} as UserProfile["createdAt"],
+      updatedAt: {} as UserProfile["updatedAt"],
+    };
+    retry2Deferred.resolve(validProfile);
+    const loaded = await pRetrySuccess;
+    assert.equal(loaded?.id, "owner_uid_1");
+    assert.equal(coordinator.getState().ownerProfile?.id, "owner_uid_1");
+    assert.equal(coordinator.getState().isProfileLoading, false);
+    assert.equal(coordinator.getState().isRetryingProfile, false);
+    assert.equal(coordinator.getState().profileError, null);
+    assert.equal(
+      resolveGate4ViewMode({
+        ownerProfile: coordinator.getState().ownerProfile,
+        isProfileLoading: coordinator.getState().isProfileLoading,
+        isRetryingProfile: coordinator.getState().isRetryingProfile,
+      }),
+      "ready"
+    );
+    const readyHtml = renderToStaticMarkup(
+      React.createElement(OwnerProfileGateView, {
+        ownerProfile: coordinator.getState().ownerProfile,
+        isProfileLoading: false,
+        isRetryingProfile: false,
+        profileError: null,
+        authError: null,
+        labels,
+        onRetry: () => {},
+        onSignOut: () => {},
+      })
+    );
+    assert.equal(readyHtml, "", "Gate 4 must clear when ownerProfile is loaded so workspace opens");
+
+    coordinator.dispose();
+  });
+
+  // 27. DEFECT B: Early-return stale/mismatched/null user paths clear loading & in-flight state, sign-out discards stale retry, repeated retries deduplicate
+  await runTest("DEFECT B: Stale/null/mismatched user during retry clears loading & in-flight state and repeated clicks deduplicate", async () => {
+    const ownerA = {
+      uid: "owner_uid_A",
+      email: "owner@example.com",
+      emailVerified: true,
+    } as User;
+    const ownerB = {
+      uid: "owner_uid_B",
+      email: "owner@example.com",
+      emailVerified: true,
+    } as User;
+    const intruder = {
+      uid: "intruder_uid",
+      email: "intruder@example.com",
+      emailVerified: true,
+    } as User;
+
+    let currentUser: User | null = ownerA;
+    let ensureCalls = 0;
+    let unauthorizedCallbacks = 0;
+    const deferreds: Array<ReturnType<typeof createDeferred<WithId<UserProfile>>>> = [
+      createDeferred(),
+      createDeferred(),
+      createDeferred(),
+      createDeferred(),
+      createDeferred(),
+    ];
+
+    const coordinator = createFirebaseRecoveryCoordinator({
+      isConfigured: true,
+      expectedOwnerEmail: "owner@example.com",
+      testConnection: async () => ({ status: "connected" }),
+      ensureOwnerProfile: () => {
+        const d = deferreds[ensureCalls++];
+        return d.promise;
+      },
+      getCurrentUser: () => currentUser,
+      onUnauthorizedOwner: () => {
+        unauthorizedCallbacks += 1;
+      },
+    });
+
+    // 27a. Repeated Retry clicks deduplicate to a single ensureOwnerProfile request
+    const rClick1 = coordinator.retryOwnerProfile();
+    const rClick2 = coordinator.retryOwnerProfile();
+    const rClick3 = coordinator.retryOwnerProfile();
+    assert.equal(ensureCalls, 1, "Repeated Retry clicks must not create duplicate profile requests");
+    assert.equal(coordinator.getState().isProfileLoading, true);
+    assert.equal(coordinator.getState().isRetryingProfile, true);
+
+    // 27b. Current user becomes null mid-flight WITHOUT advanceSession() being called yet
+    currentUser = null;
+    deferreds[0].resolve({
+      id: "owner_uid_A",
+      ownerUid: "owner_uid_A",
+      email: "owner@example.com",
+      preferredUiLanguage: "en",
+      defaultContentLanguage: "th",
+      currency: "THB",
+      region: "TH",
+      createdAt: {} as UserProfile["createdAt"],
+      updatedAt: {} as UserProfile["updatedAt"],
+    });
+    const [res1, res2, res3] = await Promise.all([rClick1, rClick2, rClick3]);
+    assert.equal(res1, null);
+    assert.equal(res2, null);
+    assert.equal(res3, null);
+    assert.equal(coordinator.getState().ownerProfile, null);
+    assert.equal(
+      coordinator.getState().isProfileLoading,
+      false,
+      "Early-return when currentUser becomes null must clear isProfileLoading"
+    );
+    assert.equal(
+      coordinator.getState().isRetryingProfile,
+      false,
+      "Early-return when currentUser becomes null must clear isRetryingProfile"
+    );
+
+    // 27c. Current user switches to mismatched UID mid-flight (ownerA -> ownerB) WITHOUT advanceSession()
+    currentUser = ownerA;
+    const pSwitch = coordinator.retryOwnerProfile();
+    assert.equal(ensureCalls, 2, "Previous in-flight profile state must have cleared cleanly");
+    assert.equal(coordinator.getState().isProfileLoading, true);
+
+    currentUser = ownerB;
+    deferreds[1].resolve({
+      id: "owner_uid_A",
+      ownerUid: "owner_uid_A",
+      email: "owner@example.com",
+      preferredUiLanguage: "en",
+      defaultContentLanguage: "th",
+      currency: "THB",
+      region: "TH",
+      createdAt: {} as UserProfile["createdAt"],
+      updatedAt: {} as UserProfile["updatedAt"],
+    });
+    assert.equal(await pSwitch, null, "Stale result for ownerA must be discarded after switching to ownerB");
+    assert.equal(coordinator.getState().ownerProfile, null);
+    assert.equal(
+      coordinator.getState().isProfileLoading,
+      false,
+      "Early-return on UID mismatch must clear isProfileLoading"
+    );
+    assert.equal(coordinator.getState().isRetryingProfile, false);
+
+    // 27d. Current user becomes non-owner mid-flight -> clears loading & triggers unauthorized callback
+    currentUser = ownerB;
+    const pUnauthorized = coordinator.retryOwnerProfile();
+    assert.equal(ensureCalls, 3);
+    currentUser = intruder;
+    deferreds[2].resolve({
+      id: "owner_uid_B",
+      ownerUid: "owner_uid_B",
+      email: "owner@example.com",
+      preferredUiLanguage: "en",
+      defaultContentLanguage: "th",
+      currency: "THB",
+      region: "TH",
+      createdAt: {} as UserProfile["createdAt"],
+      updatedAt: {} as UserProfile["updatedAt"],
+    });
+    assert.equal(await pUnauthorized, null);
+    assert.equal(coordinator.getState().isProfileLoading, false);
+    assert.equal(coordinator.getState().isRetryingProfile, false);
+    assert.equal(unauthorizedCallbacks, 1);
+
+    // 27e. Sign-out during retry where stale promise REJECTS -> error discarded, loading cleared
+    currentUser = ownerA;
+    const pSignOutReject = coordinator.retryOwnerProfile();
+    assert.equal(ensureCalls, 4);
+    currentUser = null;
+    coordinator.advanceSession();
+    assert.equal(coordinator.getState().isProfileLoading, false);
+    assert.equal(coordinator.getState().isRetryingProfile, false);
+    deferreds[3].reject(new Error("Stale network failure after sign-out"));
+    assert.equal(await pSignOutReject, null);
+    assert.equal(coordinator.getState().profileError, null);
+    assert.equal(coordinator.getState().isProfileLoading, false);
+
+    // 27f. Verify coordinator is NOT stuck: subsequent valid owner load succeeds cleanly
+    currentUser = ownerB;
+    const pFresh = coordinator.retryOwnerProfile();
+    assert.equal(ensureCalls, 5);
+    deferreds[4].resolve({
+      id: "owner_uid_B",
+      ownerUid: "owner_uid_B",
+      email: "owner@example.com",
+      preferredUiLanguage: "my",
+      defaultContentLanguage: "th",
+      currency: "THB",
+      region: "TH",
+      createdAt: {} as UserProfile["createdAt"],
+      updatedAt: {} as UserProfile["updatedAt"],
+    });
+    const freshProfile = await pFresh;
+    assert.equal(freshProfile?.id, "owner_uid_B");
+    assert.equal(coordinator.getState().ownerProfile?.id, "owner_uid_B");
+    assert.equal(coordinator.getState().isProfileLoading, false);
+    assert.equal(coordinator.getState().isRetryingProfile, false);
+
+    coordinator.dispose();
+  });
+
+  // 28. Owner Profile Read Safety: server-only verification, ownerUid match, and no fake connection unlock during active check
+  await runTest("Owner Profile Read Safety: rejects cache-only or ownerUid-mismatched snapshots and preserves active checking state", async () => {
+    // 28a. verifyOwnerProfileSnapshot rejects cache-only read
+    assert.throws(
+      () =>
+        verifyOwnerProfileSnapshot(
+          {
+            id: "owner_uid_1",
+            exists: () => true,
+            data: () => ({
+              ownerUid: "owner_uid_1",
+              email: "owner@example.com",
+              preferredUiLanguage: "my",
+              defaultContentLanguage: "th",
+              currency: "THB",
+              region: "TH",
+            }),
+            metadata: { fromCache: true },
+          },
+          "owner_uid_1"
+        ),
+      /live Firestore server response/i,
+      "Cache-only profile snapshot must be rejected"
+    );
+
+    // 28b. verifyOwnerProfileSnapshot rejects mismatched ownerUid
+    assert.throws(
+      () =>
+        verifyOwnerProfileSnapshot(
+          {
+            id: "owner_uid_1",
+            exists: () => true,
+            data: () => ({
+              ownerUid: "other_uid_999",
+              email: "owner@example.com",
+              preferredUiLanguage: "my",
+              defaultContentLanguage: "th",
+              currency: "THB",
+              region: "TH",
+            }),
+            metadata: { fromCache: false },
+          },
+          "owner_uid_1"
+        ),
+      /owner profile UID verification failed/i,
+      "Profile snapshot with mismatched ownerUid must be rejected"
+    );
+
+    // 28c. verifyOwnerProfileSnapshot rejects mismatched doc id
+    assert.throws(
+      () =>
+        verifyOwnerProfileSnapshot(
+          {
+            id: "wrong_doc_id",
+            exists: () => true,
+            data: () => ({
+              ownerUid: "owner_uid_1",
+              email: "owner@example.com",
+            }),
+            metadata: { fromCache: false },
+          },
+          "owner_uid_1"
+        ),
+      /owner profile UID verification failed/i
+    );
+
+    // 28d. verifyOwnerProfileSnapshot returns null when doc does not exist on server
+    assert.equal(
+      verifyOwnerProfileSnapshot(
+        {
+          id: "owner_uid_1",
+          exists: () => false,
+          data: () => undefined,
+          metadata: { fromCache: false },
+        },
+        "owner_uid_1"
+      ),
+      null
+    );
+
+    // 28e. verifyOwnerProfileSnapshot accepts live server snapshot with matching ownerUid
+    const verified = verifyOwnerProfileSnapshot(
+      {
+        id: "owner_uid_1",
+        exists: () => true,
+        data: () => ({
+          ownerUid: "owner_uid_1",
+          email: "owner@example.com",
+          preferredUiLanguage: "my",
+          defaultContentLanguage: "th",
+          currency: "THB",
+          region: "TH",
+        }),
+        metadata: { fromCache: false },
+      },
+      "owner_uid_1"
+    );
+    assert.equal(verified?.id, "owner_uid_1");
+    assert.equal(verified?.ownerUid, "owner_uid_1");
+
+    // 28f. Coordinator rejects profile with mismatched ownerUid and does NOT override an active connection check
+    const ownerUser = {
+      uid: "owner_uid_1",
+      email: "owner@example.com",
+      emailVerified: true,
+    } as User;
+    const pendingConnCheck = createDeferred<{ status: "connected" | "offline" | "error" }>();
+    let returnMismatched = true;
+
+    const coordinator = createFirebaseRecoveryCoordinator({
+      isConfigured: true,
+      expectedOwnerEmail: "owner@example.com",
+      testConnection: () => pendingConnCheck.promise,
+      ensureOwnerProfile: async () => ({
+        id: "owner_uid_1",
+        ownerUid: returnMismatched ? "forged_uid" : "owner_uid_1",
+        email: "owner@example.com",
+        preferredUiLanguage: "my",
+        defaultContentLanguage: "th",
+        currency: "THB",
+        region: "TH",
+        createdAt: {} as UserProfile["createdAt"],
+        updatedAt: {} as UserProfile["updatedAt"],
+      }),
+      getCurrentUser: () => ownerUser,
+    });
+
+    // Start active connection check (status = "checking")
+    const pConn = coordinator.retryBootConnection();
+    assert.equal(coordinator.getState().connectionStatus, "checking");
+
+    // Mismatched ownerUid rejected by coordinator
+    const badRes = await coordinator.loadOwnerProfile(ownerUser);
+    assert.equal(badRes, null);
+    assert.equal(coordinator.getState().ownerProfile, null);
+    assert.match(coordinator.getState().profileError || "", /profile sync failed/i);
+
+    // Valid profile loaded while connection check is still in flight -> must NOT prematurely flip checking -> connected
+    returnMismatched = false;
+    const okRes = await coordinator.loadOwnerProfile(ownerUser);
+    assert.equal(okRes?.ownerUid, "owner_uid_1");
+    assert.equal(
+      coordinator.getState().connectionStatus,
+      "checking",
+      "Profile load must not override an active in-flight connection check"
+    );
+
+    pendingConnCheck.resolve({ status: "connected" });
+    assert.equal(await pConn, "connected");
+    assert.equal(coordinator.getState().connectionStatus, "connected");
+    coordinator.dispose();
+
+    // 28g. Verify ensureOwnerProfile uses getDocFromServer (not cache-capable getDoc)
+    const firestoreSvcSrc = fs.readFileSync(
+      path.resolve("src/firebase/firestoreService.ts"),
+      "utf8"
+    );
+    const ensureFnMatch = firestoreSvcSrc.match(
+      /export async function ensureOwnerProfile[\s\S]*?^}/m
+    );
+    assert.ok(ensureFnMatch, "ensureOwnerProfile must exist in firestoreService.ts");
+    assert.match(ensureFnMatch[0], /getDocFromServer\(/);
+    assert.doesNotMatch(
+      ensureFnMatch[0],
+      /\bgetDoc\(/,
+      "ensureOwnerProfile must not use cache-capable getDoc()"
+    );
+    assert.match(ensureFnMatch[0], /verifyOwnerProfileSnapshot\(/);
+  });
+
+  // 29. Offline error classification consistency in src/firebase/client.ts
+  await runTest("Offline error classification handles unavailable, client-offline, and backend network errors safely", () => {
+    assert.equal(isFirestoreOfflineError({ code: "unavailable", message: "Service unavailable" }), true);
+    assert.equal(isFirestoreOfflineError({ code: "firestore/unavailable", message: "" }), true);
+    assert.equal(
+      isFirestoreOfflineError(new Error("Failed to get document because the client is offline.")),
+      true
+    );
+    assert.equal(
+      isFirestoreOfflineError(new Error("Could not reach Cloud Firestore backend.")),
+      true
+    );
+    assert.equal(
+      isFirestoreOfflineError(new Error("auth/network-request-failed")),
+      true
+    );
+    assert.equal(isFirestoreOfflineError(new Error("TypeError: Failed to fetch")), true);
+    assert.equal(
+      isFirestoreOfflineError({ code: "permission-denied", message: "Missing or insufficient permissions." }),
+      false
+    );
+
+    assert.equal(
+      classifyFirestoreConnectionError({ code: "unavailable", message: "Backend unavailable" }).status,
+      "offline"
+    );
+    assert.equal(
+      classifyFirestoreConnectionError(new Error("The client is offline")).status,
+      "offline"
+    );
+    assert.equal(
+      classifyFirestoreConnectionError({ code: "permission-denied", message: "Permission denied" }).status,
+      "connected"
+    );
+    assert.equal(
+      classifyFirestoreConnectionError({ code: "internal", message: "Unexpected server bug" }).status,
+      "error"
+    );
   });
 
   const failed = results.filter((r) => !r.ok);

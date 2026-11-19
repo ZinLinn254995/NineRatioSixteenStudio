@@ -15,7 +15,11 @@ import {
   signOut,
   type User,
 } from "firebase/auth";
-import { getFirebaseClientServices, testConnection } from "./client";
+import {
+  getFirebaseClientServices,
+  isFirestoreOfflineError,
+  testConnection,
+} from "./client";
 import { getExpectedOwnerEmail } from "./config";
 import { buildFirestoreQuotaGuidance } from "./errors";
 import {
@@ -34,11 +38,13 @@ export interface FirebaseContextValue {
   isSigningIn: boolean;
   isCheckingConnection: boolean;
   isProfileLoading: boolean;
+  isRetryingProfile: boolean;
   user: User | null;
   ownerProfile: WithId<UserProfile> | null;
   isOwner: boolean;
   connectionStatus: FirebaseConnectionStatus;
   authError: string | null;
+  profileError: string | null;
   signInWithGoogle: () => Promise<void>;
   signOutOwner: () => Promise<void>;
   clearAuthError: () => void;
@@ -66,6 +72,7 @@ export interface FirebaseRecoveryState {
   isCheckingConnection: boolean;
   ownerProfile: WithId<UserProfile> | null;
   isProfileLoading: boolean;
+  isRetryingProfile: boolean;
   profileError: string | null;
   sessionGeneration: number;
 }
@@ -96,11 +103,13 @@ export function createFirebaseRecoveryCoordinator(deps: FirebaseRecoveryCoordina
     isCheckingConnection: false,
     ownerProfile: null,
     isProfileLoading: false,
+    isRetryingProfile: false,
     profileError: null,
     sessionGeneration: 0,
   };
 
   let disposed = false;
+  let connectionCheckGeneration = 0;
   let inFlightConnectionPromise: Promise<FirebaseConnectionStatus> | null = null;
   let inFlightProfile: {
     uid: string;
@@ -152,7 +161,20 @@ export function createFirebaseRecoveryCoordinator(deps: FirebaseRecoveryCoordina
       sessionGeneration: state.sessionGeneration + 1,
       ownerProfile: null,
       isProfileLoading: false,
+      isRetryingProfile: false,
       profileError: null,
+    };
+    notify();
+  };
+
+  const handleBrowserOffline = () => {
+    if (!deps.isConfigured || disposed) return;
+    connectionCheckGeneration += 1;
+    inFlightConnectionPromise = null;
+    state = {
+      ...state,
+      connectionStatus: "offline",
+      isCheckingConnection: false,
     };
     notify();
   };
@@ -172,18 +194,20 @@ export function createFirebaseRecoveryCoordinator(deps: FirebaseRecoveryCoordina
       return inFlightConnectionPromise;
     }
 
+    const capturedCheckGen = ++connectionCheckGeneration;
     state = {
       ...state,
       isCheckingConnection: true,
-      connectionStatus:
-        state.connectionStatus === "connected" ? "connected" : "checking",
+      connectionStatus: "checking",
     };
     notify();
 
     const runPromise = (async (): Promise<FirebaseConnectionStatus> => {
       try {
         const result = await deps.testConnection();
-        if (disposed) return result.status;
+        if (disposed || capturedCheckGen !== connectionCheckGeneration) {
+          return state.connectionStatus;
+        }
         inFlightConnectionPromise = null;
         state = {
           ...state,
@@ -193,7 +217,9 @@ export function createFirebaseRecoveryCoordinator(deps: FirebaseRecoveryCoordina
         notify();
         return result.status;
       } catch {
-        if (disposed) return "error";
+        if (disposed || capturedCheckGen !== connectionCheckGeneration) {
+          return state.connectionStatus;
+        }
         inFlightConnectionPromise = null;
         state = {
           ...state,
@@ -217,7 +243,8 @@ export function createFirebaseRecoveryCoordinator(deps: FirebaseRecoveryCoordina
   };
 
   const loadOwnerProfile = (
-    candidateUser?: User | null
+    candidateUser?: User | null,
+    options?: { isRetry?: boolean }
   ): Promise<WithId<UserProfile> | null> => {
     if (!deps.isConfigured) {
       return Promise.resolve(null);
@@ -227,8 +254,9 @@ export function createFirebaseRecoveryCoordinator(deps: FirebaseRecoveryCoordina
     const targetUser = candidateUser ?? liveUser;
 
     if (!targetUser || !liveUser || targetUser.uid !== liveUser.uid) {
-      if (state.isProfileLoading) {
-        state = { ...state, isProfileLoading: false };
+      inFlightProfile = null;
+      if (state.isProfileLoading || state.isRetryingProfile) {
+        state = { ...state, isProfileLoading: false, isRetryingProfile: false };
         notify();
       }
       return Promise.resolve(null);
@@ -241,6 +269,7 @@ export function createFirebaseRecoveryCoordinator(deps: FirebaseRecoveryCoordina
         sessionGeneration: state.sessionGeneration + 1,
         ownerProfile: null,
         isProfileLoading: false,
+        isRetryingProfile: false,
         profileError: "Access restricted to the verified owner account only.",
       };
       notify();
@@ -262,44 +291,101 @@ export function createFirebaseRecoveryCoordinator(deps: FirebaseRecoveryCoordina
     state = {
       ...state,
       isProfileLoading: true,
+      isRetryingProfile: Boolean(options?.isRetry),
       profileError: null,
     };
     notify();
 
-    const runPromise = (async (): Promise<WithId<UserProfile> | null> => {
+    let runPromise: Promise<WithId<UserProfile> | null> | null = null;
+    runPromise = (async (): Promise<WithId<UserProfile> | null> => {
       try {
         const profile = await deps.ensureOwnerProfile(liveUser);
+        if (disposed || capturedGen !== state.sessionGeneration) {
+          return null;
+        }
         const current = deps.getCurrentUser();
         if (
-          disposed ||
-          capturedGen !== state.sessionGeneration ||
           !current ||
           current.uid !== targetUid ||
           !matchesOwnerAccount(current, deps.expectedOwnerEmail)
         ) {
+          if (inFlightProfile?.promise === runPromise) {
+            inFlightProfile = null;
+          }
+          const isUnauthorized = Boolean(
+            current && !matchesOwnerAccount(current, deps.expectedOwnerEmail)
+          );
+          state = {
+            ...state,
+            sessionGeneration: state.sessionGeneration + 1,
+            ownerProfile: null,
+            isProfileLoading: false,
+            isRetryingProfile: false,
+            profileError: isUnauthorized
+              ? "Access restricted to the verified owner account only."
+              : null,
+          };
+          notify();
+          if (isUnauthorized) {
+            void deps.onUnauthorizedOwner?.();
+          }
           return null;
         }
-        inFlightProfile = null;
+
+        if (!profile || profile.ownerUid !== targetUid) {
+          throw new Error("Owner profile UID verification failed.");
+        }
+
+        if (inFlightProfile?.promise === runPromise) {
+          inFlightProfile = null;
+        }
         state = {
           ...state,
           ownerProfile: profile,
           isProfileLoading: false,
+          isRetryingProfile: false,
           profileError: null,
-          connectionStatus: "connected",
+          // ensureOwnerProfile uses server-only getDocFromServer; do not override
+          // an actively running boot connection check while it is still in flight.
+          connectionStatus: inFlightConnectionPromise ? state.connectionStatus : "connected",
         };
         notify();
         return profile;
       } catch (err) {
-        const current = deps.getCurrentUser();
-        if (
-          disposed ||
-          capturedGen !== state.sessionGeneration ||
-          !current ||
-          current.uid !== targetUid
-        ) {
+        if (disposed || capturedGen !== state.sessionGeneration) {
           return null;
         }
-        inFlightProfile = null;
+        const current = deps.getCurrentUser();
+        if (
+          !current ||
+          current.uid !== targetUid ||
+          !matchesOwnerAccount(current, deps.expectedOwnerEmail)
+        ) {
+          if (inFlightProfile?.promise === runPromise) {
+            inFlightProfile = null;
+          }
+          const isUnauthorized = Boolean(
+            current && !matchesOwnerAccount(current, deps.expectedOwnerEmail)
+          );
+          state = {
+            ...state,
+            sessionGeneration: state.sessionGeneration + 1,
+            ownerProfile: null,
+            isProfileLoading: false,
+            isRetryingProfile: false,
+            profileError: isUnauthorized
+              ? "Access restricted to the verified owner account only."
+              : null,
+          };
+          notify();
+          if (isUnauthorized) {
+            void deps.onUnauthorizedOwner?.();
+          }
+          return null;
+        }
+        if (inFlightProfile?.promise === runPromise) {
+          inFlightProfile = null;
+        }
 
         const quotaMsg = buildFirestoreQuotaGuidance(
           err,
@@ -311,24 +397,19 @@ export function createFirebaseRecoveryCoordinator(deps: FirebaseRecoveryCoordina
 
         if (quotaMsg) {
           nextError = quotaMsg;
+        } else if (isFirestoreOfflineError(err)) {
+          nextConnectionStatus = "offline";
+          nextError =
+            "Firestore is currently offline. Check your connection and retry, or sign out.";
         } else {
-          const msg = err instanceof Error ? err.message : "Could not sync owner profile.";
-          if (
-            msg.toLowerCase().includes("the client is offline") ||
-            msg.toLowerCase().includes("unavailable")
-          ) {
-            nextConnectionStatus = "offline";
-            nextError =
-              "Firestore is currently offline. Check your connection and retry, or sign out.";
-          } else {
-            nextError =
-              "Signed in, but Firestore profile sync failed. Please retry or sign out.";
-          }
+          nextError =
+            "Signed in, but Firestore profile sync failed. Please retry or sign out.";
         }
 
         state = {
           ...state,
           isProfileLoading: false,
+          isRetryingProfile: false,
           profileError: nextError,
           connectionStatus: nextConnectionStatus,
         };
@@ -346,7 +427,11 @@ export function createFirebaseRecoveryCoordinator(deps: FirebaseRecoveryCoordina
   };
 
   const retryOwnerProfile = (): Promise<WithId<UserProfile> | null> => {
-    return loadOwnerProfile(deps.getCurrentUser());
+    return loadOwnerProfile(deps.getCurrentUser(), { isRetry: true });
+  };
+
+  const activate = () => {
+    disposed = false;
   };
 
   const dispose = () => {
@@ -362,10 +447,12 @@ export function createFirebaseRecoveryCoordinator(deps: FirebaseRecoveryCoordina
     clearProfileError,
     setOwnerProfile,
     advanceSession,
+    handleBrowserOffline,
     retryBootConnection,
     handleBrowserOnline,
     loadOwnerProfile,
     retryOwnerProfile,
+    activate,
     dispose,
   };
 }
@@ -419,12 +506,13 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
   }, [coordinator]);
 
   useEffect(() => {
+    coordinator.activate();
     return () => {
       coordinator.dispose();
     };
   }, [coordinator]);
 
-  // Boot-time Firestore connectivity validation + automatic browser online recovery (D-02)
+  // Boot-time Firestore connectivity validation + automatic browser offline/online recovery (D-02)
   useEffect(() => {
     if (!isConfigured) {
       void coordinator.retryBootConnection();
@@ -437,9 +525,14 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
     const onOnline = () => {
       void coordinator.handleBrowserOnline();
     };
+    const onOffline = () => {
+      coordinator.handleBrowserOffline();
+    };
     window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
     return () => {
       window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
     };
   }, [isConfigured, coordinator]);
 
@@ -540,8 +633,16 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
 
   const clearAuthError = useCallback(() => {
     setSignInError(null);
-    coordinator.clearProfileError();
-  }, [coordinator]);
+    // Preserve coordinator.profileError while an authenticated owner is still in Gate 4
+    // (ownerProfile === null) so dismissing the header dropdown never erases Gate 4's error state.
+    const current = services.auth?.currentUser ?? null;
+    const inGate4 = Boolean(
+      current && matchesOwnerAccount(current) && !coordinator.getState().ownerProfile
+    );
+    if (!inGate4) {
+      coordinator.clearProfileError();
+    }
+  }, [coordinator, services.auth]);
 
   const retryBootConnection = useCallback(() => {
     return coordinator.retryBootConnection();
@@ -591,6 +692,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
   );
 
   const authError = signInError ?? recoveryState.profileError;
+  const profileError = recoveryState.profileError;
 
   const value = useMemo<FirebaseContextValue>(
     () => ({
@@ -602,11 +704,13 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       isSigningIn,
       isCheckingConnection: recoveryState.isCheckingConnection,
       isProfileLoading: recoveryState.isProfileLoading,
+      isRetryingProfile: recoveryState.isRetryingProfile,
       user,
       ownerProfile: recoveryState.ownerProfile,
       isOwner: matchesOwnerAccount(user),
       connectionStatus: recoveryState.connectionStatus,
       authError,
+      profileError,
       signInWithGoogle,
       signOutOwner,
       clearAuthError,
@@ -622,10 +726,12 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       isSigningIn,
       recoveryState.isCheckingConnection,
       recoveryState.isProfileLoading,
+      recoveryState.isRetryingProfile,
       user,
       recoveryState.ownerProfile,
       recoveryState.connectionStatus,
       authError,
+      profileError,
       signInWithGoogle,
       signOutOwner,
       clearAuthError,

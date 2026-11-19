@@ -87,17 +87,23 @@ export function ConfirmActionModal({
           </div>
           <p>{body}</p>
 
-          {!effectiveCanWriteNow && !isBusy && (
+          {(!effectiveCanWriteNow || isWriteBusy) && !isBusy && (
             <div
               role="alert"
               data-testid="confirm-modal-connection-warning"
               className="p-2.5 rounded-lg border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-200 flex items-start gap-2 leading-relaxed"
             >
-              <CloudOff className="w-4 h-4 shrink-0 mt-0.5" />
+              {isWriteBusy || connectionState === "sync_pending" ? (
+                <Clock className="w-4 h-4 shrink-0 mt-0.5" />
+              ) : (
+                <CloudOff className="w-4 h-4 shrink-0 mt-0.5" />
+              )}
               <span>
-                {connectionState === "cached"
-                  ? labels.errCachedWriteBlocked
-                  : labels.confirmConnectionUnavailable}
+                {isWriteBusy || connectionState === "sync_pending"
+                  ? labels.errWriteInFlightLocked
+                  : connectionState === "cached"
+                    ? labels.errCachedWriteBlocked
+                    : labels.confirmConnectionUnavailable}
               </span>
             </div>
           )}

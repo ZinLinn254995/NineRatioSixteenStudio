@@ -75,6 +75,66 @@ export const db = initial.db;
 export const storage = initial.storage;
 
 /**
+ * Consistently classifies Firestore network/offline errors across client checks,
+ * profile initialization, and workspace snapshot listeners.
+ */
+export function isFirestoreOfflineError(error: unknown): boolean {
+  const code =
+    typeof (error as { code?: unknown })?.code === "string"
+      ? ((error as { code: string }).code || "").toLowerCase()
+      : "";
+  if (code === "unavailable" || code === "firestore/unavailable") {
+    return true;
+  }
+  const message = (error instanceof Error ? error.message : String(error ?? "")).toLowerCase();
+  return (
+    message.includes("the client is offline") ||
+    message.includes("unavailable") ||
+    message.includes("could not reach cloud firestore backend") ||
+    message.includes("network-request-failed") ||
+    message.includes("failed to fetch")
+  );
+}
+
+/**
+ * Pure classifier for getDocFromServer("test/connection") errors.
+ * Permission-denied confirms the Firestore server responded normally.
+ */
+export function classifyFirestoreConnectionError(error: unknown): {
+  status: FirebaseConnectionStatus;
+  message?: string;
+} {
+  const rawMessage = error instanceof Error ? error.message : String(error ?? "Unknown error.");
+  const lower = rawMessage.toLowerCase();
+  const code =
+    typeof (error as { code?: unknown })?.code === "string"
+      ? ((error as { code: string }).code || "").toLowerCase()
+      : "";
+
+  if (isFirestoreOfflineError(error)) {
+    if (lower.includes("the client is offline")) {
+      console.error("Please check your Firebase configuration.");
+    }
+    return {
+      status: "offline",
+      message: "Firestore client is offline. Local Video Studio remains available.",
+    };
+  }
+
+  if (
+    code === "permission-denied" ||
+    code === "firestore/permission-denied" ||
+    lower.includes("missing or insufficient permissions") ||
+    lower.includes("permission-denied")
+  ) {
+    // Expected for unauthenticated/denied health-check document: server responded cleanly.
+    return { status: "connected" };
+  }
+
+  return { status: "error", message: rawMessage };
+}
+
+/**
  * Validates server connectivity to Firestore on boot using getDocFromServer.
  * Permission-denied on the non-public test/connection path confirms the server
  * responded normally (not offline).
@@ -95,21 +155,6 @@ export async function testConnection(): Promise<{
     await getDocFromServer(doc(services.db, "test", "connection"));
     return { status: "connected" };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (message.includes("the client is offline")) {
-      console.error("Please check your Firebase configuration.");
-      return {
-        status: "offline",
-        message: "Firestore client is offline. Local Video Studio remains available.",
-      };
-    }
-    if (
-      message.toLowerCase().includes("missing or insufficient permissions") ||
-      message.toLowerCase().includes("permission-denied")
-    ) {
-      // Expected for unauthenticated/denied health-check document: server responded cleanly.
-      return { status: "connected" };
-    }
-    return { status: "error", message };
+    return classifyFirestoreConnectionError(error);
   }
 }

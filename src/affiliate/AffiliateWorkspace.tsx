@@ -19,6 +19,7 @@ import {
   type AffiliateProduct,
   type MarketingCampaign,
   type UiLanguage,
+  type UserProfile,
   type WithId,
 } from "../firebase";
 import { getAffiliateLabels, type AffiliateUiDictionary } from "./affiliateLabels";
@@ -96,6 +97,131 @@ function resolveWriteErrorText(
   return error || labels.writeFailed;
 }
 
+export type Gate4ViewMode = "ready" | "loading" | "retrying" | "error";
+
+/**
+ * Pure Gate 4 state resolver.
+ * Guarantees that whenever ownerProfile is null and isProfileLoading is false,
+ * Gate 4 ALWAYS renders the recoverable error state (with Retry + Sign Out),
+ * even if header authError was dismissed.
+ */
+export function resolveGate4ViewMode(input: {
+  ownerProfile: WithId<UserProfile> | null;
+  isProfileLoading: boolean;
+  isRetryingProfile: boolean;
+}): Gate4ViewMode {
+  if (input.ownerProfile) {
+    return "ready";
+  }
+  if (input.isProfileLoading) {
+    return input.isRetryingProfile ? "retrying" : "loading";
+  }
+  return "error";
+}
+
+export interface OwnerProfileGateViewProps {
+  ownerProfile: WithId<UserProfile> | null;
+  isProfileLoading: boolean;
+  isRetryingProfile: boolean;
+  profileError: string | null;
+  authError: string | null;
+  labels: AffiliateUiDictionary;
+  onRetry: () => void;
+  onSignOut: () => void;
+}
+
+export function OwnerProfileGateView({
+  ownerProfile,
+  isProfileLoading,
+  isRetryingProfile,
+  profileError,
+  authError,
+  labels,
+  onRetry,
+  onSignOut,
+}: OwnerProfileGateViewProps) {
+  const mode = resolveGate4ViewMode({
+    ownerProfile,
+    isProfileLoading,
+    isRetryingProfile,
+  });
+
+  if (mode === "ready") {
+    return null;
+  }
+
+  const detailError = profileError || authError;
+
+  return (
+    <main className="flex-1 flex flex-col items-center justify-center px-4 py-12">
+      {mode === "error" ? (
+        <div
+          role="alert"
+          data-testid="gate4-profile-error"
+          className="max-w-lg w-full rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 p-6 space-y-4 shadow-sm"
+        >
+          <div className="flex items-start gap-2.5">
+            <AlertCircle className="w-5 h-5 text-red-600 dark:text-red-400 shrink-0 mt-0.5" />
+            <div className="space-y-1 min-w-0">
+              <h1 className="text-base font-bold text-neutral-950 dark:text-neutral-50">
+                {labels.profileSyncFailedTitle}
+              </h1>
+              <p className="text-xs text-neutral-600 dark:text-neutral-400 leading-relaxed">
+                {labels.profileSyncFailedDesc}
+              </p>
+            </div>
+          </div>
+
+          {detailError && (
+            <div className="p-3 rounded-lg border border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-950/40 text-xs text-red-700 dark:text-red-300 leading-relaxed break-words">
+              {detailError}
+            </div>
+          )}
+
+          <div className="flex flex-col sm:flex-row gap-2.5 pt-1">
+            <button
+              type="button"
+              disabled={isProfileLoading}
+              onClick={onRetry}
+              className="h-11 px-4 rounded-lg bg-neutral-950 text-white dark:bg-white dark:text-neutral-950 text-xs font-semibold inline-flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
+            >
+              <RefreshCw className="w-4 h-4" />
+              <span>{labels.retry}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={onSignOut}
+              className="h-11 px-4 rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 hover:bg-neutral-100 dark:hover:bg-neutral-900 text-xs font-medium text-neutral-700 dark:text-neutral-200 inline-flex items-center justify-center gap-1.5 cursor-pointer"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span>{labels.signOut}</span>
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div
+          data-testid="gate4-profile-loading"
+          className="flex flex-col items-center gap-4"
+        >
+          <div className="flex items-center gap-2 text-xs text-neutral-600 dark:text-neutral-300">
+            <Loader2 className="w-4 h-4 animate-spin" />
+            <span>{mode === "retrying" ? labels.retryingProfile : labels.syncingProfile}</span>
+          </div>
+          <button
+            type="button"
+            onClick={onSignOut}
+            className="h-9 px-3.5 rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 hover:bg-neutral-100 dark:hover:bg-neutral-900 text-xs font-medium text-neutral-600 dark:text-neutral-300 inline-flex items-center gap-1.5 cursor-pointer"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+            <span>{labels.signOut}</span>
+          </button>
+        </div>
+      )}
+    </main>
+  );
+}
+
 interface AffiliateWorkspaceProps {
   writeController: AffiliateWriteController;
   onSwitchToVideoStudio: () => void;
@@ -111,10 +237,12 @@ export function AffiliateWorkspace({
     isSigningIn,
     isCheckingConnection,
     isProfileLoading,
+    isRetryingProfile,
     user,
     ownerProfile,
     isOwner,
     authError,
+    profileError,
     signInWithGoogle,
     signOutOwner,
     retryOwnerProfile,
@@ -341,71 +469,17 @@ export function AffiliateWorkspace({
 
   // Gate 4: Owner signed in, waiting for /users/{uid} ownerProfile master gate (D-02 recovery)
   if (!ownerProfile) {
-    const showFailureCard = !isProfileLoading && Boolean(authError);
     return (
-      <main className="flex-1 flex flex-col items-center justify-center px-4 py-12">
-        {showFailureCard ? (
-          <div
-            role="alert"
-            data-testid="gate4-profile-error"
-            className="max-w-lg w-full rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 p-6 space-y-4 shadow-sm"
-          >
-            <div className="flex items-start gap-2.5">
-              <AlertCircle className="w-5 h-5 text-red-600 dark:text-red-400 shrink-0 mt-0.5" />
-              <div className="space-y-1 min-w-0">
-                <h1 className="text-base font-bold text-neutral-950 dark:text-neutral-50">
-                  {labels.profileSyncFailedTitle}
-                </h1>
-                <p className="text-xs text-neutral-600 dark:text-neutral-400 leading-relaxed">
-                  {labels.profileSyncFailedDesc}
-                </p>
-              </div>
-            </div>
-
-            {authError && (
-              <div className="p-3 rounded-lg border border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-950/40 text-xs text-red-700 dark:text-red-300 leading-relaxed break-words">
-                {authError}
-              </div>
-            )}
-
-            <div className="flex flex-col sm:flex-row gap-2.5 pt-1">
-              <button
-                type="button"
-                disabled={isProfileLoading}
-                onClick={() => void retryOwnerProfile()}
-                className="h-11 px-4 rounded-lg bg-neutral-950 text-white dark:bg-white dark:text-neutral-950 text-xs font-semibold inline-flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
-              >
-                <RefreshCw className="w-4 h-4" />
-                <span>{labels.retry}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => void signOutOwner()}
-                className="h-11 px-4 rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 hover:bg-neutral-100 dark:hover:bg-neutral-900 text-xs font-medium text-neutral-700 dark:text-neutral-200 inline-flex items-center justify-center gap-1.5 cursor-pointer"
-              >
-                <LogOut className="w-3.5 h-3.5" />
-                <span>{labels.signOut}</span>
-              </button>
-            </div>
-          </div>
-        ) : (
-          <div className="flex flex-col items-center gap-4">
-            <div className="flex items-center gap-2 text-xs text-neutral-600 dark:text-neutral-300">
-              <Loader2 className="w-4 h-4 animate-spin" />
-              <span>{authError ? labels.retryingProfile : labels.syncingProfile}</span>
-            </div>
-            <button
-              type="button"
-              onClick={() => void signOutOwner()}
-              className="h-9 px-3.5 rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 hover:bg-neutral-100 dark:hover:bg-neutral-900 text-xs font-medium text-neutral-600 dark:text-neutral-300 inline-flex items-center gap-1.5 cursor-pointer"
-            >
-              <LogOut className="w-3.5 h-3.5" />
-              <span>{labels.signOut}</span>
-            </button>
-          </div>
-        )}
-      </main>
+      <OwnerProfileGateView
+        ownerProfile={ownerProfile}
+        isProfileLoading={isProfileLoading}
+        isRetryingProfile={isRetryingProfile}
+        profileError={profileError}
+        authError={authError}
+        labels={labels}
+        onRetry={() => void retryOwnerProfile()}
+        onSignOut={() => void signOutOwner()}
+      />
     );
   }
 

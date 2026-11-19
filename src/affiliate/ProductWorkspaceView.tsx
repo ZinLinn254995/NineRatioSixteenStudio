@@ -153,9 +153,11 @@ export function ProductWorkspaceView({
     if (!effectiveCanWriteNow) {
       if (connectionState) {
         setInlineError(
-          connectionState === "cached"
-            ? labels.errCachedWriteBlocked
-            : labels.errOfflineWriteBlocked
+          connectionState === "sync_pending"
+            ? labels.errWriteInFlightLocked
+            : connectionState === "cached"
+              ? labels.errCachedWriteBlocked
+              : labels.errOfflineWriteBlocked
         );
         return;
       }
@@ -182,9 +184,11 @@ export function ProductWorkspaceView({
     if (!effectiveCanWriteNow) {
       if (connectionState) {
         setArchiveError(
-          connectionState === "cached"
-            ? labels.errCachedWriteBlocked
-            : labels.errOfflineWriteBlocked
+          connectionState === "sync_pending"
+            ? labels.errWriteInFlightLocked
+            : connectionState === "cached"
+              ? labels.errCachedWriteBlocked
+              : labels.errOfflineWriteBlocked
         );
         setArchiveWriteState("failed");
         return;

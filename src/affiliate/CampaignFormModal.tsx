@@ -18,6 +18,7 @@ import {
 } from "./affiliateLabels";
 import {
   CONTENT_LANGUAGES,
+  evaluateAffiliateFormWriteGuard,
   resolveCampaignProductBackfill,
   shouldResetModalDraft,
   validateCampaignForm,
@@ -194,6 +195,9 @@ export function CampaignFormModal({
   const isSyncPending = effectiveState === "sync_pending";
   const isThisBusy = isSaving || isSyncPending;
   const isLockedByOtherWrite = isWriteBusy && !isTrackingThisModal;
+  const effectiveCanWriteNow = canWriteNow && connectionState === "connected";
+  const showOtherWriteSyncBanner =
+    isLockedByOtherWrite || (!isSyncPending && connectionState === "sync_pending");
 
   const linkedProductForEdit = editingCampaign
     ? products.find((p) => p.id === editingCampaign.productId) || null
@@ -209,12 +213,15 @@ export function CampaignFormModal({
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (isThisBusy || isWriteBusy) return;
+    if (isThisBusy) return;
 
-    if (!canWriteNow) {
-      setLocalError(
-        connectionState === "cached" ? labels.errCachedWriteBlocked : labels.errOfflineWriteBlocked
-      );
+    const writeGuard = evaluateAffiliateFormWriteGuard({
+      canWriteNow: effectiveCanWriteNow,
+      connectionState,
+      isWriteBusy,
+    });
+    if (!writeGuard.allowed) {
+      setLocalError(labels[writeGuard.errorKey]);
       setLocalWriteState("failed");
       return;
     }
@@ -291,16 +298,24 @@ export function CampaignFormModal({
 
         {/* Scrollable Body */}
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
-          {!canWriteNow && !isSyncPending && (
-            <div className="p-3 rounded-lg border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 text-xs text-amber-800 dark:text-amber-200 leading-relaxed">
+          {!effectiveCanWriteNow && !isSyncPending && !showOtherWriteSyncBanner && (
+            <div
+              role="alert"
+              data-testid="campaign-modal-connection-warning"
+              className="p-3 rounded-lg border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 text-xs text-amber-800 dark:text-amber-200 leading-relaxed"
+            >
               {connectionState === "cached"
                 ? labels.errCachedWriteBlocked
                 : labels.errOfflineWriteBlocked}
             </div>
           )}
 
-          {isLockedByOtherWrite && (
-            <div className="p-3 rounded-lg border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 text-xs text-amber-800 dark:text-amber-200 flex items-start gap-2 leading-relaxed">
+          {showOtherWriteSyncBanner && (
+            <div
+              role="alert"
+              data-testid="campaign-modal-sync-locked-warning"
+              className="p-3 rounded-lg border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 text-xs text-amber-800 dark:text-amber-200 flex items-start gap-2 leading-relaxed"
+            >
               <Clock className="w-4 h-4 shrink-0 mt-0.5" />
               <span>{labels.errWriteInFlightLocked}</span>
             </div>
@@ -519,7 +534,10 @@ export function CampaignFormModal({
           <button
             type="submit"
             disabled={
-              isThisBusy || isWriteBusy || !canWriteNow || (!editingCampaign && products.length === 0)
+              isThisBusy ||
+              isWriteBusy ||
+              !effectiveCanWriteNow ||
+              (!editingCampaign && products.length === 0)
             }
             className="h-10 px-5 rounded-lg bg-neutral-950 text-white dark:bg-white dark:text-neutral-950 text-xs font-semibold flex items-center gap-1.5 disabled:opacity-40 cursor-pointer"
           >

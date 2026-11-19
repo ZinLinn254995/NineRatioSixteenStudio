@@ -22,18 +22,31 @@ export function AuthStatusControl() {
   } = useFirebase();
 
   const [open, setOpen] = useState(false);
+  const [dismissedError, setDismissedError] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    if (!open) return;
+    if (!authError && dismissedError !== null) {
+      setDismissedError(null);
+    }
+  }, [authError, dismissedError]);
+
+  const hasUndismissedError = Boolean(authError && dismissedError !== authError);
+  const isDropdownVisible = open || hasUndismissedError;
+
+  useEffect(() => {
+    if (!isDropdownVisible) return;
     const onOutsideClick = (e: MouseEvent) => {
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
         setOpen(false);
+        if (authError) {
+          setDismissedError(authError);
+        }
       }
     };
     document.addEventListener("mousedown", onOutsideClick);
     return () => document.removeEventListener("mousedown", onOutsideClick);
-  }, [open]);
+  }, [isDropdownVisible, authError]);
 
   if (!isConfigured) {
     return (
@@ -115,7 +128,7 @@ export function AuthStatusControl() {
         </button>
       )}
 
-      {(open || authError) && (
+      {isDropdownVisible && (
         <div className="absolute right-0 mt-2 w-72 max-w-[calc(100vw-1.5rem)] rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 shadow-lg p-3.5 z-50 space-y-3 text-xs">
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0">
@@ -133,6 +146,9 @@ export function AuthStatusControl() {
               type="button"
               onClick={() => {
                 setOpen(false);
+                if (authError) {
+                  setDismissedError(authError);
+                }
                 clearAuthError();
               }}
               aria-label="Close account panel"

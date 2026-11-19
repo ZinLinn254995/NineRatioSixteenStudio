@@ -100,6 +100,8 @@ export function classifyWorkspaceConnectionState(input: {
     if (
       lower.includes("the client is offline") ||
       lower.includes("unavailable") ||
+      lower.includes("could not reach cloud firestore backend") ||
+      lower.includes("network-request-failed") ||
       !input.browserOnlineHint
     ) {
       return "offline";
@@ -111,12 +113,22 @@ export function classifyWorkspaceConnectionState(input: {
     return "sync_pending";
   }
 
-  if (!input.browserOnlineHint || input.bootConnectionStatus === "offline") {
+  if (
+    !input.browserOnlineHint ||
+    input.bootConnectionStatus === "offline" ||
+    input.bootConnectionStatus === "unconfigured"
+  ) {
     return "offline";
   }
 
   if (input.bootConnectionStatus === "error") {
     return "error";
+  }
+
+  // Only an explicitly verified bootConnectionStatus === "connected" may unlock writes.
+  // While bootConnectionStatus === "checking", stale snapshots must NEVER report "connected".
+  if (input.bootConnectionStatus !== "connected") {
+    return "cached";
   }
 
   if (input.hasSnapshot) {
@@ -127,18 +139,50 @@ export function classifyWorkspaceConnectionState(input: {
 }
 
 /**
- * M4: Blocks all new Firestore writes unless connectionState is strictly "connected"
- * (blocks "cached", "offline", "sync_pending", and "error").
+ * M4 + D-01: Blocks all new Firestore writes unless connectionState is strictly "connected"
+ * and (when supplied) bootConnectionStatus is strictly "connected".
  */
 export function canStartFirestoreWrite(input: {
   isOwner: boolean;
   hasOwnerProfile: boolean;
   connectionState: WorkspaceConnectionState;
   browserOnlineHint: boolean;
+  bootConnectionStatus?: "unconfigured" | "checking" | "connected" | "offline" | "error";
 }): boolean {
   if (!input.isOwner || !input.hasOwnerProfile) return false;
   if (!input.browserOnlineHint) return false;
+  if (
+    input.bootConnectionStatus !== undefined &&
+    input.bootConnectionStatus !== "connected"
+  ) {
+    return false;
+  }
   return input.connectionState === "connected";
+}
+
+export function evaluateAffiliateFormWriteGuard(input: {
+  canWriteNow: boolean;
+  connectionState: WorkspaceConnectionState;
+  isWriteBusy: boolean;
+}):
+  | { allowed: true }
+  | {
+      allowed: false;
+      errorKey: "errWriteInFlightLocked" | "errCachedWriteBlocked" | "errOfflineWriteBlocked";
+    } {
+  if (input.isWriteBusy || input.connectionState === "sync_pending") {
+    return { allowed: false, errorKey: "errWriteInFlightLocked" };
+  }
+  if (!input.canWriteNow || input.connectionState !== "connected") {
+    return {
+      allowed: false,
+      errorKey:
+        input.connectionState === "cached"
+          ? "errCachedWriteBlocked"
+          : "errOfflineWriteBlocked",
+    };
+  }
+  return { allowed: true };
 }
 
 /**
