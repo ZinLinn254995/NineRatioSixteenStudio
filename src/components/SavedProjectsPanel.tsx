@@ -132,23 +132,23 @@ export function SavedProjectsPanel({
       />
 
       {/* Top Toolbar */}
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2 pb-3 border-b border-[#dde2e9] dark:border-[#242a34]">
         <div className="relative flex-1 min-w-[160px]">
-          <Search className="w-3.5 h-3.5 text-neutral-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+          <Search className="w-3.5 h-3.5 text-[#525d6d] dark:text-[#8b95a5] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
           <input
             type="text"
             value={filterText}
             onChange={(e) => setFilterText(e.target.value)}
             placeholder="Search saved projects..."
             aria-label="Search saved projects"
-            className="w-full h-9 pl-8 pr-3 text-xs rounded-lg border border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-900 text-neutral-950 dark:text-neutral-50 placeholder:text-neutral-400 focus:outline-none focus:border-neutral-950 dark:focus:border-white"
+            className="w-full h-9 pl-8 pr-3 text-xs rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] text-[#0e1217] dark:text-[#f1f3f5] placeholder:text-[#525d6d]/75 dark:placeholder:text-[#8b95a5]/75 focus:outline-none focus:border-teal-700 dark:focus:border-teal-400 transition-colors"
           />
         </div>
 
         <button
           type="button"
           onClick={() => importInputRef.current?.click()}
-          className="h-9 px-3 rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 hover:bg-neutral-100 dark:hover:bg-neutral-900 text-xs font-medium flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors"
+          className="h-9 px-3 rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] text-xs font-medium text-[#0e1217] dark:text-[#f1f3f5] flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors"
         >
           <Upload className="w-3.5 h-3.5" />
           <span>Import JSON</span>
@@ -160,7 +160,7 @@ export function SavedProjectsPanel({
               type="button"
               onClick={() => onSaveCurrent(false)}
               disabled={isSaving}
-              className="h-9 px-3.5 rounded-lg bg-neutral-950 text-white dark:bg-white dark:text-neutral-950 text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap hover:opacity-90 disabled:opacity-40 cursor-pointer transition-opacity"
+              className="h-9 px-3.5 rounded-md bg-teal-700 hover:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 text-white dark:text-[#061412] text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap disabled:opacity-40 cursor-pointer transition-colors shadow-xs"
             >
               <Bookmark className="w-3.5 h-3.5" />
               <span>{activeSavedId ? "Update Saved" : "Save Project"}</span>
@@ -172,7 +172,7 @@ export function SavedProjectsPanel({
                 onClick={() => onSaveCurrent(true)}
                 disabled={isSaving}
                 title="Save as a new separate copy"
-                className="h-9 px-3 rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 hover:bg-neutral-100 dark:hover:bg-neutral-900 text-xs font-medium flex items-center gap-1 whitespace-nowrap cursor-pointer transition-colors"
+                className="h-9 px-3 rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] text-xs font-medium text-[#0e1217] dark:text-[#f1f3f5] flex items-center gap-1 whitespace-nowrap cursor-pointer transition-colors"
               >
                 <Plus className="w-3.5 h-3.5" />
                 <span>Copy</span>
@@ -184,28 +184,28 @@ export function SavedProjectsPanel({
 
       {/* Saved List */}
       {isLoading ? (
-        <div className="space-y-3">
+        <div className="divide-y divide-[#dde2e9] dark:divide-[#242a34]">
           {Array.from({ length: 3 }).map((_, i) => (
             <div
               key={i}
-              className="h-24 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-900 animate-pulse"
+              className="h-24 bg-[#eceff3]/60 dark:bg-[#181c23]/60 animate-pulse my-1 rounded-md"
             />
           ))}
         </div>
       ) : filtered.length === 0 ? (
-        <div className="py-16 px-4 rounded-xl border border-dashed border-neutral-200 dark:border-neutral-800 flex flex-col items-center justify-center text-center">
-          <FolderOpen className="w-6 h-6 text-neutral-400 mb-2.5" />
-          <p className="text-sm font-medium text-neutral-900 dark:text-neutral-100">
+        <div className="py-16 px-4 rounded-lg border border-dashed border-[#c9d1dc] dark:border-[#2e3644] bg-[#eceff3]/40 dark:bg-[#090b0e] flex flex-col items-center justify-center text-center">
+          <FolderOpen className="w-6 h-6 text-[#525d6d] dark:text-[#8b95a5] mb-2.5" />
+          <p className="font-display text-sm font-semibold text-[#0e1217] dark:text-[#f1f3f5]">
             {projects.length === 0 ? "No offline projects saved yet" : "No matching projects"}
           </p>
-          <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1 max-w-xs">
+          <p className="text-xs text-[#525d6d] dark:text-[#8b95a5] mt-1 max-w-xs">
             {projects.length === 0
-              ? "Click Save in the top bar anytime to keep your scenes, subtitles, voice & edit settings stored offline on this device."
+              ? "Click Save anytime to keep your scenes, subtitles, voice & edit settings stored offline on this device."
               : "Try a different search keyword."}
           </p>
         </div>
       ) : (
-        <div className="space-y-2.5">
+        <div className="divide-y divide-[#dde2e9] dark:divide-[#242a34] border-y border-[#dde2e9] dark:border-[#242a34]">
           {filtered.map((record) => {
             const isActive = record.id === activeSavedId;
             const isEditing = editingId === record.id;
@@ -220,19 +220,19 @@ export function SavedProjectsPanel({
             return (
               <div
                 key={record.id}
-                className={`rounded-xl border p-3 transition-colors ${
+                className={`py-3.5 px-2 transition-colors ${
                   isActive
-                    ? "border-neutral-950 dark:border-white bg-neutral-50 dark:bg-neutral-900"
-                    : "border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 hover:border-neutral-300 dark:hover:border-neutral-700"
+                    ? "bg-teal-50/60 dark:bg-teal-950/25"
+                    : "hover:bg-[#eceff3]/60 dark:hover:bg-[#181c23]/60"
                 }`}
               >
-                <div className="flex items-start gap-3">
+                <div className="flex items-start gap-3.5">
                   {/* Thumbnail */}
                   <button
                     type="button"
                     onClick={() => onOpenProject(record)}
                     aria-label={`Open ${record.title}`}
-                    className="relative w-24 sm:w-28 aspect-video rounded-lg overflow-hidden bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 shrink-0 cursor-pointer group"
+                    className="relative w-24 sm:w-28 aspect-video rounded-md overflow-hidden bg-[#eceff3] dark:bg-[#181c23] border border-[#dde2e9] dark:border-[#242a34] shrink-0 cursor-pointer group"
                   >
                     {record.thumbnail ? (
                       <img
@@ -242,7 +242,7 @@ export function SavedProjectsPanel({
                         className="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-200"
                       />
                     ) : (
-                      <div className="w-full h-full flex items-center justify-center text-neutral-400">
+                      <div className="w-full h-full flex items-center justify-center text-[#525d6d] dark:text-[#8b95a5]">
                         <Film className="w-4 h-4" />
                       </div>
                     )}
@@ -265,13 +265,13 @@ export function SavedProjectsPanel({
                           }}
                           autoFocus
                           aria-label="Project title"
-                          className="flex-1 min-w-0 h-7 px-2 text-xs font-semibold rounded border border-neutral-400 dark:border-neutral-600 bg-white dark:bg-neutral-950 focus:outline-none focus:border-neutral-950 dark:focus:border-white"
+                          className="flex-1 min-w-0 h-7 px-2 text-xs font-semibold rounded border border-teal-700 dark:border-teal-400 bg-white dark:bg-[#181c23] text-[#0e1217] dark:text-[#f1f3f5] focus:outline-none"
                         />
                         <button
                           type="button"
                           onClick={() => commitRename(record.id)}
                           aria-label="Save name"
-                          className="w-7 h-7 rounded bg-neutral-950 text-white dark:bg-white dark:text-neutral-950 flex items-center justify-center cursor-pointer"
+                          className="w-7 h-7 rounded bg-teal-700 text-white dark:bg-teal-400 dark:text-[#061412] flex items-center justify-center cursor-pointer"
                         >
                           <Check className="w-3.5 h-3.5" />
                         </button>
@@ -279,27 +279,24 @@ export function SavedProjectsPanel({
                           type="button"
                           onClick={() => setEditingId(null)}
                           aria-label="Cancel rename"
-                          className="w-7 h-7 rounded border border-neutral-200 dark:border-neutral-700 flex items-center justify-center cursor-pointer"
+                          className="w-7 h-7 rounded border border-[#dde2e9] dark:border-[#242a34] flex items-center justify-center cursor-pointer"
                         >
                           <X className="w-3.5 h-3.5" />
                         </button>
                       </div>
                     ) : (
-                      <div className="flex items-start justify-between gap-2">
-                        <button
-                          type="button"
-                          onClick={() => onOpenProject(record)}
-                          className="text-left text-[13px] font-semibold text-neutral-950 dark:text-neutral-50 truncate hover:underline cursor-pointer"
-                        >
-                          {record.title}
-                        </button>
-                        <span className="text-[10px] font-mono-tabular uppercase tracking-wide px-1.5 py-0.5 rounded border border-neutral-200 dark:border-neutral-700 text-neutral-500 dark:text-neutral-400 shrink-0">
-                          {record.sourceType === "youtube" ? "YouTube" : "Local"}
-                        </span>
-                      </div>
+                      <button
+                        type="button"
+                        onClick={() => onOpenProject(record)}
+                        className="text-left text-[13px] font-semibold text-[#0e1217] dark:text-[#f1f3f5] truncate hover:text-teal-700 dark:hover:text-teal-400 transition-colors cursor-pointer block max-w-full"
+                      >
+                        {record.title}
+                      </button>
                     )}
 
-                    <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-neutral-500 dark:text-neutral-400 font-mono-tabular">
+                    <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-[#525d6d] dark:text-[#8b95a5] font-mono-tabular">
+                      <span>{record.sourceType === "youtube" ? "YouTube" : "Local"}</span>
+                      <span aria-hidden="true">·</span>
                       <span>
                         {record.scenes.length}{" "}
                         {record.scenes.length === 1 ? "scene" : "scenes"}
@@ -328,7 +325,11 @@ export function SavedProjectsPanel({
                       <button
                         type="button"
                         onClick={() => onOpenProject(record)}
-                        className="h-7 px-2.5 rounded-md bg-neutral-950 text-white dark:bg-white dark:text-neutral-950 text-[11px] font-medium hover:opacity-90 cursor-pointer transition-opacity"
+                        className={`h-7 px-3 rounded-md text-[11px] font-semibold cursor-pointer transition-colors whitespace-nowrap shrink-0 ${
+                          isActive
+                            ? "bg-teal-700 text-white dark:bg-teal-400 dark:text-[#061412]"
+                            : "bg-[#0e1217] text-white dark:bg-[#f1f3f5] dark:text-[#0b0d10] hover:bg-teal-700 dark:hover:bg-teal-400 dark:hover:text-[#061412]"
+                        }`}
                       >
                         {isActive ? "Active" : "Open"}
                       </button>
@@ -340,7 +341,7 @@ export function SavedProjectsPanel({
                             setRelinkTargetId(record.id);
                             relinkInputRef.current?.click();
                           }}
-                          className="h-7 px-2.5 rounded-md border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 hover:bg-neutral-100 dark:hover:bg-neutral-900 text-[11px] font-medium flex items-center gap-1 cursor-pointer transition-colors"
+                          className="h-7 px-2.5 rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] text-[11px] font-medium text-[#0e1217] dark:text-[#f1f3f5] flex items-center gap-1 cursor-pointer transition-colors whitespace-nowrap"
                         >
                           <Link2 className="w-3 h-3" />
                           <span>Link Video</span>
@@ -352,7 +353,7 @@ export function SavedProjectsPanel({
                         onClick={() => startRename(record)}
                         title="Rename project"
                         aria-label={`Rename ${record.title}`}
-                        className="h-7 w-7 rounded-md border border-neutral-200 dark:border-neutral-800 hover:bg-neutral-100 dark:hover:bg-neutral-900 flex items-center justify-center text-neutral-600 dark:text-neutral-400 cursor-pointer transition-colors"
+                        className="h-7 w-7 rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] flex items-center justify-center text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5] cursor-pointer transition-colors"
                       >
                         <Pencil className="w-3 h-3" />
                       </button>
@@ -362,7 +363,7 @@ export function SavedProjectsPanel({
                         onClick={() => onExportJson(record)}
                         title="Export project JSON backup"
                         aria-label={`Export ${record.title} JSON`}
-                        className="h-7 w-7 rounded-md border border-neutral-200 dark:border-neutral-800 hover:bg-neutral-100 dark:hover:bg-neutral-900 flex items-center justify-center text-neutral-600 dark:text-neutral-400 cursor-pointer transition-colors"
+                        className="h-7 w-7 rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] flex items-center justify-center text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5] cursor-pointer transition-colors"
                       >
                         <Download className="w-3 h-3" />
                       </button>
@@ -375,14 +376,14 @@ export function SavedProjectsPanel({
                               onDeleteProject(record.id);
                               setConfirmDeleteId(null);
                             }}
-                            className="h-7 px-2 rounded-md bg-neutral-950 text-white dark:bg-white dark:text-neutral-950 text-[11px] font-semibold cursor-pointer"
+                            className="h-7 px-2.5 rounded-md bg-red-600 hover:bg-red-700 text-white text-[11px] font-semibold cursor-pointer transition-colors"
                           >
                             Confirm
                           </button>
                           <button
                             type="button"
                             onClick={() => setConfirmDeleteId(null)}
-                            className="h-7 px-2 rounded-md border border-neutral-200 dark:border-neutral-800 text-[11px] cursor-pointer"
+                            className="h-7 px-2 rounded-md border border-[#dde2e9] dark:border-[#242a34] text-[11px] text-[#525d6d] dark:text-[#8b95a5] cursor-pointer"
                           >
                             Cancel
                           </button>
@@ -393,7 +394,7 @@ export function SavedProjectsPanel({
                           onClick={() => setConfirmDeleteId(record.id)}
                           title="Delete saved project"
                           aria-label={`Delete ${record.title}`}
-                          className="h-7 w-7 rounded-md border border-neutral-200 dark:border-neutral-800 hover:bg-neutral-100 dark:hover:bg-neutral-900 flex items-center justify-center text-neutral-500 hover:text-neutral-950 dark:hover:text-white cursor-pointer transition-colors ml-auto"
+                          className="h-7 w-7 rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] hover:bg-red-50 hover:border-red-200 dark:hover:bg-red-950/40 dark:hover:border-red-900 flex items-center justify-center text-[#525d6d] dark:text-[#8b95a5] hover:text-red-600 dark:hover:text-red-400 cursor-pointer transition-colors ml-auto"
                         >
                           <Trash2 className="w-3 h-3" />
                         </button>

@@ -4,12 +4,13 @@ import {
   ArrowUpFromLine,
   Bookmark,
   Check,
+  Clapperboard,
+  Compass,
+  FolderOpen,
   Loader2,
   Moon,
-  Search,
+  Scissors,
   Sun,
-  Upload,
-  X,
 } from "lucide-react";
 import type {
   ActiveMediaSource,
@@ -27,7 +28,12 @@ import type {
 } from "./types";
 import { DEFAULT_STAGE_PREVIEW_SCALE, Stage9x16 } from "./components/Stage9x16";
 import { mapCutTimeToSource } from "./components/YouTubeScenePlayer";
-import { WorkspaceSidebar, type WorkspaceTab } from "./components/WorkspaceSidebar";
+import {
+  WorkspaceSidebar,
+  type StudioSectionId,
+  type WorkspaceTab,
+} from "./components/WorkspaceSidebar";
+import { ProjectTimelineEditor } from "./components/ProjectTimelineEditor";
 import { ExportSheet } from "./components/ExportSheet";
 import {
   exportProjectToMp4,
@@ -73,6 +79,8 @@ export default function App() {
   const [searchError, setSearchError] = useState<string | null>(null);
 
   const [activeTab, setActiveTab] = useState<WorkspaceTab>("youtube");
+  const [studioSection, setStudioSection] = useState<StudioSectionId>("captions");
+  const [timelineCollapsed, setTimelineCollapsed] = useState<boolean>(false);
   const [localMedia, setLocalMedia] = useState<ActiveMediaSource | null>(null);
   const [youtubeMedia, setYoutubeMedia] = useState<ActiveMediaSource | null>(null);
   const [selectedScenes, setSelectedScenes] = useState<SceneSelection[]>([]);
@@ -116,7 +124,6 @@ export default function App() {
   );
   const [stagePreviewScale, setStagePreviewScale] = useState<number>(DEFAULT_STAGE_PREVIEW_SCALE);
 
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const activeRunIdRef = useRef(0);
   const generateAbortRef = useRef<AbortController | null>(null);
   const resyncAbortRef = useRef<AbortController | null>(null);
@@ -276,6 +283,12 @@ export default function App() {
     mql.addEventListener("change", onChange);
     return () => mql.removeEventListener("change", onChange);
   }, []);
+
+  useEffect(() => {
+    if (isDesktop && studioSection === "timeline") {
+      setStudioSection("captions");
+    }
+  }, [isDesktop, studioSection]);
 
   const registerBlobUrl = useCallback((blob: Blob): string => {
     const url = URL.createObjectURL(blob);
@@ -677,7 +690,8 @@ export default function App() {
         };
         setProject(nextProj);
         setBaselineFromProject(nextProj);
-        setActiveTab("edit");
+        setActiveTab("studio");
+        setStudioSection("captions");
       } else if (targetMedia.sourceType === "youtube" && targetMedia.videoId) {
         const resp = await fetch("/api/process-video", {
           method: "POST",
@@ -702,7 +716,8 @@ export default function App() {
         };
         setProject(nextProj);
         setBaselineFromProject(nextProj);
-        setActiveTab("edit");
+        setActiveTab("studio");
+        setStudioSection("captions");
       }
     } catch (err) {
       if (
@@ -2107,7 +2122,7 @@ export default function App() {
         return;
       }
 
-      if (activeTab === "script" && projectRef.current) {
+      if (activeTab === "studio" && studioSection === "captions" && projectRef.current) {
         const target = e.target as HTMLElement | null;
         const tag = target?.tagName;
         const inTextField =
@@ -2127,6 +2142,7 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [
     activeTab,
+    studioSection,
     canSaveCurrent,
     handleSaveProject,
     handleUndoSubtitles,
@@ -2220,7 +2236,8 @@ export default function App() {
     setBaselineFromProject(openedProj);
 
     if (record.subtitles.length > 0 || record.scenes.length > 0) {
-      setActiveTab("edit");
+      setActiveTab("studio");
+      setStudioSection("captions");
     } else if (record.sourceType === "local" && localUrl) {
       setActiveTab("scenes");
     } else if (record.sourceType === "youtube") {
@@ -2335,122 +2352,195 @@ export default function App() {
     }
   };
 
-  return (
-    <div
-      className="h-[100dvh] overflow-hidden flex flex-col bg-white text-neutral-950 dark:bg-neutral-950 dark:text-neutral-50 transition-colors duration-150"
-    >
-      {/* Responsive Top Bar: 2 clean rows on mobile/tablet, 1 row on desktop */}
-      <header className="px-3 sm:px-5 lg:px-6 border-b border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 shrink-0">
-        <div className="min-h-11 sm:min-h-14 py-1.5 lg:py-0 lg:h-14 flex flex-wrap lg:flex-nowrap items-center justify-between gap-x-2 gap-y-1.5 lg:gap-4">
-          {/* Group 1: Brand Wordmark */}
-          <span className="text-sm sm:text-base font-bold tracking-tight whitespace-nowrap shrink-0 order-1">
-            9:16 Studio
-          </span>
+  const activeTabLabel =
+    activeTab === "youtube"
+      ? "Source"
+      : activeTab === "scenes"
+        ? "Scenes"
+        : activeTab === "studio"
+          ? "Studio"
+          : "Projects";
 
-          {/* Group 2: Theme Toggle (Row 1 Right on mobile/tablet, Right group on desktop) */}
-          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0 order-2 lg:order-3 ml-auto lg:ml-0">
-            <button
-              type="button"
-              onClick={() => setDarkMode((d) => !d)}
-              aria-label={darkMode ? "Switch to Light mode" : "Switch to Dark mode"}
-              className="w-9 h-9 rounded-lg border border-neutral-200 dark:border-neutral-800 flex items-center justify-center hover:bg-neutral-100 dark:hover:bg-neutral-900 transition-colors cursor-pointer shrink-0"
-            >
-              {darkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
-            </button>
+  const activeMediaTitle = project?.title || localMedia?.title || youtubeMedia?.title;
+
+  const navItems = [
+    { id: "youtube" as const, label: "Source", icon: Compass, count: 0 },
+    { id: "scenes" as const, label: "Scenes", icon: Scissors, count: selectedScenes.length },
+    { id: "studio" as const, label: "Studio", icon: Clapperboard, count: 0 },
+    { id: "projects" as const, label: "Projects", icon: FolderOpen, count: savedProjects.length },
+  ];
+
+  return (
+    <div className="h-[100dvh] w-full overflow-hidden flex flex-col lg:flex-row bg-[#f5f6f8] text-[#0e1217] dark:bg-[#0b0d10] dark:text-[#f1f3f5] transition-colors duration-150">
+      {/* Desktop Left Primary Activity Rail (72px) */}
+      <aside
+        aria-label="Primary navigation"
+        className="hidden lg:flex w-[72px] shrink-0 flex-col justify-between border-r border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] py-3 px-1.5 z-20"
+      >
+        <div className="flex flex-col items-center gap-3">
+          {/* Geometric 9:16 Brand Tile */}
+          <div className="w-11 h-11 rounded-lg bg-[#0e1217] dark:bg-[#f1f3f5] text-white dark:text-[#0e1217] flex flex-col items-center justify-center leading-none border border-[#dde2e9] dark:border-[#242a34] select-none shrink-0">
+            <span className="font-display font-bold text-xs tracking-tight">9:16</span>
+            <span className="text-[7px] font-semibold uppercase tracking-[0.16em] opacity-70 mt-0.5">
+              Studio
+            </span>
           </div>
 
-          {/* Video Studio Controls: Second clean row on mobile/tablet, inline center & right on desktop */}
-          <div
-            className="basis-full h-px bg-neutral-100 dark:bg-neutral-800/80 lg:hidden order-3"
-            aria-hidden="true"
-          />
+          <div className="w-8 h-px bg-[#dde2e9] dark:bg-[#242a34]" />
 
-          {/* Direct Search & Local Video Input */}
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              setActiveTab("youtube");
-              runSearch(searchInput, licenseFilter, thaiOnly);
-            }}
-            className="flex-1 min-w-0 lg:max-w-xl flex items-center gap-1.5 sm:gap-2 order-4 lg:order-2"
-          >
-            <div className="relative flex-1 min-w-0">
-              <Search className="w-4 h-4 text-neutral-400 absolute left-2.5 sm:left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-              <input
-                type="text"
-                value={searchInput}
-                onChange={(e) => setSearchInput(e.target.value)}
-                placeholder="Search YouTube or paste URL..."
-                aria-label="Search YouTube videos"
-                className="w-full h-9 pl-8 sm:pl-9 pr-7 sm:pr-8 text-sm rounded-lg border border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-900 text-neutral-950 dark:text-neutral-50 placeholder:text-neutral-400 focus:outline-none focus:border-neutral-950 dark:focus:border-white transition-colors"
-              />
-              {searchInput && (
+          {/* Vertical Activity Rail Buttons */}
+          <nav aria-label="Workspace tabs" className="w-full flex flex-col gap-1.5">
+            {navItems.map((item) => {
+              const Icon = item.icon;
+              const active = activeTab === item.id;
+              return (
                 <button
+                  key={item.id}
                   type="button"
                   onClick={() => {
-                    setSearchInput("");
-                    setActiveTab("youtube");
-                    runSearch("", licenseFilter, thaiOnly);
+                    if (item.id === "youtube") setIsPlaying(false);
+                    setActiveTab(item.id);
                   }}
-                  aria-label="Clear search and show recommended"
-                  className="w-6 h-6 rounded flex items-center justify-center text-neutral-400 hover:text-neutral-950 dark:hover:text-white absolute right-1.5 top-1/2 -translate-y-1/2 cursor-pointer"
+                  aria-current={active ? "page" : undefined}
+                  className={`relative w-full py-2.5 px-1 rounded-md flex flex-col items-center justify-center gap-1 text-[11px] font-medium transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-700 dark:focus-visible:ring-teal-400 ${
+                    active
+                      ? "bg-teal-50/90 dark:bg-teal-950/50 text-teal-700 dark:text-teal-400 border border-teal-200/80 dark:border-teal-500/30 font-semibold"
+                      : "text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5] hover:bg-[#eceff3]/70 dark:hover:bg-[#181c23] border border-transparent"
+                  }`}
                 >
-                  <X className="w-3.5 h-3.5" />
+                  {item.count > 0 && (
+                    <span
+                      className={`absolute top-1 right-1 min-w-[15px] h-[15px] px-1 rounded-sm text-[9px] font-mono-tabular font-semibold flex items-center justify-center leading-none ${
+                        active
+                          ? "bg-teal-700 text-white dark:bg-teal-400 dark:text-[#061412]"
+                          : "bg-[#eceff3] dark:bg-[#181c23] text-[#525d6d] dark:text-[#8b95a5]"
+                      }`}
+                    >
+                      {item.count}
+                    </span>
+                  )}
+                  <Icon className="w-4 h-4 shrink-0" />
+                  <span className="truncate max-w-full leading-tight">{item.label}</span>
                 </button>
-              )}
+              );
+            })}
+          </nav>
+        </div>
+
+        {/* Bottom Utility Stack: Save Offline & Theme Switch */}
+        <div className="w-full flex flex-col items-center gap-1.5 pt-2 border-t border-[#dde2e9] dark:border-[#242a34]">
+          <button
+            type="button"
+            onClick={() => handleSaveProject(false)}
+            disabled={!canSaveCurrent || isSavingProject}
+            title="Save project offline (Ctrl+S)"
+            aria-label="Save project offline"
+            className={`w-full py-2 px-1 rounded-md flex flex-col items-center justify-center gap-0.5 text-[10px] font-medium transition-colors cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-700 dark:focus-visible:ring-teal-400 ${
+              justSaved
+                ? "bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-700/50"
+                : "text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5] hover:bg-[#eceff3]/70 dark:hover:bg-[#181c23]"
+            }`}
+          >
+            {isSavingProject ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : justSaved ? (
+              <Check className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+            ) : (
+              <Bookmark className="w-4 h-4" />
+            )}
+            <span>
+              {isSavingProject
+                ? "Saving"
+                : justSaved
+                  ? "Saved"
+                  : activeSavedId
+                    ? "Update"
+                    : "Save"}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setDarkMode((d) => !d)}
+            aria-label={darkMode ? "Switch to Light mode" : "Switch to Dark mode"}
+            title={darkMode ? "Switch to Light mode" : "Switch to Dark mode"}
+            className="w-full py-2 px-1 rounded-md flex flex-col items-center justify-center gap-0.5 text-[10px] font-medium text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5] hover:bg-[#eceff3]/70 dark:hover:bg-[#181c23] transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-700 dark:focus-visible:ring-teal-400"
+          >
+            {darkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+            <span>{darkMode ? "Light" : "Dark"}</span>
+          </button>
+        </div>
+      </aside>
+
+      {/* Right Main Workstation Column */}
+      <div className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
+        {/* Ultra-Slim Top Command Bar */}
+        <header className="h-12 shrink-0 px-3 sm:px-4 border-b border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] flex items-center justify-between gap-3">
+          {/* Left: Breadcrumb & Active Project Context */}
+          <div className="flex items-center gap-2 min-w-0">
+            <div className="lg:hidden w-7 h-7 rounded-md bg-[#0e1217] dark:bg-[#f1f3f5] text-white dark:text-[#0e1217] flex items-center justify-center font-display font-bold text-[10px] tracking-tight shrink-0">
+              9:16
             </div>
 
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="video/*"
-              className="hidden"
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) handleUploadLocalVideo(file);
-                e.target.value = "";
-              }}
-            />
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              title="Upload local video"
-              aria-label="Upload local video"
-              className="h-9 w-9 sm:w-auto sm:px-3 rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 hover:bg-neutral-100 dark:hover:bg-neutral-900 text-xs font-medium flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors"
-            >
-              <Upload className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Upload</span>
-            </button>
-          </form>
+            <div className="flex items-center gap-1.5 min-w-0">
+              <span className="font-display text-sm font-bold tracking-tight text-[#0e1217] dark:text-[#f1f3f5] whitespace-nowrap">
+                9:16 Studio
+              </span>
+              <span
+                aria-hidden="true"
+                className="text-xs text-[#525d6d]/60 dark:text-[#8b95a5]/60 select-none"
+              >
+                /
+              </span>
+              <span className="text-xs font-semibold text-teal-700 dark:text-teal-400 whitespace-nowrap">
+                {activeTabLabel}
+              </span>
+            </div>
 
-          {/* Save Offline & Download MP4 Actions */}
-          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0 order-5 lg:order-4">
+            {activeMediaTitle && (
+              <span className="hidden md:inline-block text-xs text-[#525d6d] dark:text-[#8b95a5] truncate max-w-[200px] lg:max-w-[320px] pl-2.5 ml-1 border-l border-[#dde2e9] dark:border-[#242a34]">
+                {activeMediaTitle}
+              </span>
+            )}
+          </div>
+
+          {/* Right: Quick Mobile Utilities + Dominant Export MP4 CTA */}
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+            {project && (
+              <span className="hidden sm:inline-block text-[11px] font-mono-tabular text-[#525d6d] dark:text-[#8b95a5] pr-2 border-r border-[#dde2e9] dark:border-[#242a34] whitespace-nowrap">
+                {project.scenes.length} {project.scenes.length === 1 ? "scene" : "scenes"} ·{" "}
+                {Math.round(project.targetDurationSec)}s
+              </span>
+            )}
+
             <button
               type="button"
               onClick={() => handleSaveProject(false)}
               disabled={!canSaveCurrent || isSavingProject}
               title="Save project offline (Ctrl+S)"
               aria-label="Save project offline"
-              className="h-9 w-9 sm:w-auto sm:px-3 rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 hover:bg-neutral-100 dark:hover:bg-neutral-900 text-xs font-medium flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
+              className="lg:hidden h-8 w-8 sm:w-auto sm:px-2.5 rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] text-xs font-medium text-[#0e1217] dark:text-[#f1f3f5] flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
             >
               {isSavingProject ? (
-                <>
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  <span className="hidden sm:inline">Saving...</span>
-                </>
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
               ) : justSaved ? (
-                <>
-                  <Check className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
-                  <span className="hidden sm:inline">Saved</span>
-                </>
+                <Check className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
               ) : (
-                <>
-                  <Bookmark className="w-3.5 h-3.5" />
-                  <span className="hidden sm:inline">
-                    {activeSavedId ? "Update" : "Save"}
-                  </span>
-                </>
+                <Bookmark className="w-3.5 h-3.5" />
               )}
+              <span className="hidden sm:inline">
+                {isSavingProject ? "Saving" : justSaved ? "Saved" : activeSavedId ? "Update" : "Save"}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setDarkMode((d) => !d)}
+              aria-label={darkMode ? "Switch to Light mode" : "Switch to Dark mode"}
+              title={darkMode ? "Switch to Light mode" : "Switch to Dark mode"}
+              className="lg:hidden w-8 h-8 rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] flex items-center justify-center transition-colors cursor-pointer shrink-0"
+            >
+              {darkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
             </button>
 
             <button
@@ -2480,21 +2570,21 @@ export default function App() {
                       ? "Export failed, open details"
                       : "Export 9:16 MP4"
               }
-              className={`relative overflow-hidden h-9 px-3 sm:px-3.5 lg:px-4 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 sm:gap-2 whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed transition-all cursor-pointer ${
+              className={`relative overflow-hidden h-8 px-3.5 sm:px-4 rounded-md text-xs font-semibold flex items-center justify-center gap-1.5 sm:gap-2 whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-700/50 dark:focus-visible:ring-teal-400/50 ${
                 readyDownload && !exportProgress
                   ? "bg-emerald-600 hover:bg-emerald-700 text-white"
                   : exportError && !exportProgress
                     ? "border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/50 text-red-700 dark:text-red-300 hover:bg-red-100 dark:hover:bg-red-900/60"
-                    : "bg-neutral-950 text-white dark:bg-white dark:text-neutral-950 hover:opacity-90"
+                    : "bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#061412]"
               }`}
             >
               {exportProgress ? (
                 <>
                   <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
-                  <span className="tabular-nums">{exportProgress.percent}%</span>
+                  <span className="font-mono-tabular">{exportProgress.percent}%</span>
                   <span
                     aria-hidden="true"
-                    className="absolute bottom-0 left-0 h-[2px] bg-emerald-400 dark:bg-emerald-600 transition-[width] duration-300"
+                    className="absolute bottom-0 left-0 h-[2px] bg-white/80 dark:bg-[#061412]/70 transition-[width] duration-300"
                     style={{ width: `${Math.max(6, exportProgress.percent)}%` }}
                   />
                 </>
@@ -2511,199 +2601,265 @@ export default function App() {
               ) : (
                 <>
                   <ArrowUpFromLine className="w-3.5 h-3.5 shrink-0" />
-                  <span>Export</span>
+                  <span>Export MP4</span>
                 </>
               )}
             </button>
           </div>
-        </div>
-      </header>
+        </header>
 
-      {/* Main Workspace */}
-      {(() => {
-        const showStage = activeTab === "edit" || activeTab === "script";
-        const isStageFocus = showStage;
-        const renderInlineStageInSidebar = showStage && isStageFocus && !isDesktop;
-        const useSplitFlex = showStage && isStageFocus && isDesktop;
-        const sidebarWidthPct = 66 - stagePreviewScale * 16;
-        const stageWidthPct = 34 + stagePreviewScale * 16;
+        {/* Main Workspace Body */}
+        {(() => {
+          const showStage = activeTab === "studio";
+          const useDesktopStudio = showStage && isDesktop;
+          const renderInlineStageInSidebar = showStage && !isDesktop;
+          const stageWidthPct = 30 + stagePreviewScale * 14;
 
-        const stageNode = showStage ? (
-          <Stage9x16
-            project={project}
-            cutTime={cutTime}
-            seekNonce={seekNonce}
-            isPlaying={isPlaying}
-            muted={muted}
-            voiceSettings={voiceSettings}
-            editSettings={videoEdit}
-            onTogglePlay={handleTogglePlay}
-            onPlayingChange={setIsPlaying}
-            onSeek={handleSeek}
-            onTimeUpdate={handlePlayerTimeUpdate}
-            onEnded={handlePlaybackEnded}
-            onToggleMute={() => setMuted((m) => !m)}
-            compactMobile={isStageFocus}
-            previewScale={isStageFocus ? stagePreviewScale : DEFAULT_STAGE_PREVIEW_SCALE}
-            onChangePreviewScale={isStageFocus ? setStagePreviewScale : undefined}
-          />
-        ) : null;
+          const stageNode = showStage ? (
+            <Stage9x16
+              project={project}
+              cutTime={cutTime}
+              seekNonce={seekNonce}
+              isPlaying={isPlaying}
+              muted={muted}
+              voiceSettings={voiceSettings}
+              editSettings={videoEdit}
+              onTogglePlay={handleTogglePlay}
+              onPlayingChange={setIsPlaying}
+              onSeek={handleSeek}
+              onTimeUpdate={handlePlayerTimeUpdate}
+              onEnded={handlePlaybackEnded}
+              onToggleMute={() => setMuted((m) => !m)}
+              compactMobile={!isDesktop}
+              fitContainerHeight={isDesktop}
+              previewScale={stagePreviewScale}
+              onChangePreviewScale={setStagePreviewScale}
+            />
+          ) : null;
 
-        return (
-          <main
-            className={`flex-1 min-h-0 max-w-[1440px] w-full mx-auto px-4 sm:px-6 overflow-hidden ${
-              useSplitFlex
-                ? "py-4 flex flex-row gap-6"
-                : isStageFocus
-                  ? "py-2 lg:py-4 flex flex-col gap-2 lg:gap-3"
-                  : "py-4 flex flex-col"
-            }`}
-          >
-            {/* Left / Full: Explore, Scenes, Adjust, Captions, and Projects */}
-            <section
-              style={
-                useSplitFlex
-                  ? { width: `calc(${sidebarWidthPct.toFixed(2)}% - 12px)` }
-                  : undefined
+          const sidebarNode = (
+            <WorkspaceSidebar
+              activeTab={activeTab}
+              onTabChange={(tab) => {
+                if (tab === "youtube") setIsPlaying(false);
+                setActiveTab(tab);
+              }}
+              videos={videos}
+              selectedVideoId={youtubeMedia?.videoId}
+              activeQuery={activeQuery}
+              licenseFilter={licenseFilter}
+              thaiOnly={thaiOnly}
+              hasMoreVideos={Boolean(nextContinuation)}
+              isLoadingMore={isLoadingMore}
+              localMedia={localMedia}
+              youtubeMedia={youtubeMedia}
+              selectedScenes={selectedScenes}
+              voiceSettings={voiceSettings}
+              editSettings={videoEdit}
+              isSearching={isSearching}
+              isProcessing={isProcessing}
+              isPlaying={isPlaying}
+              timelineDirty={timelineDirty}
+              searchError={searchError}
+              project={project}
+              cutTime={cutTime}
+              savedProjects={savedProjects}
+              activeSavedId={activeSavedId}
+              canSaveCurrent={canSaveCurrent}
+              isLoadingSaved={isLoadingSaved}
+              isSavingProject={isSavingProject}
+              onSelectVideo={handleSelectVideo}
+              onChangeLicenseFilter={handleChangeLicenseFilter}
+              onToggleThaiOnly={handleToggleThaiOnly}
+              onLoadMoreVideos={handleLoadMoreVideos}
+              onResetToRecommended={handleResetToRecommended}
+              onRefreshRecommended={handleRefreshRecommended}
+              onUpdateScene={handleUpdateScene}
+              onRemoveScene={handleRemoveScene}
+              onReplaceScenes={setSelectedScenes}
+              onDetectedLocalDuration={(dur) =>
+                setLocalMedia((prev) => (prev ? { ...prev, durationSec: dur } : prev))
               }
-              className={`${
-                useSplitFlex ? "shrink-0 min-w-0" : "flex-1 w-full"
-              } min-h-0 flex flex-col`}
-            >
-          {processError && (
-            <div className="mb-3 px-3.5 py-2.5 rounded-lg border border-neutral-300 dark:border-neutral-700 text-xs text-neutral-900 dark:text-neutral-100 shrink-0">
-              {processError}
-            </div>
-          )}
+              onDetectedYouTubeDuration={(dur) =>
+                setYoutubeMedia((prev) => (prev ? { ...prev, durationSec: dur } : prev))
+              }
+              onGenerateSubtitles={handleGenerateSubtitles}
+              onCancelGenerateSubtitles={handleCancelGenerateSubtitles}
+              onChangeVoiceSettings={setVoiceSettings}
+              onChangeEditSettings={setVideoEdit}
+              onUploadLocalVideo={handleUploadLocalVideo}
+              onClearLocalVideo={handleClearLocalVideo}
+              onSeek={handleSeek}
+              onTogglePlay={handleTogglePlay}
+              onPause={handlePause}
+              onPlayFromTime={handlePlayFromTime}
+              onUpdateProjectScenes={handleUpdateProjectScenes}
+              onRestoreProjectSnapshot={handleRestoreProjectSnapshot}
+              onResetTimeline={handleResetTimeline}
+              onUpdateSubtitle={handleUpdateSubtitle}
+              onUpdateWordGloss={handleUpdateWordGloss}
+              onFindReplaceSubtitles={handleFindReplaceSubtitles}
+              onAddSubtitle={handleAddSubtitle}
+              onDeleteSubtitle={handleDeleteSubtitle}
+              onUpdateSubtitleTiming={handleUpdateSubtitleTiming}
+              onSplitSubtitle={handleSplitSubtitle}
+              onMergeSubtitleWithNext={handleMergeSubtitleWithNext}
+              onShiftAllSubtitles={handleShiftAllSubtitles}
+              loopingSubId={loopingSubId}
+              onToggleLoopSubtitle={handleToggleLoopSubtitle}
+              canUndoSubtitles={subUndoStack.length > 0}
+              canRedoSubtitles={subRedoStack.length > 0}
+              onUndoSubtitles={handleUndoSubtitles}
+              onRedoSubtitles={handleRedoSubtitles}
+              onAutoFixSubtitleTimings={handleAutoFixSubtitleTimings}
+              onAiResyncSubtitles={handleAiResyncSubtitles}
+              onCancelAiResync={handleCancelAiResync}
+              isResyncingTimings={isResyncingTimings}
+              onRegenerateSubtitle={handleRegenerateSubtitle}
+              onCancelRegenerateSubtitle={handleCancelRegenerateSubtitle}
+              onRetranslateAll={handleRetranslateAll}
+              onCancelRetranslateAll={handleCancelRetranslateAll}
+              regeneratingSubIds={regeneratingSubIds}
+              isRetranslatingAll={isRetranslatingAll}
+              subtitleRegenError={subtitleRegenError}
+              onClearSubtitleRegenError={() => setSubtitleRegenError(null)}
+              onSaveProject={handleSaveProject}
+              onOpenSavedProject={handleOpenSavedProject}
+              onRenameSavedProject={handleRenameSavedProject}
+              onDeleteSavedProject={handleDeleteSavedProject}
+              onExportSavedJson={handleExportSavedJson}
+              onImportSavedJson={handleImportSavedJson}
+              onRelinkLocalVideo={handleRelinkLocalVideo}
+              ytPreviewSec={ytPreviewSec}
+              ytSeekRequest={ytSeekRequest}
+              onYtCurrentSecChange={setYtPreviewSec}
+              inlineStage={renderInlineStageInSidebar ? stageNode : undefined}
+              searchInput={searchInput}
+              onChangeSearchInput={setSearchInput}
+              onSubmitSearch={() => {
+                setActiveTab("youtube");
+                runSearch(searchInput, licenseFilter, thaiOnly);
+              }}
+              onClearSearch={() => {
+                setSearchInput("");
+                setActiveTab("youtube");
+                runSearch("", licenseFilter, thaiOnly);
+              }}
+              studioSection={studioSection}
+              onChangeStudioSection={setStudioSection}
+              showMobileTimelineTab={!isDesktop}
+            />
+          );
 
-          {saveNotice && (
-            <div className="mb-3 px-3.5 py-2.5 rounded-lg border border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-900 flex items-center justify-between gap-2 text-xs text-neutral-700 dark:text-neutral-300 shrink-0">
-              <span>{saveNotice}</span>
+          const hasAlerts = Boolean(processError || saveNotice);
+          const alertsNode = hasAlerts ? (
+            <div className="px-3.5 py-2 border-b border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#0b0d10] space-y-2 shrink-0">
+              {processError && (
+                <div className="px-3 py-2 rounded-md border border-red-200 dark:border-red-900/70 bg-red-50/80 dark:bg-red-950/35 text-xs text-red-700 dark:text-red-300">
+                  {processError}
+                </div>
+              )}
+
+              {saveNotice && (
+                <div className="px-3 py-2 rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] flex items-center justify-between gap-2 text-xs text-[#525d6d] dark:text-[#8b95a5]">
+                  <span>{saveNotice}</span>
+                  <button
+                    type="button"
+                    onClick={() => setSaveNotice(null)}
+                    className="text-[11px] font-medium text-teal-700 dark:text-teal-400 hover:underline shrink-0 cursor-pointer"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : null;
+
+          if (useDesktopStudio) {
+            return (
+              <main className="flex-1 min-h-0 flex flex-col overflow-hidden">
+                {/* Upper Split: Left Cinema Matte 9:16 Stage + Right NLE Inspector */}
+                <div className="flex-1 min-h-0 flex flex-row overflow-hidden">
+                  <section
+                    style={{ width: `${stageWidthPct.toFixed(2)}%` }}
+                    className="shrink-0 min-w-[290px] max-w-[540px] flex items-center justify-center min-h-0 bg-[#e6e9ef] dark:bg-[#07080a] p-3 lg:p-4 overflow-hidden"
+                  >
+                    {stageNode}
+                  </section>
+
+                  <section className="flex-1 min-w-0 min-h-0 flex flex-col border-l border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] overflow-hidden">
+                    {alertsNode}
+                    {sidebarNode}
+                  </section>
+                </div>
+
+                {/* Lower Studio Area: Edge-to-Edge Bottom Timeline Dock */}
+                <div className="shrink-0">
+                  <ProjectTimelineEditor
+                    dockMode
+                    isCollapsed={timelineCollapsed}
+                    onToggleCollapse={() => setTimelineCollapsed((c) => !c)}
+                    project={project}
+                    cutTime={cutTime}
+                    isPlaying={isPlaying}
+                    isActive={activeTab === "studio" && !timelineCollapsed}
+                    onTogglePlay={handleTogglePlay}
+                    onPause={handlePause}
+                    onSeek={handleSeek}
+                    onPlayFromTime={handlePlayFromTime}
+                    onUpdateScenes={handleUpdateProjectScenes}
+                    onUpdateSubtitleTiming={handleUpdateSubtitleTiming}
+                    onRestoreSnapshot={handleRestoreProjectSnapshot}
+                    onResetTimeline={handleResetTimeline}
+                    onGoToScenes={() => setActiveTab("scenes")}
+                  />
+                </div>
+              </main>
+            );
+          }
+
+          return (
+            <main className="flex-1 min-h-0 w-full flex flex-col overflow-hidden">
+              {alertsNode}
+              <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+                {sidebarNode}
+              </div>
+            </main>
+          );
+        })()}
+
+        {/* Mobile / Tablet Thumb-First Bottom Navigation Bar */}
+        <nav
+          aria-label="Mobile navigation"
+          className="lg:hidden shrink-0 border-t border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] px-2 py-1 grid grid-cols-4 gap-1"
+        >
+          {navItems.map((item) => {
+            const Icon = item.icon;
+            const active = activeTab === item.id;
+            return (
               <button
+                key={item.id}
                 type="button"
-                onClick={() => setSaveNotice(null)}
-                className="text-[11px] font-medium underline shrink-0 cursor-pointer"
+                onClick={() => {
+                  if (item.id === "youtube") setIsPlaying(false);
+                  setActiveTab(item.id);
+                }}
+                aria-current={active ? "page" : undefined}
+                className={`h-11 rounded-md flex flex-col items-center justify-center gap-0.5 text-[11px] font-medium transition-colors cursor-pointer ${
+                  active
+                    ? "bg-teal-50/90 dark:bg-teal-950/50 text-teal-700 dark:text-teal-400 font-semibold"
+                    : "text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5]"
+                }`}
               >
-                Dismiss
+                <Icon className="w-4 h-4 shrink-0" />
+                <span className="truncate max-w-full px-1">
+                  {item.count > 0 ? `${item.label} (${item.count})` : item.label}
+                </span>
               </button>
-            </div>
-          )}
-
-          <WorkspaceSidebar
-            activeTab={activeTab}
-            onTabChange={(tab) => {
-              if (tab === "youtube") setIsPlaying(false);
-              setActiveTab(tab);
-            }}
-            videos={videos}
-            selectedVideoId={youtubeMedia?.videoId}
-            activeQuery={activeQuery}
-            licenseFilter={licenseFilter}
-            thaiOnly={thaiOnly}
-            hasMoreVideos={Boolean(nextContinuation)}
-            isLoadingMore={isLoadingMore}
-            localMedia={localMedia}
-            youtubeMedia={youtubeMedia}
-            selectedScenes={selectedScenes}
-            voiceSettings={voiceSettings}
-            editSettings={videoEdit}
-            isSearching={isSearching}
-            isProcessing={isProcessing}
-            isPlaying={isPlaying}
-            timelineDirty={timelineDirty}
-            searchError={searchError}
-            project={project}
-            cutTime={cutTime}
-            savedProjects={savedProjects}
-            activeSavedId={activeSavedId}
-            canSaveCurrent={canSaveCurrent}
-            isLoadingSaved={isLoadingSaved}
-            isSavingProject={isSavingProject}
-            onSelectVideo={handleSelectVideo}
-            onChangeLicenseFilter={handleChangeLicenseFilter}
-            onToggleThaiOnly={handleToggleThaiOnly}
-            onLoadMoreVideos={handleLoadMoreVideos}
-            onResetToRecommended={handleResetToRecommended}
-            onRefreshRecommended={handleRefreshRecommended}
-            onUpdateScene={handleUpdateScene}
-            onRemoveScene={handleRemoveScene}
-            onReplaceScenes={setSelectedScenes}
-            onDetectedLocalDuration={(dur) =>
-              setLocalMedia((prev) => (prev ? { ...prev, durationSec: dur } : prev))
-            }
-            onDetectedYouTubeDuration={(dur) =>
-              setYoutubeMedia((prev) => (prev ? { ...prev, durationSec: dur } : prev))
-            }
-            onGenerateSubtitles={handleGenerateSubtitles}
-            onCancelGenerateSubtitles={handleCancelGenerateSubtitles}
-            onChangeVoiceSettings={setVoiceSettings}
-            onChangeEditSettings={setVideoEdit}
-            onUploadLocalVideo={handleUploadLocalVideo}
-            onClearLocalVideo={handleClearLocalVideo}
-            onSeek={handleSeek}
-            onTogglePlay={handleTogglePlay}
-            onPause={handlePause}
-            onPlayFromTime={handlePlayFromTime}
-            onUpdateProjectScenes={handleUpdateProjectScenes}
-            onRestoreProjectSnapshot={handleRestoreProjectSnapshot}
-            onResetTimeline={handleResetTimeline}
-            onUpdateSubtitle={handleUpdateSubtitle}
-            onUpdateWordGloss={handleUpdateWordGloss}
-            onFindReplaceSubtitles={handleFindReplaceSubtitles}
-            onAddSubtitle={handleAddSubtitle}
-            onDeleteSubtitle={handleDeleteSubtitle}
-            onUpdateSubtitleTiming={handleUpdateSubtitleTiming}
-            onSplitSubtitle={handleSplitSubtitle}
-            onMergeSubtitleWithNext={handleMergeSubtitleWithNext}
-            onShiftAllSubtitles={handleShiftAllSubtitles}
-            loopingSubId={loopingSubId}
-            onToggleLoopSubtitle={handleToggleLoopSubtitle}
-            canUndoSubtitles={subUndoStack.length > 0}
-            canRedoSubtitles={subRedoStack.length > 0}
-            onUndoSubtitles={handleUndoSubtitles}
-            onRedoSubtitles={handleRedoSubtitles}
-            onAutoFixSubtitleTimings={handleAutoFixSubtitleTimings}
-            onAiResyncSubtitles={handleAiResyncSubtitles}
-            onCancelAiResync={handleCancelAiResync}
-            isResyncingTimings={isResyncingTimings}
-            onRegenerateSubtitle={handleRegenerateSubtitle}
-            onCancelRegenerateSubtitle={handleCancelRegenerateSubtitle}
-            onRetranslateAll={handleRetranslateAll}
-            onCancelRetranslateAll={handleCancelRetranslateAll}
-            regeneratingSubIds={regeneratingSubIds}
-            isRetranslatingAll={isRetranslatingAll}
-            subtitleRegenError={subtitleRegenError}
-            onClearSubtitleRegenError={() => setSubtitleRegenError(null)}
-            onSaveProject={handleSaveProject}
-            onOpenSavedProject={handleOpenSavedProject}
-            onRenameSavedProject={handleRenameSavedProject}
-            onDeleteSavedProject={handleDeleteSavedProject}
-            onExportSavedJson={handleExportSavedJson}
-            onImportSavedJson={handleImportSavedJson}
-            onRelinkLocalVideo={handleRelinkLocalVideo}
-            ytPreviewSec={ytPreviewSec}
-            ytSeekRequest={ytSeekRequest}
-            onYtCurrentSecChange={setYtPreviewSec}
-            inlineStage={renderInlineStageInSidebar ? stageNode : undefined}
-          />
-        </section>
-
-        {/* Right: Focused 9:16 Stage */}
-        {showStage && !renderInlineStageInSidebar && (
-          <section
-            style={
-              useSplitFlex
-                ? { width: `calc(${stageWidthPct.toFixed(2)}% - 12px)` }
-                : undefined
-            }
-            className="shrink-0 min-w-0 flex items-center justify-center min-h-0"
-          >
-            {stageNode}
-          </section>
-        )}
-      </main>
-        );
-      })()}
+            );
+          })}
+        </nav>
+      </div>
 
       <ExportSheet
         open={exportSheetOpen}

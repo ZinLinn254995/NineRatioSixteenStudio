@@ -93,23 +93,23 @@ export function ExportSheet({
           onMinimize();
         }
       }}
-      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 backdrop-blur-[2px] p-0 sm:p-4"
+      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/55 backdrop-blur-[2px] p-0 sm:p-4"
       role="dialog"
       aria-modal="true"
       aria-labelledby="export-sheet-title"
     >
-      <div className="w-full sm:max-w-md rounded-t-3xl sm:rounded-2xl border-t sm:border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 text-neutral-950 dark:text-neutral-50 shadow-2xl overflow-hidden">
+      <div className="w-full sm:max-w-md rounded-t-2xl sm:rounded-xl border-t sm:border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] text-[#0e1217] dark:text-[#f1f3f5] shadow-2xl overflow-hidden">
         {/* Mobile drag handle */}
         <div className="flex justify-center pt-3 pb-1 sm:hidden" aria-hidden="true">
-          <div className="w-10 h-1 rounded-full bg-neutral-300 dark:bg-neutral-700" />
+          <div className="w-10 h-1 rounded-full bg-[#c9d1dc] dark:bg-[#323a48]" />
         </div>
 
         {/* Sheet Header */}
-        <div className="px-5 pt-4 pb-3 flex items-center justify-between gap-3 border-b border-neutral-100 dark:border-neutral-900">
+        <div className="px-5 pt-4 pb-3 flex items-center justify-between gap-3 border-b border-[#dde2e9] dark:border-[#242a34]">
           <div className="min-w-0">
             <h2
               id="export-sheet-title"
-              className="text-base font-semibold tracking-tight text-neutral-950 dark:text-neutral-50 truncate"
+              className="font-display text-base font-semibold tracking-tight text-[#0e1217] dark:text-[#f1f3f5] truncate"
             >
               {isExporting
                 ? "Exporting Video"
@@ -120,7 +120,7 @@ export function ExportSheet({
                   : "Export Failed"}
             </h2>
             {result && !isExporting && (
-              <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-0.5 truncate tabular-nums">
+              <p className="text-xs text-[#525d6d] dark:text-[#8b95a5] mt-0.5 truncate font-mono-tabular">
                 {result.fileName}
                 <span aria-hidden="true"> · </span>
                 {(result.sizeBytes / (1024 * 1024)).toFixed(1)} MB
@@ -135,7 +135,7 @@ export function ExportSheet({
             onClick={onMinimize}
             aria-label={isExporting ? "Hide export progress" : "Close export sheet"}
             title={isExporting ? "Hide (continues in background)" : "Close"}
-            className="w-10 h-10 -mr-1.5 rounded-xl flex items-center justify-center text-neutral-500 hover:text-neutral-950 dark:hover:text-white hover:bg-neutral-100 dark:hover:bg-neutral-900 transition-colors cursor-pointer shrink-0"
+            className="w-9 h-9 -mr-1.5 rounded-lg flex items-center justify-center text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5] hover:bg-[#eceff3] dark:hover:bg-[#181c23] transition-colors cursor-pointer shrink-0"
           >
             <X className="w-4 h-4" />
           </button>
@@ -148,22 +148,22 @@ export function ExportSheet({
               {/* Numeric progress + active phase */}
               <div className="flex items-end justify-between gap-4">
                 <div className="min-w-0">
-                  <p className="text-sm font-medium text-neutral-900 dark:text-neutral-100 truncate">
+                  <p className="text-sm font-medium text-[#0e1217] dark:text-[#f1f3f5] truncate">
                     {getPhaseHeadline(progress.phase)}
                   </p>
-                  <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-0.5 tabular-nums truncate">
+                  <p className="text-xs text-[#525d6d] dark:text-[#8b95a5] mt-0.5 font-mono-tabular truncate">
                     {progress.detail || "Running in background..."}
                   </p>
                 </div>
-                <span className="text-2xl font-semibold tracking-tight tabular-nums text-neutral-950 dark:text-white shrink-0">
+                <span className="font-display text-2xl font-semibold tracking-tight font-mono-tabular text-teal-700 dark:text-teal-400 shrink-0">
                   {percent}%
                 </span>
               </div>
 
               {/* Clean progress bar */}
-              <div className="w-full h-2 rounded-full bg-neutral-100 dark:bg-neutral-900 overflow-hidden">
+              <div className="w-full h-2 rounded-sm bg-[#eceff3] dark:bg-[#181c23] overflow-hidden">
                 <div
-                  className="h-full rounded-full bg-neutral-950 dark:bg-white transition-[width] duration-300 ease-out"
+                  className="h-full rounded-sm bg-teal-700 dark:bg-teal-400 transition-[width] duration-300 ease-out"
                   style={{ width: `${Math.max(4, percent)}%` }}
                 />
               </div>
@@ -176,23 +176,23 @@ export function ExportSheet({
                   return (
                     <div key={step.key} className="space-y-1.5">
                       <div
-                        className={`h-1 rounded-full transition-colors ${
+                        className={`h-1 rounded-sm transition-colors ${
                           isDone || isActive
-                            ? "bg-neutral-950 dark:bg-white"
-                            : "bg-neutral-200 dark:bg-neutral-800"
+                            ? "bg-teal-700 dark:bg-teal-400"
+                            : "bg-[#dde2e9] dark:bg-[#242a34]"
                         }`}
                       />
                       <div className="flex items-center gap-1 text-[11px] font-medium">
                         {isDone && (
-                          <Check className="w-3 h-3 text-neutral-900 dark:text-neutral-100 shrink-0" />
+                          <Check className="w-3 h-3 text-teal-700 dark:text-teal-400 shrink-0" />
                         )}
                         <span
                           className={`truncate ${
                             isActive
-                              ? "text-neutral-950 dark:text-white"
+                              ? "text-[#0e1217] dark:text-[#f1f3f5]"
                               : isDone
-                                ? "text-neutral-600 dark:text-neutral-400"
-                                : "text-neutral-400 dark:text-neutral-600"
+                                ? "text-[#525d6d] dark:text-[#8b95a5]"
+                                : "text-[#525d6d]/50 dark:text-[#8b95a5]/50"
                           }`}
                         >
                           {step.label}
@@ -208,14 +208,14 @@ export function ExportSheet({
                 <button
                   type="button"
                   onClick={onMinimize}
-                  className="h-11 px-4 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 hover:bg-neutral-100 dark:hover:bg-neutral-900 text-sm font-medium text-neutral-900 dark:text-neutral-100 transition-colors cursor-pointer"
+                  className="h-10 px-4 rounded-lg border border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] text-sm font-medium text-[#0e1217] dark:text-[#f1f3f5] transition-colors cursor-pointer"
                 >
                   Hide
                 </button>
                 <button
                   type="button"
                   onClick={onCancel}
-                  className="h-11 px-4 rounded-xl border border-red-200 dark:border-red-900/70 bg-red-50/60 dark:bg-red-950/30 hover:bg-red-100/80 dark:hover:bg-red-950/60 text-sm font-medium text-red-600 dark:text-red-400 transition-colors cursor-pointer"
+                  className="h-10 px-4 rounded-lg border border-red-200 dark:border-red-900/70 bg-red-50/70 dark:bg-red-950/35 hover:bg-red-100/80 dark:hover:bg-red-950/60 text-sm font-medium text-red-600 dark:text-red-400 transition-colors cursor-pointer"
                 >
                   Cancel Export
                 </button>
@@ -226,7 +226,7 @@ export function ExportSheet({
           {!isExporting && result && (
             <>
               {/* Built-in 9:16 MP4 verification player */}
-              <div className="rounded-xl bg-neutral-950 border border-neutral-200 dark:border-neutral-800 overflow-hidden flex items-center justify-center">
+              <div className="rounded-lg bg-[#07080a] border border-[#dde2e9] dark:border-[#242a34] overflow-hidden flex items-center justify-center">
                 <video
                   src={result.blobUrl}
                   controls
@@ -242,7 +242,7 @@ export function ExportSheet({
                   <button
                     type="button"
                     onClick={() => onSave(result)}
-                    className="w-full h-11 px-4 rounded-xl bg-neutral-950 text-white dark:bg-white dark:text-neutral-950 text-sm font-semibold flex items-center justify-center gap-2 hover:opacity-90 active:scale-[0.99] transition-all cursor-pointer"
+                    className="w-full h-11 px-4 rounded-lg bg-teal-700 hover:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 text-white dark:text-[#061412] text-sm font-semibold flex items-center justify-center gap-2 active:scale-[0.99] transition-all cursor-pointer shadow-xs"
                   >
                     <Download className="w-4 h-4" />
                     <span>Save MP4 to Device</span>
@@ -251,7 +251,7 @@ export function ExportSheet({
                   <div className="space-y-2">
                     <div
                       role="status"
-                      className="w-full h-11 px-4 rounded-xl border border-emerald-200 dark:border-emerald-900 bg-emerald-50/70 dark:bg-emerald-950/30 text-emerald-800 dark:text-emerald-300 text-sm font-medium flex items-center justify-center gap-2"
+                      className="w-full h-11 px-4 rounded-lg border border-emerald-200 dark:border-emerald-900 bg-emerald-50/75 dark:bg-emerald-950/35 text-emerald-800 dark:text-emerald-300 text-sm font-medium flex items-center justify-center gap-2"
                     >
                       <Check className="w-4 h-4 shrink-0" />
                       <span>Saved to Downloads</span>
@@ -260,7 +260,7 @@ export function ExportSheet({
                       <button
                         type="button"
                         onClick={() => onSave(result)}
-                        className="h-9 px-3 rounded-lg text-xs font-medium text-neutral-500 dark:text-neutral-400 hover:text-neutral-950 dark:hover:text-white inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+                        className="h-9 px-3 rounded-lg text-xs font-medium text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5] inline-flex items-center gap-1.5 transition-colors cursor-pointer"
                       >
                         <RotateCcw className="w-3.5 h-3.5" />
                         <span>Download another copy</span>
@@ -274,7 +274,7 @@ export function ExportSheet({
                     <button
                       type="button"
                       onClick={() => onShare(result)}
-                      className="h-11 px-4 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 hover:bg-neutral-100 dark:hover:bg-neutral-900 text-sm font-medium text-neutral-900 dark:text-neutral-100 flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                      className="h-10 px-4 rounded-lg border border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] text-sm font-medium text-[#0e1217] dark:text-[#f1f3f5] flex items-center justify-center gap-2 transition-colors cursor-pointer"
                     >
                       <Share2 className="w-4 h-4" />
                       <span>Share</span>
@@ -283,7 +283,7 @@ export function ExportSheet({
                   <button
                     type="button"
                     onClick={hasSaved ? onDiscardResult : onMinimize}
-                    className="h-11 px-4 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 hover:bg-neutral-100 dark:hover:bg-neutral-900 text-sm font-medium text-neutral-700 dark:text-neutral-300 flex items-center justify-center transition-colors cursor-pointer"
+                    className="h-10 px-4 rounded-lg border border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] text-sm font-medium text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5] flex items-center justify-center transition-colors cursor-pointer"
                   >
                     {hasSaved ? "Done" : "Keep for Later"}
                   </button>
@@ -294,9 +294,9 @@ export function ExportSheet({
 
           {!isExporting && !result && error && (
             <>
-              <div className="flex items-start gap-3 p-3.5 rounded-xl border border-red-200 dark:border-red-900/60 bg-red-50/70 dark:bg-red-950/30">
+              <div className="flex items-start gap-3 p-3.5 rounded-lg border border-red-200 dark:border-red-900/60 bg-red-50/75 dark:bg-red-950/35">
                 <AlertCircle className="w-5 h-5 text-red-600 dark:text-red-400 shrink-0 mt-0.5" />
-                <p className="text-sm text-neutral-800 dark:text-neutral-200 leading-relaxed">
+                <p className="text-sm text-[#0e1217] dark:text-[#f1f3f5] leading-relaxed">
                   {error}
                 </p>
               </div>
@@ -305,14 +305,14 @@ export function ExportSheet({
                 <button
                   type="button"
                   onClick={onDiscardResult}
-                  className="h-11 px-4 rounded-xl border border-neutral-200 dark:border-neutral-800 hover:bg-neutral-100 dark:hover:bg-neutral-900 text-sm font-medium text-neutral-700 dark:text-neutral-300 transition-colors cursor-pointer"
+                  className="h-10 px-4 rounded-lg border border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] text-sm font-medium text-[#525d6d] dark:text-[#8b95a5] transition-colors cursor-pointer"
                 >
                   Dismiss
                 </button>
                 <button
                   type="button"
                   onClick={onRetry}
-                  className="h-11 px-4 rounded-xl bg-neutral-950 text-white dark:bg-white dark:text-neutral-950 text-sm font-semibold hover:opacity-90 transition-opacity cursor-pointer"
+                  className="h-10 px-4 rounded-lg bg-teal-700 hover:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 text-white dark:text-[#061412] text-sm font-semibold transition-colors cursor-pointer"
                 >
                   Try Again
                 </button>

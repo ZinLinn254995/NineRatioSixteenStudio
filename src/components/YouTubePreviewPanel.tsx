@@ -348,25 +348,25 @@ export function YouTubePreviewPanel({
   const matchedVideo = currentIndex >= 0 ? videos[currentIndex] : undefined;
   const licenseText =
     matchedVideo?.license === "creative_commons"
-      ? "Creative Commons"
+      ? "CC"
       : matchedVideo?.license === "standard"
-        ? "Standard License"
+        ? "Standard"
         : null;
 
   if (!media || media.sourceType !== "youtube" || !media.videoId) {
     return (
       <div className="w-full">
-        <div className="w-full aspect-video rounded-xl border border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-900 flex flex-col items-center justify-center text-center p-6 gap-2.5 text-neutral-500 dark:text-neutral-400">
+        <div className="w-full aspect-video rounded-lg border border-[#dde2e9] dark:border-[#242a34] bg-[#eceff3] dark:bg-[#07080a] flex flex-col items-center justify-center text-center p-6 gap-2.5 text-[#525d6d] dark:text-[#8b95a5]">
           {isSearching ? (
             <>
-              <Loader2 className="w-5 h-5 animate-spin" />
+              <Loader2 className="w-5 h-5 animate-spin text-teal-700 dark:text-teal-400" />
               <p className="text-xs">Loading recommended video...</p>
             </>
           ) : (
             <>
               <Film className="w-6 h-6 opacity-60" />
               <p className="text-xs">
-                No YouTube video selected. Search above or choose one from the list.
+                No YouTube video selected. Search above or choose one from the feed.
               </p>
             </>
           )}
@@ -376,18 +376,18 @@ export function YouTubePreviewPanel({
   }
 
   return (
-    <div className="w-full flex flex-col gap-3">
-      {/* 16:9 YouTube Preview Stage */}
-      <div className="relative w-full aspect-video rounded-xl overflow-hidden bg-neutral-950 border border-neutral-200 dark:border-neutral-800">
+    <div className="w-full flex flex-col gap-2.5">
+      {/* 16:9 YouTube Theater Stage */}
+      <div className="relative w-full aspect-video rounded-lg overflow-hidden bg-[#07080a] border border-[#dde2e9] dark:border-[#242a34] shadow-sm">
         <div ref={ytHostRef} className="w-full h-full" />
         {ytError && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-4 bg-black/80 text-center">
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-4 bg-black/85 text-center">
             <p className="text-xs text-white leading-relaxed max-w-xs">{ytError}</p>
             {canNext && (
               <button
                 type="button"
                 onClick={handleNext}
-                className="h-8 px-3 rounded-lg bg-white text-neutral-950 text-xs font-medium hover:bg-neutral-200 transition-colors cursor-pointer"
+                className="h-8 px-3.5 rounded-md bg-teal-700 hover:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 text-white dark:text-[#061412] text-xs font-semibold transition-colors cursor-pointer"
               >
                 Skip to Next Video
               </button>
@@ -396,86 +396,80 @@ export function YouTubePreviewPanel({
         )}
       </div>
 
-      {/* Video Info & Transport Controls */}
-      <div className="p-4 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-neutral-50/80 dark:bg-neutral-900/70 space-y-3">
-        <div className="min-w-0">
-          <h2 className="text-sm sm:text-[15px] font-semibold text-neutral-950 dark:text-neutral-50 leading-snug line-clamp-2">
+      {/* Compact Title + Inline Icon Stepper & Copy Action */}
+      <div className="flex flex-col gap-1 min-w-0">
+        <div className="flex items-start justify-between gap-3">
+          <h2 className="font-display text-sm sm:text-[15px] font-semibold text-[#0e1217] dark:text-[#f1f3f5] leading-snug line-clamp-2 min-w-0 flex-1">
             {media.title}
           </h2>
-          <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-neutral-500 dark:text-neutral-400">
-            <span className="truncate max-w-[220px]">{media.channel}</span>
-            {matchedVideo?.durationText && (
-              <>
-                <span aria-hidden="true">·</span>
-                <span className="font-mono-tabular shrink-0">{matchedVideo.durationText}</span>
-              </>
-            )}
-            {licenseText && (
-              <>
-                <span aria-hidden="true">·</span>
-                <span className="shrink-0">{licenseText}</span>
-              </>
-            )}
-            {youtubeUrl && (
-              <>
-                <span aria-hidden="true">·</span>
-                <span className="font-mono-tabular truncate max-w-[240px]">{youtubeUrl}</span>
-              </>
-            )}
-          </div>
-        </div>
 
-        <div className="pt-2.5 border-t border-neutral-200/80 dark:border-neutral-800 flex flex-wrap items-center justify-between gap-2">
-          <span className="text-xs font-mono-tabular text-neutral-500 dark:text-neutral-400">
-            {currentIndex >= 0 && videos.length > 0
-              ? `Video ${currentIndex + 1} of ${videos.length}`
-              : "YouTube Preview"}
-          </span>
-
-          <div className="flex items-center gap-2 flex-wrap">
-            <button
-              type="button"
-              onClick={handlePrevious}
-              disabled={!canPrev}
-              aria-label="Previous YouTube video"
-              className="h-9 px-3 rounded-lg border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-950 hover:bg-neutral-100 dark:hover:bg-neutral-800 text-xs font-medium flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors text-neutral-800 dark:text-neutral-200"
-            >
-              <ChevronLeft className="w-3.5 h-3.5" />
-              <span>Previous</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={handleNext}
-              disabled={!canNext || isLoadingMore}
-              aria-label="Next YouTube video"
-              className="h-9 px-3 rounded-lg border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-950 hover:bg-neutral-100 dark:hover:bg-neutral-800 text-xs font-medium flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors text-neutral-800 dark:text-neutral-200"
-            >
-              {isLoadingMore && pendingNextAfterLoadRef.current ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              ) : (
-                <>
-                  <span>Next</span>
-                  <ChevronRight className="w-3.5 h-3.5" />
-                </>
-              )}
-            </button>
+          <div className="flex items-center gap-1.5 shrink-0">
+            {videos.length > 0 && (
+              <div className="h-7 inline-flex items-center rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] overflow-hidden">
+                <button
+                  type="button"
+                  onClick={handlePrevious}
+                  disabled={!canPrev}
+                  title="Previous video"
+                  aria-label="Previous YouTube video"
+                  className="h-full w-7 flex items-center justify-center text-[#0e1217] dark:text-[#f1f3f5] hover:bg-[#f5f6f8] dark:hover:bg-[#181c23] disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors"
+                >
+                  <ChevronLeft className="w-3.5 h-3.5" />
+                </button>
+                {currentIndex >= 0 && (
+                  <span className="px-1.5 text-[11px] font-mono-tabular text-[#525d6d] dark:text-[#8b95a5] select-none">
+                    {currentIndex + 1}/{videos.length}
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={handleNext}
+                  disabled={!canNext || isLoadingMore}
+                  title="Next video"
+                  aria-label="Next YouTube video"
+                  className="h-full w-7 flex items-center justify-center text-[#0e1217] dark:text-[#f1f3f5] hover:bg-[#f5f6f8] dark:hover:bg-[#181c23] disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors"
+                >
+                  {isLoadingMore && pendingNextAfterLoadRef.current ? (
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                  ) : (
+                    <ChevronRight className="w-3.5 h-3.5" />
+                  )}
+                </button>
+              </div>
+            )}
 
             {youtubeUrl && (
               <button
                 type="button"
                 onClick={handleCopyLink}
-                className={`h-9 px-3.5 rounded-lg text-xs font-medium flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors border ${
+                title={copiedLink ? "Link copied" : "Copy YouTube link"}
+                aria-label="Copy YouTube link"
+                className={`h-7 w-7 rounded-md flex items-center justify-center shrink-0 cursor-pointer transition-colors border ${
                   copiedLink
-                    ? "bg-neutral-950 text-white border-neutral-950 dark:bg-white dark:text-neutral-950 dark:border-white"
-                    : "border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-950 hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-800 dark:text-neutral-200"
+                    ? "bg-teal-700 text-white border-teal-700 dark:bg-teal-400 dark:text-[#061412] dark:border-teal-400"
+                    : "border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] hover:bg-[#f5f6f8] dark:hover:bg-[#181c23] text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5]"
                 }`}
               >
                 {copiedLink ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                <span>{copiedLink ? "Copied" : "Copy Link"}</span>
               </button>
             )}
           </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-[#525d6d] dark:text-[#8b95a5]">
+          <span className="truncate max-w-[240px]">{media.channel}</span>
+          {matchedVideo?.durationText && (
+            <>
+              <span aria-hidden="true">·</span>
+              <span className="font-mono-tabular shrink-0">{matchedVideo.durationText}</span>
+            </>
+          )}
+          {licenseText && (
+            <>
+              <span aria-hidden="true">·</span>
+              <span className="shrink-0">{licenseText}</span>
+            </>
+          )}
         </div>
       </div>
     </div>

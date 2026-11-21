@@ -863,9 +863,9 @@ export const YouTubeScenePlayer = forwardRef<
   if (sourceType === "local") {
     if (!localUrl) {
       return (
-        <div className="relative w-full h-full flex items-center justify-center p-4 bg-neutral-950 text-center">
-          <p className="text-xs text-neutral-300 leading-relaxed max-w-[240px]">
-            Local video file is not linked. Link or re-upload the video in the Saved tab to preview.
+        <div className="relative w-full h-full flex items-center justify-center p-4 bg-[#0b0f17] text-center">
+          <p className="text-xs text-[#8e9aaf] leading-relaxed max-w-[240px]">
+            Local video file is not linked. Link or re-upload the video in the Projects tab to preview.
           </p>
         </div>
       );

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
-import { ChevronsUpDown, GripHorizontal, Pause, Play, Volume2, VolumeX } from "lucide-react";
+import { Pause, Play, Volume2, VolumeX } from "lucide-react";
 import type { SubtitleItem, VideoEditSettings, VideoProject, VoiceSettings } from "../types";
 import { YouTubeScenePlayer, type YouTubeScenePlayerHandle } from "./YouTubeScenePlayer";
 import { getEffectivePlaybackSpeed } from "../utils/voicePresets";
@@ -23,6 +23,7 @@ interface Stage9x16Props {
   onEnded: () => void;
   onToggleMute: () => void;
   compactMobile?: boolean;
+  fitContainerHeight?: boolean;
   previewScale?: number;
   onChangePreviewScale?: (scale: number) => void;
 }
@@ -49,6 +50,7 @@ export function Stage9x16({
   onEnded,
   onToggleMute,
   compactMobile = false,
+  fitContainerHeight = false,
   previewScale = DEFAULT_STAGE_PREVIEW_SCALE,
   onChangePreviewScale,
 }: Stage9x16Props) {
@@ -78,6 +80,7 @@ export function Stage9x16({
     onChangePreviewScale: undefined,
   });
   const [outerWidth, setOuterWidth] = useState<number>(0);
+  const [containerHeight, setContainerHeight] = useState<number>(0);
   const [isResizing, setIsResizing] = useState(false);
   const [viewportMetrics, setViewportMetrics] = useState<{ height: number; isLg: boolean }>(() =>
     typeof window !== "undefined"
@@ -103,13 +106,18 @@ export function Stage9x16({
   useEffect(() => {
     const el = stageOuterRef.current;
     if (!el) return;
+    const parentEl = el.parentElement;
     const update = () => {
       const w = el.clientWidth;
       if (w > 0) setOuterWidth(w);
+      if (parentEl && parentEl.clientHeight > 0) {
+        setContainerHeight(parentEl.clientHeight);
+      }
     };
     update();
     const ro = new ResizeObserver(update);
     ro.observe(el);
+    if (parentEl) ro.observe(parentEl);
     return () => ro.disconnect();
   }, []);
 
@@ -155,24 +163,35 @@ export function Stage9x16({
 
   const clampedScale = Math.max(0, Math.min(1, previewScale));
   const isCompactLayout = compactMobile && !viewportMetrics.isLg;
+  const boundedHeightCeiling =
+    fitContainerHeight && !isCompactLayout && containerHeight > 180
+      ? Math.max(220, containerHeight - 78)
+      : Math.max(360, viewportMetrics.height - 168);
   const minHeightPx = isCompactLayout
     ? Math.max(120, Math.min(220, Math.round(viewportMetrics.height * 0.18)))
-    : Math.max(240, Math.min(440, viewportMetrics.height - 340));
+    : Math.max(
+        180,
+        Math.min(
+          fitContainerHeight ? Math.round(boundedHeightCeiling * 0.62) : 440,
+          viewportMetrics.height - 340
+        )
+      );
   const baseMaxHeightPx = isCompactLayout
     ? Math.max(minHeightPx + 100, Math.min(480, Math.round(viewportMetrics.height * 0.5)))
-    : Math.max(minHeightPx + 120, Math.min(840, viewportMetrics.height - 168));
+    : Math.max(minHeightPx + 40, Math.min(840, boundedHeightCeiling));
+  const availableFrameOuterWidth = Math.max(120, outerWidth - (isCompactLayout ? 24 : 0));
   const maxHeightPx =
     outerWidth > 0
       ? Math.max(
-          minHeightPx + 40,
-          Math.min(baseMaxHeightPx, Math.floor((outerWidth * 16) / 9))
+          minHeightPx + 24,
+          Math.min(baseMaxHeightPx, Math.floor((availableFrameOuterWidth * 16) / 9))
         )
       : baseMaxHeightPx;
   const spanPx = Math.max(1, maxHeightPx - minHeightPx);
   const frameHeightPx = Math.round(minHeightPx + clampedScale * spanPx);
   const targetStageWidthPx = Math.round((frameHeightPx * 9) / 16);
   const renderedStageWidthPx =
-    outerWidth > 0 ? Math.min(targetStageWidthPx, outerWidth) : targetStageWidthPx;
+    outerWidth > 0 ? Math.min(targetStageWidthPx, availableFrameOuterWidth) : targetStageWidthPx;
   const stageScale = renderedStageWidthPx / 720;
 
   resizeMetricsRef.current = {
@@ -353,13 +372,13 @@ export function Stage9x16({
       <div
         ref={stageFrameRef}
         style={{ width: `${renderedStageWidthPx}px` }}
-        className={`relative max-w-full aspect-[9/16] rounded-2xl overflow-hidden bg-white dark:bg-neutral-950 flex flex-col shadow-sm ${
+        className={`relative max-w-full aspect-[9/16] rounded-lg overflow-hidden bg-white dark:bg-[#12151a] flex flex-col shadow-md ${
           isResizing ? "transition-none" : "transition-[width] duration-150"
         }`}
       >
         <div
           aria-hidden="true"
-          className="pointer-events-none absolute inset-0 rounded-2xl border border-neutral-200 dark:border-neutral-800 z-20"
+          className="pointer-events-none absolute inset-0 rounded-lg border border-[#dde2e9] dark:border-[#242a34] z-20"
         />
         {!project ? (
           <div
@@ -367,14 +386,14 @@ export function Stage9x16({
               compactMobile ? "p-4 lg:p-8" : "p-8"
             }`}
           >
-            <div className="w-10 h-10 lg:w-12 lg:h-12 rounded-xl border border-neutral-200 dark:border-neutral-800 flex items-center justify-center mb-2.5 lg:mb-3 text-neutral-400">
+            <div className="w-10 h-10 lg:w-12 lg:h-12 rounded-lg border border-[#dde2e9] dark:border-[#242a34] bg-[#eceff3] dark:bg-[#181c23] flex items-center justify-center mb-2.5 lg:mb-3 text-teal-700 dark:text-teal-400">
               <Play className="w-4 h-4 lg:w-5 lg:h-5" />
             </div>
-            <p className="text-xs lg:text-sm font-medium text-neutral-900 dark:text-neutral-100">
-              9:16 Stage
+            <p className="font-display text-xs lg:text-sm font-semibold text-[#0e1217] dark:text-[#f1f3f5]">
+              9:16 Monitor
             </p>
-            <p className="text-[11px] lg:text-xs text-neutral-500 dark:text-neutral-400 mt-1">
-              Watch a video, pick scenes, and generate subtitles
+            <p className="text-[11px] lg:text-xs text-[#525d6d] dark:text-[#8b95a5] mt-1">
+              Load a video, pick scenes, and generate subtitles
             </p>
           </div>
         ) : project.scenes.length === 0 ? (
@@ -383,14 +402,14 @@ export function Stage9x16({
               compactMobile ? "p-4 lg:p-8" : "p-8"
             }`}
           >
-            <div className="w-10 h-10 lg:w-12 lg:h-12 rounded-xl border border-neutral-200 dark:border-neutral-800 flex items-center justify-center mb-2.5 lg:mb-3 text-neutral-400">
+            <div className="w-10 h-10 lg:w-12 lg:h-12 rounded-lg border border-[#dde2e9] dark:border-[#242a34] bg-[#eceff3] dark:bg-[#181c23] flex items-center justify-center mb-2.5 lg:mb-3 text-teal-700 dark:text-teal-400">
               <Play className="w-4 h-4 lg:w-5 lg:h-5" />
             </div>
-            <p className="text-xs lg:text-sm font-medium text-neutral-900 dark:text-neutral-100">
+            <p className="font-display text-xs lg:text-sm font-semibold text-[#0e1217] dark:text-[#f1f3f5]">
               No clips kept
             </p>
-            <p className="text-[11px] lg:text-xs text-neutral-500 dark:text-neutral-400 mt-1">
-              Click Undo or Reset in the Edit timeline to restore clips
+            <p className="text-[11px] lg:text-xs text-[#525d6d] dark:text-[#8b95a5] mt-1">
+              Click Undo or Reset in the Timeline dock to restore clips
             </p>
           </div>
         ) : (
@@ -809,34 +828,34 @@ export function Stage9x16({
           onTouchStart={onChangePreviewScale ? handleDragTouchStart : undefined}
           onDoubleClick={onChangePreviewScale ? handleDragDoubleClick : undefined}
           onKeyDown={onChangePreviewScale ? handleDragKeyDown : undefined}
-          className={`relative group flex flex-col border ${
+          className={`relative group flex flex-col ${
             isResizing ? "transition-none" : "transition-colors duration-150"
           } ${
             onChangePreviewScale
-              ? `w-[calc(100%+2rem)] -mx-4 sm:w-[calc(100%+3rem)] sm:-mx-6 lg:w-full lg:mx-0 rounded-none border-x-0 lg:rounded-xl lg:border-x cursor-ns-resize touch-none select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-950 dark:focus-visible:ring-white ${
+              ? `w-full ${
                   compactMobile
-                    ? "px-4 sm:px-6 lg:px-3 pt-1 pb-2"
-                    : "px-4 sm:px-6 lg:px-3 pt-1 pb-2"
-                } ${
+                    ? "border-t border-b rounded-none px-3.5 pt-1 pb-2"
+                    : "border rounded-lg px-3 pt-1 pb-2"
+                } cursor-ns-resize touch-none select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-700 dark:focus-visible:ring-teal-400 ${
                   isResizing
-                    ? "border-neutral-950 dark:border-white bg-neutral-100 dark:bg-neutral-800/95 ring-2 ring-neutral-950/15 dark:ring-white/20 shadow-md"
-                    : "border-neutral-200 dark:border-neutral-800 bg-neutral-50/90 dark:bg-neutral-900/90 hover:border-neutral-400 dark:hover:border-neutral-600 hover:bg-neutral-100/80 dark:hover:bg-neutral-800/70"
+                    ? "border-teal-700 dark:border-teal-400 bg-teal-50/70 dark:bg-[#181c23]"
+                    : "border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] hover:border-[#c3ccd9] dark:hover:border-[#323a48]"
                 }`
-              : "w-full border-transparent px-0 py-0"
+              : "w-full border border-transparent px-0 py-0"
           }`}
         >
           {/* Dedicated touch-friendly Drag Bar Strip along top of the Play row */}
           {onChangePreviewScale && (
-            <div className="flex items-center justify-center py-2 touch-none">
+            <div className="flex items-center justify-center py-1.5 touch-none">
               <span
-                className={`h-1.5 rounded-full transition-all ${
+                className={`h-1 rounded-full transition-all ${
                   isResizing
-                    ? "w-16 bg-neutral-950 dark:bg-white"
-                    : "w-12 bg-neutral-300 dark:bg-neutral-700 group-hover:w-14 group-hover:bg-neutral-500 dark:group-hover:bg-neutral-400"
+                    ? "w-16 bg-teal-700 dark:bg-teal-400"
+                    : "w-10 bg-[#c9d1dc] dark:bg-[#323a48] group-hover:w-14 group-hover:bg-teal-700/70 dark:group-hover:bg-teal-400/70"
                 }`}
               />
               {isResizing && (
-                <span className="pointer-events-none absolute -top-6 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded-md bg-neutral-950 text-white dark:bg-white dark:text-neutral-950 text-[10px] font-mono-tabular font-semibold whitespace-nowrap shadow-sm">
+                <span className="pointer-events-none absolute -top-6 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded bg-teal-700 text-white dark:bg-teal-400 dark:text-[#061412] text-[10px] font-mono-tabular font-semibold whitespace-nowrap shadow-sm">
                   {scaleLabel} · {Math.round(clampedScale * 100)}%
                 </span>
               )}
@@ -862,7 +881,7 @@ export function Stage9x16({
               aria-label={isPlaying ? "Pause" : "Play"}
               className={`${
                 compactMobile ? "w-8 h-8 lg:w-9 lg:h-9" : "w-9 h-9"
-              } rounded-lg bg-neutral-950 text-white dark:bg-white dark:text-neutral-950 flex items-center justify-center shrink-0 hover:opacity-90 transition-opacity cursor-pointer`}
+              } rounded-md bg-teal-700 hover:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 text-white dark:text-[#061412] flex items-center justify-center shrink-0 transition-colors cursor-pointer`}
             >
               {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 ml-0.5" />}
             </button>
@@ -878,9 +897,9 @@ export function Stage9x16({
                 onTouchStart={(e) => e.stopPropagation()}
                 onChange={(e) => onSeek(parseFloat(e.target.value))}
                 aria-label="Timeline scrubber"
-                className="w-full h-1.5 rounded-full appearance-none bg-neutral-200 dark:bg-neutral-800 accent-neutral-950 dark:accent-white cursor-pointer"
+                className="w-full h-1.5 rounded-full appearance-none bg-[#dde2e9] dark:bg-[#242a34] cursor-pointer"
               />
-              <div className="flex items-center justify-between text-[11px] text-neutral-500 dark:text-neutral-400 font-mono-tabular">
+              <div className="flex items-center justify-between text-[11px] text-[#525d6d] dark:text-[#8b95a5] font-mono-tabular">
                 <span className="truncate">
                   {formatSec(displayCutTime)} / {formatSec(displayTotalDuration)}
                   {Math.abs(effectiveSpeed - 1) > 0.01 ? ` (${effectiveSpeed.toFixed(2).replace(/\.00$/, "")}x)` : ""}
@@ -897,25 +916,10 @@ export function Stage9x16({
               aria-label={muted ? "Unmute original audio" : "Mute original audio"}
               className={`${
                 compactMobile ? "w-8 h-8 lg:w-9 lg:h-9" : "w-9 h-9"
-              } rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 hover:bg-neutral-100 dark:hover:bg-neutral-900 flex items-center justify-center shrink-0 transition-colors cursor-pointer`}
+              } rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] text-[#0e1217] dark:text-[#f1f3f5] flex items-center justify-center shrink-0 transition-colors cursor-pointer`}
             >
               {muted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
             </button>
-
-            {onChangePreviewScale && (
-              <div
-                aria-hidden="true"
-                className={`flex items-center justify-center shrink-0 rounded-md transition-colors ${
-                  compactMobile ? "w-6 h-8 lg:w-6 lg:h-9" : "w-6 h-9"
-                } ${
-                  isResizing
-                    ? "text-neutral-950 dark:text-white bg-neutral-200/80 dark:bg-neutral-700/80"
-                    : "text-neutral-400 dark:text-neutral-500 group-hover:text-neutral-700 dark:group-hover:text-neutral-200"
-                }`}
-              >
-                <ChevronsUpDown className="w-3.5 h-3.5" />
-              </div>
-            )}
           </div>
         </div>
       ) : (
@@ -933,16 +937,21 @@ export function Stage9x16({
             onTouchStart={handleDragTouchStart}
             onDoubleClick={handleDragDoubleClick}
             onKeyDown={handleDragKeyDown}
-            className={`relative group w-[calc(100%+2rem)] -mx-4 sm:w-[calc(100%+3rem)] sm:-mx-6 lg:w-full lg:mx-0 h-9 rounded-none border-x-0 lg:rounded-xl lg:border-x border flex items-center justify-center gap-1.5 cursor-ns-resize touch-none select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-950 dark:focus-visible:ring-white ${
-              isResizing
-                ? "transition-none border-neutral-950 dark:border-white bg-neutral-100 dark:bg-neutral-800 text-neutral-950 dark:text-white ring-2 ring-neutral-950/15 dark:ring-white/20 shadow-md"
-                : "transition-colors duration-150 border-neutral-200 dark:border-neutral-800 bg-neutral-50/90 dark:bg-neutral-900/90 text-neutral-500 dark:text-neutral-400 hover:border-neutral-400 dark:hover:border-neutral-600 hover:text-neutral-800 dark:hover:text-neutral-100"
+            className={`relative group w-full h-6 flex items-center justify-center cursor-ns-resize touch-none select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-700 dark:focus-visible:ring-teal-400 ${
+              compactMobile
+                ? "border-b border-[#dde2e9] dark:border-[#242a34]"
+                : ""
             }`}
           >
-            <GripHorizontal className="w-4 h-4" />
-            <ChevronsUpDown className="w-3.5 h-3.5" />
+            <span
+              className={`h-1 rounded-full transition-all ${
+                isResizing
+                  ? "w-16 bg-teal-700 dark:bg-teal-400"
+                  : "w-10 bg-[#b8c2d0] dark:bg-[#323a48] group-hover:w-14 group-hover:bg-teal-700/80 dark:group-hover:bg-teal-400/80"
+              }`}
+            />
             {isResizing && (
-              <span className="pointer-events-none ml-1 px-1.5 py-0.5 rounded bg-neutral-950 text-white dark:bg-white dark:text-neutral-950 text-[10px] font-mono-tabular font-semibold whitespace-nowrap">
+              <span className="pointer-events-none absolute -top-6 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded bg-teal-700 text-white dark:bg-teal-400 dark:text-[#061412] text-[10px] font-mono-tabular font-semibold whitespace-nowrap shadow-sm">
                 {scaleLabel} · {Math.round(clampedScale * 100)}%
               </span>
             )}
