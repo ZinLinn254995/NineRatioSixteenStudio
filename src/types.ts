@@ -18,6 +18,21 @@ export interface SceneSelection {
   endSec: number;
 }
 
+export type SubtitleProgressStage =
+  | "uploading"
+  | "extracting"
+  | "detecting"
+  | "generating"
+  | "compiling";
+
+export interface SubtitleGenerationProgress {
+  stage: SubtitleProgressStage;
+  label: string;
+  percent: number;
+  clipIndex?: number;
+  totalClips?: number;
+}
+
 export interface SpeakingScene {
   id?: string;
   index: number;

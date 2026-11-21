@@ -1,16 +1,59 @@
 import { useEffect, useRef, useState } from "react";
-import { motion } from "motion/react";
 import { Pause, Play, Volume2, VolumeX } from "lucide-react";
 import type { SubtitleItem, VideoEditSettings, VideoProject, VoiceSettings } from "../types";
 import { YouTubeScenePlayer, type YouTubeScenePlayerHandle } from "./YouTubeScenePlayer";
 import { getEffectivePlaybackSpeed } from "../utils/voicePresets";
 import { findActiveSubtitle, getScrollAnchorSubtitle } from "../utils/projectTimeline";
 
-export const DEFAULT_STAGE_PREVIEW_SCALE = 0.5;
+function getActiveWordHighlightKey(sub: SubtitleItem | undefined, highlightTime: number): string {
+  if (!sub) return "";
+  const localElapsed = Math.max(0, highlightTime - sub.startTime);
+  for (let wi = 0; wi < sub.words.length; wi++) {
+    const word = sub.words[wi];
+    const isLast = wi === sub.words.length - 1;
+    const hit =
+      localElapsed >= word.startOffsetSec &&
+      (isLast ? localElapsed <= word.endOffsetSec : localElapsed < word.endOffsetSec);
+    if (hit) return `${sub.id}:${wi}`;
+  }
+  return `${sub.id}:-1`;
+}
+
+export const DEFAULT_STAGE_PREVIEW_SCALE = 1;
+
+export function getCompactStageBounds(outerWidth: number, viewportHeight: number) {
+  const stageHorizontalPad = 20; // px-2.5 (10px each side)
+  const effectiveStageW = outerWidth > 0 ? outerWidth : 390;
+  const availWidth = Math.max(200, effectiveStageW - stageHorizontalPad);
+  const maxSafeHeight = Math.max(160, Math.round(viewportHeight * 0.64));
+  const maxWidthPx = Math.max(
+    200,
+    Math.min(availWidth, Math.floor((maxSafeHeight * 16) / 9))
+  );
+  const minWidthPx = Math.max(
+    176,
+    Math.min(maxWidthPx - 24, Math.round(maxWidthPx * 0.44))
+  );
+  const spanWidthPx = Math.max(1, maxWidthPx - minWidthPx);
+  const minHeightPx = Math.round((minWidthPx * 9) / 16);
+  const maxHeightPx = Math.round((maxWidthPx * 9) / 16);
+  const spanHeightPx = Math.max(1, maxHeightPx - minHeightPx);
+  return {
+    availWidth,
+    minWidthPx,
+    maxWidthPx,
+    spanWidthPx,
+    minHeightPx,
+    maxHeightPx,
+    spanHeightPx,
+  };
+}
 
 interface Stage9x16Props {
   project: VideoProject | null;
   cutTime: number;
+  subscribeCutTime?: (listener: (sec: number) => void) => () => void;
+  getLiveCutTime?: () => number;
   seekNonce: number;
   isPlaying: boolean;
   muted: boolean;
@@ -38,6 +81,8 @@ function formatSec(sec: number): string {
 export function Stage9x16({
   project,
   cutTime,
+  subscribeCutTime,
+  getLiveCutTime,
   seekNonce,
   isPlaying,
   muted,
@@ -58,6 +103,9 @@ export function Stage9x16({
   const stageOuterRef = useRef<HTMLDivElement | null>(null);
   const stageFrameRef = useRef<HTMLDivElement | null>(null);
   const listContainerRef = useRef<HTMLDivElement | null>(null);
+  const scrubberInputRef = useRef<HTMLInputElement | null>(null);
+  const timeTextRef = useRef<HTMLSpanElement | null>(null);
+  const pctTextRef = useRef<HTMLSpanElement | null>(null);
   const itemRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const dragStartRef = useRef<{
     startY: number;
@@ -82,18 +130,24 @@ export function Stage9x16({
   const [outerWidth, setOuterWidth] = useState<number>(0);
   const [containerHeight, setContainerHeight] = useState<number>(0);
   const [isResizing, setIsResizing] = useState(false);
-  const [viewportMetrics, setViewportMetrics] = useState<{ height: number; isLg: boolean }>(() =>
+  const [viewportMetrics, setViewportMetrics] = useState<{
+    width: number;
+    height: number;
+    isLg: boolean;
+  }>(() =>
     typeof window !== "undefined"
       ? {
+          width: document.documentElement?.clientWidth || window.innerWidth,
           height: window.innerHeight,
           isLg: window.matchMedia("(min-width: 1024px)").matches,
         }
-      : { height: 900, isLg: true }
+      : { width: 1280, height: 900, isLg: true }
   );
 
   useEffect(() => {
     const updateViewport = () => {
       setViewportMetrics({
+        width: document.documentElement?.clientWidth || window.innerWidth,
         height: window.innerHeight,
         isLg: window.matchMedia("(min-width: 1024px)").matches,
       });
@@ -129,16 +183,107 @@ export function Stage9x16({
         voiceSettings.speed
       )
     : 1;
-  // Subtle visual lead while playing so highlights hit right as speech begins instead of lagging
+  const displayTotalDuration = totalDuration / effectiveSpeed;
+  const leadSec = project ? (project.sourceType === "youtube" ? 0.22 : 0.12) : 0;
+  const subtitles = project?.subtitles ?? [];
+
+  const [subClockTime, setSubClockTime] = useState<number>(cutTime);
+  const wordKeyRef = useRef<string>("");
+  const lastDisplaySecRef = useRef<number>(-1);
+  const subtitlesRef = useRef(subtitles);
+  subtitlesRef.current = subtitles;
+  const isPlayingRef = useRef(isPlaying);
+  isPlayingRef.current = isPlaying;
+  const totalDurationRef = useRef(totalDuration);
+  totalDurationRef.current = totalDuration;
+  const effectiveSpeedRef = useRef(effectiveSpeed);
+  effectiveSpeedRef.current = effectiveSpeed;
+  const displayTotalDurationRef = useRef(displayTotalDuration);
+  displayTotalDurationRef.current = displayTotalDuration;
+  const leadSecRef = useRef(leadSec);
+  leadSecRef.current = leadSec;
+
+  // Keep local Stage clock and DOM scrubber synced whenever paused, reset, or explicitly seeked
+  const sceneCount = project?.scenes.length ?? 0;
+  useEffect(() => {
+    if (!isPlaying || !subscribeCutTime) {
+      setSubClockTime(cutTime);
+      const hl = Math.min(totalDuration, cutTime);
+      wordKeyRef.current = getActiveWordHighlightKey(
+        findActiveSubtitle(subtitles, hl),
+        hl
+      );
+      lastDisplaySecRef.current = Math.floor(cutTime / effectiveSpeed);
+      if (scrubberInputRef.current) {
+        scrubberInputRef.current.value = String(cutTime);
+      }
+      if (pctTextRef.current) {
+        const pct = totalDuration > 0 ? Math.min(100, (cutTime / totalDuration) * 100) : 0;
+        pctTextRef.current.textContent = `${Math.round(pct)}%`;
+      }
+      if (timeTextRef.current) {
+        const speedSuffix =
+          Math.abs(effectiveSpeed - 1) > 0.01
+            ? ` (${effectiveSpeed.toFixed(2).replace(/\.00$/, "")}x)`
+            : "";
+        timeTextRef.current.textContent = `${formatSec(cutTime / effectiveSpeed)} / ${formatSec(displayTotalDuration)}${speedSuffix}`;
+      }
+    }
+  }, [
+    cutTime,
+    isPlaying,
+    seekNonce,
+    totalDuration,
+    effectiveSpeed,
+    displayTotalDuration,
+    subtitles,
+    sceneCount,
+    subscribeCutTime,
+  ]);
+
+  // Subscribe to 60fps clock: update scrubber & timer via DOM refs, and only re-render subtitle cards on word/card transitions
+  useEffect(() => {
+    if (!subscribeCutTime) return;
+    return subscribeCutTime((liveSec) => {
+      const totDur = totalDurationRef.current;
+      const spd = effectiveSpeedRef.current;
+      const totDisp = displayTotalDurationRef.current;
+
+      if (scrubberInputRef.current) {
+        scrubberInputRef.current.value = String(liveSec);
+      }
+      if (pctTextRef.current) {
+        const pct = totDur > 0 ? Math.min(100, (liveSec / totDur) * 100) : 0;
+        pctTextRef.current.textContent = `${Math.round(pct)}%`;
+      }
+      const dispFloor = Math.floor(liveSec / spd);
+      if (dispFloor !== lastDisplaySecRef.current) {
+        lastDisplaySecRef.current = dispFloor;
+        if (timeTextRef.current) {
+          const speedSuffix =
+            Math.abs(spd - 1) > 0.01 ? ` (${spd.toFixed(2).replace(/\.00$/, "")}x)` : "";
+          timeTextRef.current.textContent = `${formatSec(liveSec / spd)} / ${formatSec(totDisp)}${speedSuffix}`;
+        }
+      }
+
+      const hl = isPlayingRef.current
+        ? Math.min(totDur, liveSec + leadSecRef.current)
+        : liveSec;
+      const nextSub = findActiveSubtitle(subtitlesRef.current, hl);
+      const nextKey = getActiveWordHighlightKey(nextSub, hl);
+      if (nextKey !== wordKeyRef.current) {
+        wordKeyRef.current = nextKey;
+        setSubClockTime(liveSec);
+      }
+    });
+  }, [subscribeCutTime]);
+
+  const activeTimeForDisplay = subscribeCutTime ? subClockTime : cutTime;
   const highlightTime =
     isPlaying && project
-      ? Math.min(
-          totalDuration,
-          cutTime + (project.sourceType === "youtube" ? 0.22 : 0.12)
-        )
-      : cutTime;
+      ? Math.min(totalDuration, activeTimeForDisplay + leadSec)
+      : activeTimeForDisplay;
 
-  const subtitles = project?.subtitles ?? [];
   const activeSub: SubtitleItem | undefined = findActiveSubtitle(subtitles, highlightTime);
   const scrollTargetSub: SubtitleItem | undefined = getScrollAnchorSubtitle(subtitles, highlightTime);
 
@@ -149,26 +294,30 @@ export function Stage9x16({
     const el = itemRefs.current[scrollTargetSub.id];
     if (!el) return;
 
-    const containerHeight = container.clientHeight;
-    const targetTop = el.offsetTop + el.clientHeight * 0.5 - containerHeight * 0.42;
+    const cHeight = container.clientHeight;
+    const targetTop = el.offsetTop + el.clientHeight * 0.5 - cHeight * 0.42;
     container.scrollTo({
       top: Math.max(0, targetTop),
       behavior: "smooth",
     });
   }, [scrollTargetSub?.id]);
 
-  const displayCutTime = cutTime / effectiveSpeed;
-  const displayTotalDuration = totalDuration / effectiveSpeed;
-  const progressPct = totalDuration > 0 ? Math.min(100, (cutTime / totalDuration) * 100) : 0;
+  const initialStageCutTime = getLiveCutTime ? getLiveCutTime() : activeTimeForDisplay;
+  const displayCutTime = initialStageCutTime / effectiveSpeed;
+  const progressPct = totalDuration > 0 ? Math.min(100, (initialStageCutTime / totalDuration) * 100) : 0;
 
   const clampedScale = Math.max(0, Math.min(1, previewScale));
   const isCompactLayout = compactMobile && !viewportMetrics.isLg;
+  const compactBounds = getCompactStageBounds(
+    outerWidth > 0 ? outerWidth : viewportMetrics.width,
+    viewportMetrics.height
+  );
   const boundedHeightCeiling =
     fitContainerHeight && !isCompactLayout && containerHeight > 180
       ? Math.max(220, containerHeight - 78)
       : Math.max(360, viewportMetrics.height - 168);
   const minHeightPx = isCompactLayout
-    ? Math.max(120, Math.min(220, Math.round(viewportMetrics.height * 0.18)))
+    ? compactBounds.minHeightPx
     : Math.max(
         180,
         Math.min(
@@ -177,11 +326,12 @@ export function Stage9x16({
         )
       );
   const baseMaxHeightPx = isCompactLayout
-    ? Math.max(minHeightPx + 100, Math.min(480, Math.round(viewportMetrics.height * 0.5)))
+    ? compactBounds.maxHeightPx
     : Math.max(minHeightPx + 40, Math.min(840, boundedHeightCeiling));
   const availableFrameOuterWidth = Math.max(120, outerWidth - (isCompactLayout ? 24 : 0));
-  const maxHeightPx =
-    outerWidth > 0
+  const maxHeightPx = isCompactLayout
+    ? baseMaxHeightPx
+    : outerWidth > 0
       ? Math.max(
           minHeightPx + 24,
           Math.min(baseMaxHeightPx, Math.floor((availableFrameOuterWidth * 16) / 9))
@@ -329,7 +479,7 @@ export function Stage9x16({
     if (!onChangePreviewScale) return;
     const target = e.target as HTMLElement | null;
     if (target?.closest("button, input")) return;
-    onChangePreviewScale(DEFAULT_STAGE_PREVIEW_SCALE);
+    onChangePreviewScale(clampedScale >= 0.99 ? 0.5 : DEFAULT_STAGE_PREVIEW_SCALE);
   };
 
   const handleDragKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
@@ -371,9 +521,15 @@ export function Stage9x16({
       {/* Strictly 9:16 Vertical Video Frame matching exportVideo.ts 720x1280 layout */}
       <div
         ref={stageFrameRef}
-        style={{ width: `${renderedStageWidthPx}px` }}
-        className={`relative max-w-full aspect-[9/16] rounded-lg overflow-hidden bg-white dark:bg-[#12151a] flex flex-col shadow-md ${
-          isResizing ? "transition-none" : "transition-[width] duration-150"
+        style={
+          isCompactLayout
+            ? { width: `${renderedStageWidthPx}px`, height: `${frameHeightPx}px` }
+            : { width: `${renderedStageWidthPx}px` }
+        }
+        className={`relative max-w-full ${
+          isCompactLayout ? "" : "aspect-[9/16]"
+        } rounded-lg overflow-hidden bg-white dark:bg-[#12151a] flex flex-col shadow-md ${
+          isResizing || isCompactLayout ? "transition-none" : "transition-[width] duration-150"
         }`}
       >
         <div
@@ -391,9 +547,6 @@ export function Stage9x16({
             </div>
             <p className="font-display text-xs lg:text-sm font-semibold text-[#0e1217] dark:text-[#f1f3f5]">
               9:16 Monitor
-            </p>
-            <p className="text-[11px] lg:text-xs text-[#525d6d] dark:text-[#8b95a5] mt-1">
-              Load a video, pick scenes, and generate subtitles
             </p>
           </div>
         ) : project.scenes.length === 0 ? (
@@ -427,7 +580,8 @@ export function Stage9x16({
                 videoId={project.videoId}
                 localUrl={project.localUrl}
                 scenes={project.scenes}
-                cutTime={cutTime}
+                cutTime={subscribeCutTime ? 0 : cutTime}
+                getLiveCutTime={getLiveCutTime}
                 seekNonce={seekNonce}
                 isPlaying={isPlaying}
                 muted={muted}
@@ -626,13 +780,16 @@ export function Stage9x16({
               const burmesePx = Math.round(22 * fontMultiplier);
 
               return (
-                <div className={`relative flex-1 w-full overflow-hidden ${topDividerClass} ${containerThemeClass}`}>
+                <div
+                  style={{ transform: "translateZ(0)", contain: "layout paint" }}
+                  className={`relative flex-1 w-full overflow-hidden ${topDividerClass} ${containerThemeClass}`}
+                >
                   <div
                     ref={listContainerRef}
                     style={{
                       width: "720px",
                       height: `${exportListH}px`,
-                      transform: `scale(${stageScale})`,
+                      transform: `scale(${stageScale}) translateZ(0)`,
                       transformOrigin: "top left",
                       padding: "34px 22px 0 22px",
                       gap: "18px",
@@ -655,7 +812,7 @@ export function Stage9x16({
                             borderRadius: "18px",
                             padding: "16px 26px 20px 32px",
                           }}
-                          className={`relative w-full text-left shrink-0 overflow-hidden transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 dark:focus-visible:ring-indigo-400 ${getCardThemeClass(
+                          className={`relative w-full text-left shrink-0 overflow-hidden focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 dark:focus-visible:ring-indigo-400 ${getCardThemeClass(
                             isActive
                           )}`}
                         >
@@ -669,7 +826,7 @@ export function Stage9x16({
                               width: "5px",
                               borderRadius: "3px",
                             }}
-                            className={`absolute transition-colors ${getAccentBarClass(isActive)}`}
+                            className={`absolute ${getAccentBarClass(isActive)}`}
                           />
 
                           {/* Line 1: Thai in English phonetics with word-by-word sync */}
@@ -699,9 +856,7 @@ export function Stage9x16({
                                   key={`${sub.id}-w-${wi}`}
                                   className="inline-flex flex-col items-start max-w-full"
                                 >
-                                  <motion.span
-                                    animate={isWordSpoken ? { y: -1 } : { y: 0 }}
-                                    transition={{ duration: 0.05, ease: [0.16, 1, 0.3, 1] }}
+                                  <span
                                     style={{
                                       fontSize: `${phoneticPx}px`,
                                       padding: `${Math.round(4 * fontMultiplier)}px ${Math.round(
@@ -717,7 +872,7 @@ export function Stage9x16({
                                     )}`}
                                   >
                                     {word.phonetic}
-                                  </motion.span>
+                                  </span>
                                   {showGloss && word.burmeseGloss && (
                                     <span
                                       style={{
@@ -888,11 +1043,12 @@ export function Stage9x16({
 
             <div className="flex-1 flex flex-col gap-1 min-w-0">
               <input
+                ref={scrubberInputRef}
                 type="range"
                 min={0}
                 max={totalDuration}
                 step={0.1}
-                value={cutTime}
+                defaultValue={initialStageCutTime}
                 onPointerDown={(e) => e.stopPropagation()}
                 onTouchStart={(e) => e.stopPropagation()}
                 onChange={(e) => onSeek(parseFloat(e.target.value))}
@@ -900,11 +1056,13 @@ export function Stage9x16({
                 className="w-full h-1.5 rounded-full appearance-none bg-[#dde2e9] dark:bg-[#242a34] cursor-pointer"
               />
               <div className="flex items-center justify-between text-[11px] text-[#525d6d] dark:text-[#8b95a5] font-mono-tabular">
-                <span className="truncate">
+                <span ref={timeTextRef} className="truncate">
                   {formatSec(displayCutTime)} / {formatSec(displayTotalDuration)}
                   {Math.abs(effectiveSpeed - 1) > 0.01 ? ` (${effectiveSpeed.toFixed(2).replace(/\.00$/, "")}x)` : ""}
                 </span>
-                <span className="shrink-0 ml-1">{Math.round(progressPct)}%</span>
+                <span ref={pctTextRef} className="shrink-0 ml-1">
+                  {Math.round(progressPct)}%
+                </span>
               </div>
             </div>
 

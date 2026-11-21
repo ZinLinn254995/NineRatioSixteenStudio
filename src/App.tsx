@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   ArrowUpFromLine,
@@ -9,7 +9,6 @@ import {
   FolderOpen,
   Loader2,
   Moon,
-  Scissors,
   Sun,
 } from "lucide-react";
 import type {
@@ -17,6 +16,7 @@ import type {
   SavedProjectRecord,
   SceneSelection,
   SpeakingScene,
+  SubtitleGenerationProgress,
   SubtitleItem,
   SubtitleWord,
   TranslationTone,
@@ -43,7 +43,12 @@ import {
 import { DEFAULT_VOICE_SETTINGS } from "./utils/voicePresets";
 import { DEFAULT_VIDEO_EDIT } from "./utils/videoFilters";
 import { resumeAllVoiceContexts } from "./utils/webAudioVoice";
-import { safeReadJson, uploadBlobInChunks } from "./utils/uploadFile";
+import {
+  readStreamingProcessResponse,
+  safeReadJson,
+  uploadBlobInChunks,
+} from "./utils/uploadFile";
+import { extractMp4AudioClips } from "./utils/mp4ClipAudio";
 import {
   ensureSceneIds,
   getSceneDurationSec,
@@ -79,7 +84,7 @@ export default function App() {
   const [searchError, setSearchError] = useState<string | null>(null);
 
   const [activeTab, setActiveTab] = useState<WorkspaceTab>("youtube");
-  const [studioSection, setStudioSection] = useState<StudioSectionId>("captions");
+  const [studioSection, setStudioSection] = useState<StudioSectionId>("clips");
   const [timelineCollapsed, setTimelineCollapsed] = useState<boolean>(false);
   const [localMedia, setLocalMedia] = useState<ActiveMediaSource | null>(null);
   const [youtubeMedia, setYoutubeMedia] = useState<ActiveMediaSource | null>(null);
@@ -92,6 +97,11 @@ export default function App() {
   });
 
   const [isProcessing, setIsProcessing] = useState(false);
+  const [generationProgress, setGenerationProgress] = useState<SubtitleGenerationProgress | null>(
+    null
+  );
+  const [regeneratingClipId, setRegeneratingClipId] = useState<string | null>(null);
+  const [regeneratingClipPercent, setRegeneratingClipPercent] = useState<number | null>(null);
   const [processError, setProcessError] = useState<string | null>(null);
   const [regeneratingSubIds, setRegeneratingSubIds] = useState<string[]>([]);
   const [isRetranslatingAll, setIsRetranslatingAll] = useState(false);
@@ -138,7 +148,35 @@ export default function App() {
   loopingSubIdRef.current = loopingSubId;
   const cutTimeRef = useRef(0);
   cutTimeRef.current = cutTime;
+  const liveCutTimeRef = useRef(0);
+  const cutTimeListenersRef = useRef<Set<(sec: number) => void>>(new Set());
+  const lastReactCutSyncAtRef = useRef(0);
   const lastLoopSeekAtRef = useRef(0);
+
+  const subscribeCutTime = useCallback((listener: (sec: number) => void) => {
+    cutTimeListenersRef.current.add(listener);
+    return () => {
+      cutTimeListenersRef.current.delete(listener);
+    };
+  }, []);
+
+  const getLiveCutTime = useCallback(() => liveCutTimeRef.current, []);
+
+  const publishCutTime = useCallback((sec: number, syncReactNow = true) => {
+    liveCutTimeRef.current = sec;
+    cutTimeListenersRef.current.forEach((fn) => fn(sec));
+    if (syncReactNow) {
+      lastReactCutSyncAtRef.current = performance.now();
+      setCutTime(sec);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isPlaying) {
+      liveCutTimeRef.current = cutTime;
+      cutTimeListenersRef.current.forEach((fn) => fn(cutTime));
+    }
+  }, [cutTime, isPlaying]);
   const timelineBaselineRef = useRef<{
     scenes: SpeakingScene[];
     subtitles: SubtitleItem[];
@@ -277,6 +315,12 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!localMedia && !project && studioSection !== "clips") {
+      setStudioSection("clips");
+    }
+  }, [localMedia, project, studioSection]);
+
+  useEffect(() => {
     const mql = window.matchMedia("(min-width: 1024px)");
     const onChange = () => setIsDesktop(mql.matches);
     setIsDesktop(mql.matches);
@@ -286,7 +330,7 @@ export default function App() {
 
   useEffect(() => {
     if (isDesktop && studioSection === "timeline") {
-      setStudioSection("captions");
+      setStudioSection(projectRef.current ? "captions" : "clips");
     }
   }, [isDesktop, studioSection]);
 
@@ -531,7 +575,13 @@ export default function App() {
         clearTimeout(timer);
         v.onloadedmetadata = null;
         v.onerror = null;
-        v.removeAttribute("src");
+        try {
+          v.pause();
+          v.removeAttribute("src");
+          v.load();
+        } catch {
+          // ignore
+        }
         resolve(dur);
       };
       const timer = setTimeout(() => finish(120), 6000);
@@ -563,7 +613,8 @@ export default function App() {
         endSec: durationSec,
       },
     ]);
-    setActiveTab("scenes");
+    setActiveTab("studio");
+    setStudioSection("clips");
   };
 
   const handleClearLocalVideo = () => {
@@ -587,7 +638,8 @@ export default function App() {
       }
       return prev;
     });
-    setActiveTab("scenes");
+    setActiveTab("studio");
+    setStudioSection("clips");
   };
 
   const handleUpdateScene = (id: string, startSec: number, endSec: number) => {
@@ -605,8 +657,159 @@ export default function App() {
     generateAbortRef.current?.abort();
     generateAbortRef.current = null;
     setIsProcessing(false);
+    setGenerationProgress(null);
+    setRegeneratingClipId(null);
+    setRegeneratingClipPercent(null);
     setProcessError(null);
   }, []);
+
+  const mergeSingleClipIntoProject = useCallback(
+    (
+      prevProj: VideoProject | null,
+      allSelectedScenes: SceneSelection[],
+      targetIdx: number,
+      returnedData: VideoProject,
+      targetMedia: ActiveMediaSource
+    ): VideoProject => {
+      const prevScenes = prevProj ? ensureSceneIds(prevProj.scenes) : [];
+      const prevOffsets: number[] = [];
+      let prevCursor = 0;
+      for (const sc of prevScenes) {
+        prevOffsets.push(prevCursor);
+        prevCursor += getSceneDurationSec(sc);
+      }
+
+      const returnedScene = returnedData.scenes[0];
+      const mergedScenes: SpeakingScene[] = allSelectedScenes.map((sel, idx) => {
+        const dur = Math.max(0.1, Math.round((sel.endSec - sel.startSec) * 100) / 100);
+        if (idx === targetIdx) {
+          return {
+            id: sel.id,
+            index: idx,
+            startSec: sel.startSec,
+            endSec: sel.endSec,
+            durationSec: dur,
+            summary: returnedScene?.summary || `Clip ${idx + 1}`,
+          };
+        }
+        const matchedPrev = prevScenes.find(
+          (ps) =>
+            ps.id === sel.id ||
+            (Math.abs(ps.startSec - sel.startSec) < 0.15 &&
+              Math.abs(ps.endSec - sel.endSec) < 0.15)
+        );
+        return {
+          id: sel.id,
+          index: idx,
+          startSec: sel.startSec,
+          endSec: sel.endSec,
+          durationSec: dur,
+          summary: matchedPrev?.summary || `Clip ${idx + 1}`,
+        };
+      });
+
+      const mergedOffsets: number[] = [];
+      let mergedCursor = 0;
+      for (const sc of mergedScenes) {
+        mergedOffsets.push(mergedCursor);
+        mergedCursor += getSceneDurationSec(sc);
+      }
+      const totalDurationSec = Math.round(mergedCursor * 100) / 100;
+
+      const preservedSubs: SubtitleItem[] = [];
+      if (prevProj && prevScenes.length > 0) {
+        for (const sub of prevProj.subtitles) {
+          const oldIdx =
+            sub.sceneIndex >= 0 && sub.sceneIndex < prevScenes.length ? sub.sceneIndex : 0;
+          const oldScene = prevScenes[oldIdx];
+          if (!oldScene) continue;
+
+          const matchedNewIdx = mergedScenes.findIndex(
+            (ms) =>
+              ms.id === oldScene.id ||
+              (Math.abs(ms.startSec - oldScene.startSec) < 0.15 &&
+                Math.abs(ms.endSec - oldScene.endSec) < 0.15)
+          );
+          if (matchedNewIdx === -1 || matchedNewIdx === targetIdx) {
+            continue;
+          }
+
+          const localStart = Math.max(0, sub.startTime - (prevOffsets[oldIdx] ?? 0));
+          const localEnd = Math.max(localStart + 0.08, sub.endTime - (prevOffsets[oldIdx] ?? 0));
+          const targetDur = getSceneDurationSec(mergedScenes[matchedNewIdx]);
+          const clampedStart = Math.min(targetDur, localStart);
+          const clampedEnd = Math.min(targetDur, localEnd);
+          const newStart = Math.round(((mergedOffsets[matchedNewIdx] ?? 0) + clampedStart) * 100) / 100;
+          const newEnd = Math.round(((mergedOffsets[matchedNewIdx] ?? 0) + clampedEnd) * 100) / 100;
+
+          preservedSubs.push({
+            ...sub,
+            sceneIndex: matchedNewIdx,
+            startTime: newStart,
+            endTime: Math.max(newStart + 0.08, newEnd),
+          });
+        }
+      }
+
+      const targetOffset = mergedOffsets[targetIdx] ?? 0;
+      const targetClipDur = getSceneDurationSec(mergedScenes[targetIdx]);
+      const batchNonce = Date.now().toString(36);
+      const newClipSubs: SubtitleItem[] = returnedData.subtitles.map((sub, k) => {
+        const clampedStart = Math.max(0, Math.min(targetClipDur, sub.startTime));
+        const clampedEnd = Math.max(clampedStart + 0.08, Math.min(targetClipDur, sub.endTime));
+        const absStart = Math.round((targetOffset + clampedStart) * 100) / 100;
+        const absEnd = Math.round((targetOffset + clampedEnd) * 100) / 100;
+        return {
+          ...sub,
+          id: `sub-c${targetIdx}-${batchNonce}-${k + 1}`,
+          sceneIndex: targetIdx,
+          startTime: absStart,
+          endTime: Math.max(absStart + 0.08, absEnd),
+        };
+      });
+
+      const mergedSubtitles = [...preservedSubs, ...newClipSubs].sort(
+        (a, b) => a.startTime - b.startTime
+      );
+      const speechRegions = mergedSubtitles.map((s) => ({
+        sourceStartSec: s.sourceStartSec,
+        sourceEndSec: s.sourceEndSec,
+      }));
+
+      if (targetMedia.sourceType === "local") {
+        return {
+          ...(prevProj || returnedData),
+          sourceType: "local",
+          title: prevProj?.title || targetMedia.title,
+          channel: prevProj?.channel || targetMedia.channel,
+          sourceDurationSec: targetMedia.durationSec,
+          targetDurationSec: totalDurationSec,
+          scenes: mergedScenes,
+          subtitles: mergedSubtitles,
+          speechRegions,
+          keyframeUrls: prevProj?.keyframeUrls?.length ? prevProj.keyframeUrls : returnedData.keyframeUrls,
+          localUrl: targetMedia.localUrl,
+          localFile: targetMedia.localFile,
+          uploadId: targetMedia.uploadId,
+        };
+      }
+
+      return {
+        ...(prevProj || returnedData),
+        sourceType: "youtube",
+        videoId: targetMedia.videoId,
+        title: prevProj?.title || targetMedia.title,
+        channel: prevProj?.channel || targetMedia.channel,
+        sourceDurationSec: targetMedia.durationSec,
+        targetDurationSec: totalDurationSec,
+        scenes: mergedScenes,
+        subtitles: mergedSubtitles,
+        speechRegions,
+        keyframeUrls: prevProj?.keyframeUrls?.length ? prevProj.keyframeUrls : returnedData.keyframeUrls,
+      };
+    },
+    []
+  );
 
   // Triggered explicitly by the user after watching and selecting their scenes
   const handleGenerateSubtitles = async () => {
@@ -621,7 +824,18 @@ export default function App() {
     setIsPlaying(false);
     setCutTime(0);
     setIsProcessing(true);
+    setRegeneratingClipId(null);
+    setRegeneratingClipPercent(null);
     setProcessError(null);
+    setGenerationProgress({
+      stage: "extracting",
+      label:
+        targetMedia.sourceType === "local" && !targetMedia.uploadId
+          ? "Extracting clip audio..."
+          : "Preparing clips...",
+      percent: 4,
+      totalClips: selectedScenes.length,
+    });
 
     try {
       const scenePayload = selectedScenes.map(({ startSec, endSec }) => ({
@@ -631,54 +845,138 @@ export default function App() {
 
       if (targetMedia.sourceType === "local" && targetMedia.localFile) {
         let uploadId = targetMedia.uploadId;
+        let resp: Response | null = null;
+
         if (!uploadId) {
-          uploadId = await uploadBlobInChunks(
-            targetMedia.localFile,
-            targetMedia.localFile.name,
-            controller.signal
-          );
+          const fastClips = await extractMp4AudioClips(targetMedia.localFile, scenePayload);
           if (activeRunIdRef.current !== runId) return;
-          setLocalMedia((prev) => (prev ? { ...prev, uploadId } : prev));
+          if (fastClips && fastClips.length === scenePayload.length) {
+            setGenerationProgress({
+              stage: "extracting",
+              label: "Sending clip audio...",
+              percent: 16,
+              totalClips: selectedScenes.length,
+            });
+            resp = await fetch("/api/process-clip-audio", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Accept: "application/x-ndjson",
+              },
+              body: JSON.stringify({
+                title: targetMedia.title,
+                durationSec: targetMedia.durationSec,
+                clips: fastClips,
+                translationTone: videoEdit.translationTone,
+                stream: true,
+              }),
+              signal: controller.signal,
+            });
+          } else {
+            uploadId = await uploadBlobInChunks(
+              targetMedia.localFile,
+              targetMedia.localFile.name,
+              controller.signal,
+              (frac) => {
+                if (activeRunIdRef.current !== runId) return;
+                const pct = Math.max(2, Math.min(20, Math.round(frac * 20)));
+                setGenerationProgress({
+                  stage: "uploading",
+                  label: `Uploading video (${Math.round(frac * 100)}%)...`,
+                  percent: pct,
+                  totalClips: selectedScenes.length,
+                });
+              }
+            );
+            if (activeRunIdRef.current !== runId) return;
+            setLocalMedia((prev) => (prev ? { ...prev, uploadId } : prev));
+          }
         }
 
-        let resp = await fetch("/api/process-upload", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            uploadId,
-            title: targetMedia.title,
-            durationSec: targetMedia.durationSec,
-            selectedScenes: scenePayload,
-            translationTone: videoEdit.translationTone,
-          }),
-          signal: controller.signal,
-        });
-
-        // If server restarted and tmp upload expired, re-upload once transparently
-        if (resp.status === 404) {
-          uploadId = await uploadBlobInChunks(
-            targetMedia.localFile,
-            targetMedia.localFile.name,
-            controller.signal
-          );
-          if (activeRunIdRef.current !== runId) return;
-          setLocalMedia((prev) => (prev ? { ...prev, uploadId } : prev));
+        if (!resp) {
           resp = await fetch("/api/process-upload", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: {
+              "Content-Type": "application/json",
+              Accept: "application/x-ndjson",
+            },
             body: JSON.stringify({
               uploadId,
               title: targetMedia.title,
               durationSec: targetMedia.durationSec,
               selectedScenes: scenePayload,
               translationTone: videoEdit.translationTone,
+              stream: true,
             }),
             signal: controller.signal,
           });
+
+          // If server restarted and tmp upload expired, try fast clip audio first, else re-upload
+          if (resp.status === 404) {
+            const fastClips = await extractMp4AudioClips(targetMedia.localFile, scenePayload);
+            if (activeRunIdRef.current !== runId) return;
+            if (fastClips && fastClips.length === scenePayload.length) {
+              setLocalMedia((prev) => (prev ? { ...prev, uploadId: undefined } : prev));
+              resp = await fetch("/api/process-clip-audio", {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  Accept: "application/x-ndjson",
+                },
+                body: JSON.stringify({
+                  title: targetMedia.title,
+                  durationSec: targetMedia.durationSec,
+                  clips: fastClips,
+                  translationTone: videoEdit.translationTone,
+                  stream: true,
+                }),
+                signal: controller.signal,
+              });
+            } else {
+              uploadId = await uploadBlobInChunks(
+                targetMedia.localFile,
+                targetMedia.localFile.name,
+                controller.signal,
+                (frac) => {
+                  if (activeRunIdRef.current !== runId) return;
+                  const pct = Math.max(2, Math.min(20, Math.round(frac * 20)));
+                  setGenerationProgress({
+                    stage: "uploading",
+                    label: `Uploading video (${Math.round(frac * 100)}%)...`,
+                    percent: pct,
+                    totalClips: selectedScenes.length,
+                  });
+                }
+              );
+              if (activeRunIdRef.current !== runId) return;
+              setLocalMedia((prev) => (prev ? { ...prev, uploadId } : prev));
+              resp = await fetch("/api/process-upload", {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  Accept: "application/x-ndjson",
+                },
+                body: JSON.stringify({
+                  uploadId,
+                  title: targetMedia.title,
+                  durationSec: targetMedia.durationSec,
+                  selectedScenes: scenePayload,
+                  translationTone: videoEdit.translationTone,
+                  stream: true,
+                }),
+                signal: controller.signal,
+              });
+            }
+          }
         }
 
-        const data = await safeReadJson<VideoProject & { error?: string }>(resp);
-        if (!resp.ok) throw new Error(data.error || "Processing failed");
+        const data = await readStreamingProcessResponse<VideoProject & { error?: string }>(
+          resp,
+          (ev) => {
+            if (activeRunIdRef.current !== runId) return;
+            setGenerationProgress(ev);
+          }
+        );
         if (activeRunIdRef.current !== runId) return;
 
         const nextProj: VideoProject = {
@@ -695,7 +993,10 @@ export default function App() {
       } else if (targetMedia.sourceType === "youtube" && targetMedia.videoId) {
         const resp = await fetch("/api/process-video", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/x-ndjson",
+          },
           body: JSON.stringify({
             videoId: targetMedia.videoId,
             title: targetMedia.title,
@@ -703,11 +1004,17 @@ export default function App() {
             durationSec: targetMedia.durationSec,
             selectedScenes: scenePayload,
             translationTone: videoEdit.translationTone,
+            stream: true,
           }),
           signal: controller.signal,
         });
-        const data = await safeReadJson<VideoProject & { error?: string }>(resp);
-        if (!resp.ok) throw new Error(data.error || "Processing failed");
+        const data = await readStreamingProcessResponse<VideoProject & { error?: string }>(
+          resp,
+          (ev) => {
+            if (activeRunIdRef.current !== runId) return;
+            setGenerationProgress(ev);
+          }
+        );
         if (activeRunIdRef.current !== runId) return;
 
         const nextProj: VideoProject = {
@@ -735,6 +1042,268 @@ export default function App() {
       }
       if (activeRunIdRef.current === runId) {
         setIsProcessing(false);
+        setGenerationProgress(null);
+      }
+    }
+  };
+
+  const handleGenerateSingleClip = async (sceneId: string) => {
+    const targetMedia = localMedia ?? youtubeMedia;
+    if (!targetMedia || selectedScenes.length === 0) return;
+
+    const targetIdx = selectedScenes.findIndex((s) => s.id === sceneId);
+    if (targetIdx === -1) return;
+    const targetScene = selectedScenes[targetIdx];
+
+    const runId = ++activeRunIdRef.current;
+    generateAbortRef.current?.abort();
+    const controller = new AbortController();
+    generateAbortRef.current = controller;
+
+    setIsPlaying(false);
+    setRegeneratingClipId(sceneId);
+    setRegeneratingClipPercent(4);
+    setProcessError(null);
+    setSaveNotice(null);
+    setGenerationProgress({
+      stage: "extracting",
+      label: `Clip ${targetIdx + 1}: Extracting audio...`,
+      percent: 4,
+      clipIndex: targetIdx + 1,
+      totalClips: selectedScenes.length,
+    });
+
+    try {
+      const singleScenePayload = [{ startSec: targetScene.startSec, endSec: targetScene.endSec }];
+      let resolvedMedia = targetMedia;
+      let data: VideoProject & { error?: string };
+
+      if (targetMedia.sourceType === "local" && targetMedia.localFile) {
+        let uploadId = targetMedia.uploadId;
+        let resp: Response | null = null;
+
+        if (!uploadId) {
+          const fastClips = await extractMp4AudioClips(targetMedia.localFile, singleScenePayload);
+          if (activeRunIdRef.current !== runId) return;
+          if (fastClips && fastClips.length === 1) {
+            setRegeneratingClipPercent(16);
+            setGenerationProgress({
+              stage: "extracting",
+              label: `Clip ${targetIdx + 1}: Sending clip audio...`,
+              percent: 16,
+              clipIndex: targetIdx + 1,
+              totalClips: selectedScenes.length,
+            });
+            resp = await fetch("/api/process-clip-audio", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Accept: "application/x-ndjson",
+              },
+              body: JSON.stringify({
+                title: targetMedia.title,
+                durationSec: targetMedia.durationSec,
+                clips: fastClips,
+                translationTone: videoEdit.translationTone,
+                stream: true,
+              }),
+              signal: controller.signal,
+            });
+          } else {
+            uploadId = await uploadBlobInChunks(
+              targetMedia.localFile,
+              targetMedia.localFile.name,
+              controller.signal,
+              (frac) => {
+                if (activeRunIdRef.current !== runId) return;
+                const pct = Math.max(2, Math.min(20, Math.round(frac * 20)));
+                setRegeneratingClipPercent(pct);
+                setGenerationProgress({
+                  stage: "uploading",
+                  label: `Clip ${targetIdx + 1}: Uploading video (${Math.round(frac * 100)}%)...`,
+                  percent: pct,
+                  clipIndex: targetIdx + 1,
+                  totalClips: selectedScenes.length,
+                });
+              }
+            );
+            if (activeRunIdRef.current !== runId) return;
+            resolvedMedia = { ...targetMedia, uploadId };
+            setLocalMedia((prev) => (prev ? { ...prev, uploadId } : prev));
+          }
+        }
+
+        if (!resp) {
+          resp = await fetch("/api/process-upload", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Accept: "application/x-ndjson",
+            },
+            body: JSON.stringify({
+              uploadId,
+              title: targetMedia.title,
+              durationSec: targetMedia.durationSec,
+              selectedScenes: singleScenePayload,
+              translationTone: videoEdit.translationTone,
+              stream: true,
+            }),
+            signal: controller.signal,
+          });
+
+          if (resp.status === 404) {
+            const fastClips = await extractMp4AudioClips(targetMedia.localFile, singleScenePayload);
+            if (activeRunIdRef.current !== runId) return;
+            if (fastClips && fastClips.length === 1) {
+              resolvedMedia = { ...targetMedia, uploadId: undefined };
+              setLocalMedia((prev) => (prev ? { ...prev, uploadId: undefined } : prev));
+              resp = await fetch("/api/process-clip-audio", {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  Accept: "application/x-ndjson",
+                },
+                body: JSON.stringify({
+                  title: targetMedia.title,
+                  durationSec: targetMedia.durationSec,
+                  clips: fastClips,
+                  translationTone: videoEdit.translationTone,
+                  stream: true,
+                }),
+                signal: controller.signal,
+              });
+            } else {
+              uploadId = await uploadBlobInChunks(
+                targetMedia.localFile,
+                targetMedia.localFile.name,
+                controller.signal,
+                (frac) => {
+                  if (activeRunIdRef.current !== runId) return;
+                  const pct = Math.max(2, Math.min(20, Math.round(frac * 20)));
+                  setRegeneratingClipPercent(pct);
+                  setGenerationProgress({
+                    stage: "uploading",
+                    label: `Clip ${targetIdx + 1}: Uploading video (${Math.round(frac * 100)}%)...`,
+                    percent: pct,
+                    clipIndex: targetIdx + 1,
+                    totalClips: selectedScenes.length,
+                  });
+                }
+              );
+              if (activeRunIdRef.current !== runId) return;
+              resolvedMedia = { ...targetMedia, uploadId };
+              setLocalMedia((prev) => (prev ? { ...prev, uploadId } : prev));
+              resp = await fetch("/api/process-upload", {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  Accept: "application/x-ndjson",
+                },
+                body: JSON.stringify({
+                  uploadId,
+                  title: targetMedia.title,
+                  durationSec: targetMedia.durationSec,
+                  selectedScenes: singleScenePayload,
+                  translationTone: videoEdit.translationTone,
+                  stream: true,
+                }),
+                signal: controller.signal,
+              });
+            }
+          }
+        }
+
+        data = await readStreamingProcessResponse<VideoProject & { error?: string }>(resp, (ev) => {
+          if (activeRunIdRef.current !== runId) return;
+          setRegeneratingClipPercent(ev.percent);
+          setGenerationProgress({
+            ...ev,
+            label: `Clip ${targetIdx + 1}: ${ev.label}`,
+            clipIndex: targetIdx + 1,
+            totalClips: selectedScenes.length,
+          });
+        });
+      } else if (targetMedia.sourceType === "youtube" && targetMedia.videoId) {
+        const resp = await fetch("/api/process-video", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/x-ndjson",
+          },
+          body: JSON.stringify({
+            videoId: targetMedia.videoId,
+            title: targetMedia.title,
+            channel: targetMedia.channel,
+            durationSec: targetMedia.durationSec,
+            selectedScenes: singleScenePayload,
+            translationTone: videoEdit.translationTone,
+            stream: true,
+          }),
+          signal: controller.signal,
+        });
+        data = await readStreamingProcessResponse<VideoProject & { error?: string }>(resp, (ev) => {
+          if (activeRunIdRef.current !== runId) return;
+          setRegeneratingClipPercent(ev.percent);
+          setGenerationProgress({
+            ...ev,
+            label: `Clip ${targetIdx + 1}: ${ev.label}`,
+            clipIndex: targetIdx + 1,
+            totalClips: selectedScenes.length,
+          });
+        });
+      } else {
+        return;
+      }
+
+      if (activeRunIdRef.current !== runId) return;
+      const prevProj = projectRef.current;
+      if (prevProj) {
+        pushSubtitleUndo();
+      }
+      const nextProj = mergeSingleClipIntoProject(
+        prevProj,
+        selectedScenes,
+        targetIdx,
+        data,
+        resolvedMedia
+      );
+      setProject(nextProj);
+      if (!prevProj) {
+        setBaselineFromProject(nextProj);
+      } else if (timelineBaselineRef.current) {
+        timelineBaselineRef.current = {
+          scenes: ensureSceneIds(nextProj.scenes).map((s) => ({ ...s })),
+          subtitles: cloneSubtitleList(nextProj.subtitles),
+        };
+        setTimelineDirty(false);
+      }
+      setSaveNotice(
+        `Updated Clip ${targetIdx + 1} (${data.subtitles.length} ${
+          data.subtitles.length === 1 ? "subtitle" : "subtitles"
+        })`
+      );
+    } catch (err) {
+      if (
+        controller.signal.aborted ||
+        (err instanceof DOMException && err.name === "AbortError")
+      ) {
+        return;
+      }
+      if (activeRunIdRef.current === runId) {
+        setProcessError(
+          err instanceof Error
+            ? `Clip ${targetIdx + 1}: ${err.message}`
+            : `Failed to generate subtitles for Clip ${targetIdx + 1}.`
+        );
+      }
+    } finally {
+      if (generateAbortRef.current === controller) {
+        generateAbortRef.current = null;
+      }
+      if (activeRunIdRef.current === runId) {
+        setRegeneratingClipId(null);
+        setRegeneratingClipPercent(null);
+        setGenerationProgress(null);
       }
     }
   };
@@ -747,25 +1316,42 @@ export default function App() {
         setLoopingSubId(null);
       }
     }
-    setCutTime(sec);
+    publishCutTime(sec, true);
     setSeekNonce((n) => n + 1);
   };
 
-  const handlePlayerTimeUpdate = useCallback((newCutTime: number) => {
-    const activeLoopId = loopingSubIdRef.current;
-    if (activeLoopId) {
-      const loopSub = projectRef.current?.subtitles.find((s) => s.id === activeLoopId);
-      if (loopSub && newCutTime >= loopSub.endTime - 0.04) {
-        const now = performance.now();
-        if (now - lastLoopSeekAtRef.current > 180) {
-          lastLoopSeekAtRef.current = now;
-          setCutTime(loopSub.startTime);
-          setSeekNonce((n) => n + 1);
-          return;
+  const handlePlayerTimeUpdate = useCallback(
+    (newCutTime: number) => {
+      const activeLoopId = loopingSubIdRef.current;
+      if (activeLoopId) {
+        const loopSub = projectRef.current?.subtitles.find((s) => s.id === activeLoopId);
+        if (loopSub && newCutTime >= loopSub.endTime - 0.04) {
+          const now = performance.now();
+          if (now - lastLoopSeekAtRef.current > 180) {
+            lastLoopSeekAtRef.current = now;
+            publishCutTime(loopSub.startTime, true);
+            setSeekNonce((n) => n + 1);
+            return;
+          }
         }
       }
+      liveCutTimeRef.current = newCutTime;
+      cutTimeListenersRef.current.forEach((fn) => fn(newCutTime));
+      const now = performance.now();
+      if (now - lastReactCutSyncAtRef.current >= 250) {
+        lastReactCutSyncAtRef.current = now;
+        setCutTime(newCutTime);
+      }
+    },
+    [publishCutTime]
+  );
+
+  const handlePlayingChange = useCallback((playing: boolean) => {
+    setIsPlaying(playing);
+    if (!playing) {
+      lastReactCutSyncAtRef.current = performance.now();
+      setCutTime(liveCutTimeRef.current);
     }
-    setCutTime(newCutTime);
   }, []);
 
   const handlePlaybackEnded = useCallback(() => {
@@ -774,7 +1360,7 @@ export default function App() {
       const loopSub = projectRef.current?.subtitles.find((s) => s.id === activeLoopId);
       if (loopSub) {
         lastLoopSeekAtRef.current = performance.now();
-        setCutTime(loopSub.startTime);
+        publishCutTime(loopSub.startTime, true);
         setSeekNonce((n) => n + 1);
         setIsPlaying(true);
         return;
@@ -782,15 +1368,18 @@ export default function App() {
     }
     setLoopingSubId(null);
     setIsPlaying(false);
-    setCutTime(0);
+    publishCutTime(0, true);
     setSeekNonce((n) => n + 1);
-  }, []);
+  }, [publishCutTime]);
 
   const handleTogglePlay = () => {
     if (!project || project.scenes.length === 0) return;
     resumeAllVoiceContexts();
     setIsPlaying((p) => {
-      if (p) setLoopingSubId(null);
+      if (p) {
+        setLoopingSubId(null);
+        setCutTime(liveCutTimeRef.current);
+      }
       return !p;
     });
   };
@@ -798,6 +1387,7 @@ export default function App() {
   const handlePause = useCallback(() => {
     setLoopingSubId(null);
     setIsPlaying(false);
+    setCutTime(liveCutTimeRef.current);
   }, []);
 
   const handlePlayFromTime = useCallback(
@@ -805,11 +1395,11 @@ export default function App() {
       if (!project || project.scenes.length === 0) return;
       resumeAllVoiceContexts();
       setLoopingSubId(null);
-      setCutTime(sec);
+      publishCutTime(sec, true);
       setSeekNonce((n) => n + 1);
       setIsPlaying(true);
     },
-    [project]
+    [project, publishCutTime]
   );
 
   const handleToggleLoopSubtitle = useCallback(
@@ -821,17 +1411,18 @@ export default function App() {
       if (loopingSubIdRef.current === id && isPlaying) {
         setLoopingSubId(null);
         setIsPlaying(false);
+        setCutTime(liveCutTimeRef.current);
         return;
       }
 
       resumeAllVoiceContexts();
       lastLoopSeekAtRef.current = performance.now();
       setLoopingSubId(id);
-      setCutTime(targetSub.startTime);
+      publishCutTime(targetSub.startTime, true);
       setSeekNonce((n) => n + 1);
       setIsPlaying(true);
     },
-    [project, isPlaying]
+    [project, isPlaying, publishCutTime]
   );
 
   const checkTimelineDirty = useCallback((nextScenes: SpeakingScene[]) => {
@@ -1466,6 +2057,25 @@ export default function App() {
 
     try {
       const resolvedUploadId = project.uploadId || localMedia?.uploadId;
+      const localFile = project.localFile || localMedia?.localFile;
+      let clipAudioBase64: string | undefined;
+      let clipMimeType: string | undefined;
+      if (project.sourceType === "local" && !resolvedUploadId && localFile) {
+        const lineStart = Math.max(0, (targetSub.sourceStartSec ?? targetSub.startTime) - 0.18);
+        const lineEnd = Math.max(
+          lineStart + 0.5,
+          (targetSub.sourceEndSec ?? targetSub.endTime) + 0.18
+        );
+        const extracted = await extractMp4AudioClips(localFile, [
+          { startSec: lineStart, endSec: lineEnd },
+        ]);
+        if (controller.signal.aborted) return;
+        if (extracted?.[0]) {
+          clipAudioBase64 = extracted[0].audioBase64;
+          clipMimeType = extracted[0].mimeType;
+        }
+      }
+
       const resp = await fetch("/api/regenerate-subtitle", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1474,6 +2084,8 @@ export default function App() {
           sourceType: project.sourceType,
           videoId: project.videoId,
           uploadId: resolvedUploadId,
+          clipAudioBase64,
+          clipMimeType,
           customHint: customHint?.trim() || undefined,
           translationTone: toneOverride ?? videoEdit.translationTone,
           subtitle: {
@@ -1786,16 +2398,33 @@ export default function App() {
     try {
       let uploadId = project.uploadId || localMedia?.uploadId;
       const localFile = project.localFile || localMedia?.localFile;
+      let clipsAudioPayload:
+        | Array<{ trimLeadSec?: number; durationSec: number; audioBase64: string; mimeType?: string }>
+        | undefined;
 
       if (project.sourceType === "local" && !uploadId && localFile) {
-        uploadId = await uploadBlobInChunks(
+        const extracted = await extractMp4AudioClips(
           localFile,
-          localFile.name,
-          controller.signal
+          project.scenes.map((sc) => ({ startSec: sc.startSec, endSec: sc.endSec }))
         );
         if (controller.signal.aborted) return;
-        setLocalMedia((prev) => (prev ? { ...prev, uploadId } : prev));
-        setProject((prev) => (prev ? { ...prev, uploadId } : prev));
+        if (extracted && extracted.length === project.scenes.length) {
+          clipsAudioPayload = extracted.map((c) => ({
+            trimLeadSec: c.trimLeadSec,
+            durationSec: c.durationSec,
+            audioBase64: c.audioBase64,
+            mimeType: c.mimeType,
+          }));
+        } else {
+          uploadId = await uploadBlobInChunks(
+            localFile,
+            localFile.name,
+            controller.signal
+          );
+          if (controller.signal.aborted) return;
+          setLocalMedia((prev) => (prev ? { ...prev, uploadId } : prev));
+          setProject((prev) => (prev ? { ...prev, uploadId } : prev));
+        }
       }
 
       const payloadBody = (activeUploadId?: string) =>
@@ -1803,6 +2432,7 @@ export default function App() {
           sourceType: project.sourceType,
           videoId: project.videoId,
           uploadId: activeUploadId,
+          clipsAudio: clipsAudioPayload,
           scenes: project.scenes.map((sc) => ({
             startSec: sc.startSec,
             endSec: sc.endSec,
@@ -1827,14 +2457,31 @@ export default function App() {
       });
 
       if (resp.status === 404 && project.sourceType === "local" && localFile) {
-        uploadId = await uploadBlobInChunks(
+        const extracted = await extractMp4AudioClips(
           localFile,
-          localFile.name,
-          controller.signal
+          project.scenes.map((sc) => ({ startSec: sc.startSec, endSec: sc.endSec }))
         );
         if (controller.signal.aborted) return;
-        setLocalMedia((prev) => (prev ? { ...prev, uploadId } : prev));
-        setProject((prev) => (prev ? { ...prev, uploadId } : prev));
+        if (extracted && extracted.length === project.scenes.length) {
+          clipsAudioPayload = extracted.map((c) => ({
+            trimLeadSec: c.trimLeadSec,
+            durationSec: c.durationSec,
+            audioBase64: c.audioBase64,
+            mimeType: c.mimeType,
+          }));
+          uploadId = undefined;
+          setLocalMedia((prev) => (prev ? { ...prev, uploadId: undefined } : prev));
+          setProject((prev) => (prev ? { ...prev, uploadId: undefined } : prev));
+        } else {
+          uploadId = await uploadBlobInChunks(
+            localFile,
+            localFile.name,
+            controller.signal
+          );
+          if (controller.signal.aborted) return;
+          setLocalMedia((prev) => (prev ? { ...prev, uploadId } : prev));
+          setProject((prev) => (prev ? { ...prev, uploadId } : prev));
+        }
         resp = await fetch("/api/resync-subtitles", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -2239,13 +2886,15 @@ export default function App() {
       setActiveTab("studio");
       setStudioSection("captions");
     } else if (record.sourceType === "local" && localUrl) {
-      setActiveTab("scenes");
+      setActiveTab("studio");
+      setStudioSection("clips");
     } else if (record.sourceType === "youtube") {
       setYtPreviewSec(0);
       setYtSeekRequest(null);
       setActiveTab("youtube");
     } else {
-      setActiveTab("scenes");
+      setActiveTab("studio");
+      setStudioSection("clips");
     }
   };
 
@@ -2355,18 +3004,51 @@ export default function App() {
   const activeTabLabel =
     activeTab === "youtube"
       ? "Source"
-      : activeTab === "scenes"
-        ? "Scenes"
-        : activeTab === "studio"
-          ? "Studio"
-          : "Projects";
+      : activeTab === "studio"
+        ? "Studio"
+        : "Projects";
 
   const activeMediaTitle = project?.title || localMedia?.title || youtubeMedia?.title;
 
+  const clipSubtitleCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    if (!project) return counts;
+    const projScenes = project.scenes;
+    const matchedCounts = new Map<number, number>();
+    for (const sub of project.subtitles) {
+      matchedCounts.set(sub.sceneIndex, (matchedCounts.get(sub.sceneIndex) ?? 0) + 1);
+    }
+    selectedScenes.forEach((sel, selIdx) => {
+      let projIdx = projScenes.findIndex(
+        (ps) =>
+          ps.id === sel.id ||
+          (Math.abs(ps.startSec - sel.startSec) < 0.15 &&
+            Math.abs(ps.endSec - sel.endSec) < 0.15)
+      );
+      if (projIdx === -1 && projScenes[selIdx]) {
+        const candidate = projScenes[selIdx];
+        if (
+          Math.abs(candidate.startSec - sel.startSec) < 0.15 &&
+          Math.abs(candidate.endSec - sel.endSec) < 0.15
+        ) {
+          projIdx = selIdx;
+        }
+      }
+      if (projIdx !== -1) {
+        counts[sel.id] = matchedCounts.get(projIdx) ?? 0;
+      }
+    });
+    return counts;
+  }, [project, selectedScenes]);
+
   const navItems = [
     { id: "youtube" as const, label: "Source", icon: Compass, count: 0 },
-    { id: "scenes" as const, label: "Scenes", icon: Scissors, count: selectedScenes.length },
-    { id: "studio" as const, label: "Studio", icon: Clapperboard, count: 0 },
+    {
+      id: "studio" as const,
+      label: "Studio",
+      icon: Clapperboard,
+      count: !project && selectedScenes.length > 0 ? selectedScenes.length : 0,
+    },
     { id: "projects" as const, label: "Projects", icon: FolderOpen, count: savedProjects.length },
   ];
 
@@ -2508,7 +3190,7 @@ export default function App() {
           <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
             {project && (
               <span className="hidden sm:inline-block text-[11px] font-mono-tabular text-[#525d6d] dark:text-[#8b95a5] pr-2 border-r border-[#dde2e9] dark:border-[#242a34] whitespace-nowrap">
-                {project.scenes.length} {project.scenes.length === 1 ? "scene" : "scenes"} ·{" "}
+                {project.scenes.length} {project.scenes.length === 1 ? "clip" : "clips"} ·{" "}
                 {Math.round(project.targetDurationSec)}s
               </span>
             )}
@@ -2619,13 +3301,15 @@ export default function App() {
             <Stage9x16
               project={project}
               cutTime={cutTime}
+              subscribeCutTime={subscribeCutTime}
+              getLiveCutTime={getLiveCutTime}
               seekNonce={seekNonce}
               isPlaying={isPlaying}
               muted={muted}
               voiceSettings={voiceSettings}
               editSettings={videoEdit}
               onTogglePlay={handleTogglePlay}
-              onPlayingChange={setIsPlaying}
+              onPlayingChange={handlePlayingChange}
               onSeek={handleSeek}
               onTimeUpdate={handlePlayerTimeUpdate}
               onEnded={handlePlaybackEnded}
@@ -2640,10 +3324,6 @@ export default function App() {
           const sidebarNode = (
             <WorkspaceSidebar
               activeTab={activeTab}
-              onTabChange={(tab) => {
-                if (tab === "youtube") setIsPlaying(false);
-                setActiveTab(tab);
-              }}
               videos={videos}
               selectedVideoId={youtubeMedia?.videoId}
               activeQuery={activeQuery}
@@ -2658,11 +3338,16 @@ export default function App() {
               editSettings={videoEdit}
               isSearching={isSearching}
               isProcessing={isProcessing}
+              generationProgress={generationProgress}
+              clipSubtitleCounts={clipSubtitleCounts}
+              regeneratingClipId={regeneratingClipId}
+              regeneratingClipPercent={regeneratingClipPercent}
               isPlaying={isPlaying}
               timelineDirty={timelineDirty}
               searchError={searchError}
               project={project}
               cutTime={cutTime}
+              subscribeCutTime={subscribeCutTime}
               savedProjects={savedProjects}
               activeSavedId={activeSavedId}
               canSaveCurrent={canSaveCurrent}
@@ -2684,6 +3369,7 @@ export default function App() {
                 setYoutubeMedia((prev) => (prev ? { ...prev, durationSec: dur } : prev))
               }
               onGenerateSubtitles={handleGenerateSubtitles}
+              onGenerateSingleClip={handleGenerateSingleClip}
               onCancelGenerateSubtitles={handleCancelGenerateSubtitles}
               onChangeVoiceSettings={setVoiceSettings}
               onChangeEditSettings={setVideoEdit}
@@ -2734,6 +3420,9 @@ export default function App() {
               ytSeekRequest={ytSeekRequest}
               onYtCurrentSecChange={setYtPreviewSec}
               inlineStage={renderInlineStageInSidebar ? stageNode : undefined}
+              isMobileStudio={!isDesktop}
+              stagePreviewScale={stagePreviewScale}
+              onChangeStagePreviewScale={setStagePreviewScale}
               searchInput={searchInput}
               onChangeSearchInput={setSearchInput}
               onSubmitSearch={() => {
@@ -2794,26 +3483,29 @@ export default function App() {
                 </div>
 
                 {/* Lower Studio Area: Edge-to-Edge Bottom Timeline Dock */}
-                <div className="shrink-0">
-                  <ProjectTimelineEditor
-                    dockMode
-                    isCollapsed={timelineCollapsed}
-                    onToggleCollapse={() => setTimelineCollapsed((c) => !c)}
-                    project={project}
-                    cutTime={cutTime}
-                    isPlaying={isPlaying}
-                    isActive={activeTab === "studio" && !timelineCollapsed}
-                    onTogglePlay={handleTogglePlay}
-                    onPause={handlePause}
-                    onSeek={handleSeek}
-                    onPlayFromTime={handlePlayFromTime}
-                    onUpdateScenes={handleUpdateProjectScenes}
-                    onUpdateSubtitleTiming={handleUpdateSubtitleTiming}
-                    onRestoreSnapshot={handleRestoreProjectSnapshot}
-                    onResetTimeline={handleResetTimeline}
-                    onGoToScenes={() => setActiveTab("scenes")}
-                  />
-                </div>
+                {(project || studioSection !== "clips") && (
+                  <div className="shrink-0">
+                    <ProjectTimelineEditor
+                      dockMode
+                      isCollapsed={timelineCollapsed}
+                      onToggleCollapse={() => setTimelineCollapsed((c) => !c)}
+                      project={project}
+                      cutTime={cutTime}
+                      subscribeCutTime={subscribeCutTime}
+                      isPlaying={isPlaying}
+                      isActive={activeTab === "studio" && !timelineCollapsed}
+                      onTogglePlay={handleTogglePlay}
+                      onPause={handlePause}
+                      onSeek={handleSeek}
+                      onPlayFromTime={handlePlayFromTime}
+                      onUpdateScenes={handleUpdateProjectScenes}
+                      onUpdateSubtitleTiming={handleUpdateSubtitleTiming}
+                      onRestoreSnapshot={handleRestoreProjectSnapshot}
+                      onResetTimeline={handleResetTimeline}
+                      onGoToScenes={() => setStudioSection("clips")}
+                    />
+                  </div>
+                )}
               </main>
             );
           }
@@ -2831,7 +3523,7 @@ export default function App() {
         {/* Mobile / Tablet Thumb-First Bottom Navigation Bar */}
         <nav
           aria-label="Mobile navigation"
-          className="lg:hidden shrink-0 border-t border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] px-2 py-1 grid grid-cols-4 gap-1"
+          className="lg:hidden shrink-0 border-t border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] px-2 py-1 grid grid-cols-3 gap-1"
         >
           {navItems.map((item) => {
             const Icon = item.icon;

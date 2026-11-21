@@ -23,6 +23,7 @@ import { hasVerticalScrollRoom, scrollVerticalAncestors } from "../utils/timelin
 interface ProjectTimelineEditorProps {
   project: VideoProject | null;
   cutTime: number;
+  subscribeCutTime?: (listener: (sec: number) => void) => () => void;
   isPlaying: boolean;
   isActive?: boolean;
   onTogglePlay: () => void;
@@ -129,6 +130,7 @@ function clampZoom(z: number): number {
 export function ProjectTimelineEditor({
   project,
   cutTime,
+  subscribeCutTime,
   isPlaying,
   isActive = true,
   onTogglePlay,
@@ -145,6 +147,8 @@ export function ProjectTimelineEditor({
   onToggleCollapse,
 }: ProjectTimelineEditorProps) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
+  const trackSlideRef = useRef<HTMLDivElement | null>(null);
+  const timeReadoutRef = useRef<HTMLSpanElement | null>(null);
   const [showDockScenes, setShowDockScenes] = useState(false);
 
   const [pxPerSec, setPxPerSec] = useState(32);
@@ -348,15 +352,31 @@ export function ProjectTimelineEditor({
       return;
     }
 
+    if (isCollapsed) return;
+
     let cancelled = false;
-    const targetCount = Math.min(24, Math.max(10, Math.ceil(sourceDuration / 4)));
+    const estDur = Math.max(1, project.sourceDurationSec || sourceDuration);
+    const targetCount = Math.min(12, Math.max(6, Math.ceil(estDur / 6)));
     const hiddenVid = document.createElement("video");
     hiddenVid.muted = true;
     hiddenVid.playsInline = true;
     hiddenVid.preload = "metadata";
 
+    const releaseHiddenVid = () => {
+      hiddenVid.onloadeddata = null;
+      hiddenVid.onerror = null;
+      try {
+        hiddenVid.pause();
+        hiddenVid.removeAttribute("src");
+        hiddenVid.load();
+      } catch {
+        // ignore
+      }
+    };
+
     const captureFrames = async () => {
-      await new Promise((r) => setTimeout(r, 180));
+      // Let primary 9:16 video stage initialize decoder cleanly first
+      await new Promise((r) => setTimeout(r, 420));
       if (cancelled) return;
       hiddenVid.src = project.localUrl!;
 
@@ -371,7 +391,7 @@ export function ProjectTimelineEditor({
       const actualDur =
         Number.isFinite(hiddenVid.duration) && hiddenVid.duration > 0
           ? hiddenVid.duration
-          : sourceDuration;
+          : estDur;
       const canvas = document.createElement("canvas");
       const cw = 96;
       const ch = 56;
@@ -397,7 +417,7 @@ export function ProjectTimelineEditor({
         try {
           ctx.drawImage(hiddenVid, 0, 0, cw, ch);
           frames.push(canvas.toDataURL("image/jpeg", 0.55));
-          if (frames.length % 4 === 0 || frames.length === targetCount) {
+          if (frames.length % 3 === 0 || frames.length === targetCount) {
             setThumbnails([...frames]);
           }
         } catch {
@@ -406,19 +426,13 @@ export function ProjectTimelineEditor({
       }
     };
 
-    captureFrames().finally(() => {
-      hiddenVid.onloadeddata = null;
-      hiddenVid.onerror = null;
-      hiddenVid.removeAttribute("src");
-    });
+    captureFrames().finally(releaseHiddenVid);
 
     return () => {
       cancelled = true;
-      hiddenVid.onloadeddata = null;
-      hiddenVid.onerror = null;
-      hiddenVid.removeAttribute("src");
+      releaseHiddenVid();
     };
-  }, [project?.sourceType, project?.localUrl, project?.videoId, project?.keyframeUrls, sourceDuration]);
+  }, [project?.sourceType, project?.localUrl, project?.videoId, isCollapsed]);
 
   // Smoothly throttle rapid drag seeks on Stage9x16 so YouTube/local video players stay fluid
   const dispatchSeek = useCallback(
@@ -638,6 +652,32 @@ export function ProjectTimelineEditor({
   const trackWidth = Math.max(totalCutDuration * pxPerSec, 1);
   const trackTranslateX = centerX - trackCenterTime * pxPerSec;
 
+  const timelineTransformConfigRef = useRef({
+    centerX,
+    pxPerSec,
+    frozen: frozenTrackTime !== null,
+  });
+  timelineTransformConfigRef.current = {
+    centerX,
+    pxPerSec,
+    frozen: frozenTrackTime !== null,
+  };
+
+  useEffect(() => {
+    if (!subscribeCutTime) return;
+    return subscribeCutTime((liveSec) => {
+      const cfg = timelineTransformConfigRef.current;
+      if (cfg.frozen || dragStateRef.current || liveScrubCutRef.current !== null) return;
+      if (trackSlideRef.current) {
+        const nextX = cfg.centerX - liveSec * cfg.pxPerSec;
+        trackSlideRef.current.style.transform = `translate3d(${nextX}px, 0, 0)`;
+      }
+      if (timeReadoutRef.current) {
+        timeReadoutRef.current.textContent = formatTimePrecise(liveSec);
+      }
+    });
+  }, [subscribeCutTime]);
+
   const resolvedSpeechRegions = useMemo<SpeechRegion[]>(() => {
     if (project?.speechRegions && project.speechRegions.length > 0) {
       return project.speechRegions;
@@ -704,15 +744,20 @@ export function ProjectTimelineEditor({
         if (ev.cancelable) ev.preventDefault();
       }
     };
+    const onWinBlur = () => {
+      pointerUpHandlerRef.current({} as PointerEvent);
+    };
     window.addEventListener("pointermove", onWinMove, { passive: false });
     window.addEventListener("pointerup", onWinEnd);
     window.addEventListener("pointercancel", onWinEnd);
     window.addEventListener("touchmove", onWinTouchMove, { passive: false });
+    window.addEventListener("blur", onWinBlur);
     windowDragCleanupRef.current = () => {
       window.removeEventListener("pointermove", onWinMove);
       window.removeEventListener("pointerup", onWinEnd);
       window.removeEventListener("pointercancel", onWinEnd);
       window.removeEventListener("touchmove", onWinTouchMove);
+      window.removeEventListener("blur", onWinBlur);
     };
   }, []);
 
@@ -1247,7 +1292,7 @@ export function ProjectTimelineEditor({
                   Timeline Dock
                 </p>
                 <p className="text-[11px] text-[#525d6d] dark:text-[#8b95a5] truncate">
-                  Pick scenes and generate subtitles in Scenes to unlock the multi-track timeline.
+                  Upload a video and generate subtitles in Upload &amp; Cut to unlock the multi-track timeline.
                 </p>
               </div>
             </div>
@@ -1259,7 +1304,7 @@ export function ProjectTimelineEditor({
                   onClick={onGoToScenes}
                   className="h-8 px-3.5 rounded-md bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#061412] text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors"
                 >
-                  <span>Go to Scenes</span>
+                  <span>Upload &amp; Cut</span>
                 </button>
               )}
               {onToggleCollapse && (
@@ -1298,7 +1343,7 @@ export function ProjectTimelineEditor({
               onClick={onGoToScenes}
               className="mt-1 h-9 px-4 rounded-md bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#061412] text-xs font-semibold flex items-center gap-2 whitespace-nowrap cursor-pointer transition-colors"
             >
-              <span>Go to Scenes</span>
+              <span>Upload &amp; Cut</span>
             </button>
           )}
         </div>
@@ -1322,7 +1367,7 @@ export function ProjectTimelineEditor({
               {project.title}
             </p>
             <p className="text-[11px] font-mono-tabular text-[#525d6d] dark:text-[#8b95a5]">
-              9:16 Subtitle Video · {segments.length} {segments.length === 1 ? "scene" : "scenes"} ·{" "}
+              9:16 Subtitle Video · {segments.length} {segments.length === 1 ? "clip" : "clips"} ·{" "}
               {roundTenth(totalCutDuration)}s
             </p>
           </div>
@@ -1359,7 +1404,7 @@ export function ProjectTimelineEditor({
           </button>
 
           <span className="text-xs font-mono-tabular text-[#0e1217] dark:text-[#f1f3f5] shrink-0">
-            {formatTimePrecise(cutTime)}
+            <span ref={timeReadoutRef}>{formatTimePrecise(cutTime)}</span>
             <span className="text-[#525d6d] dark:text-[#8b95a5]">
               {" "}
               / {formatTimePrecise(totalCutDuration)}
@@ -1455,10 +1500,10 @@ export function ProjectTimelineEditor({
           </div>
 
           {dockMode && (
-            <button
+              <button
               type="button"
               onClick={() => setShowDockScenes((v) => !v)}
-              title="Show or hide kept scenes list"
+              title="Show or hide kept clips list"
               className={`h-7 px-2.5 rounded-md border text-xs font-medium flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors ${
                 showDockScenes
                   ? "border-teal-600/70 bg-teal-50 text-teal-800 dark:border-teal-400/70 dark:bg-teal-950/60 dark:text-teal-200"
@@ -1466,7 +1511,7 @@ export function ProjectTimelineEditor({
               }`}
             >
               <List className="w-3.5 h-3.5" />
-              <span>Scenes ({segments.length})</span>
+              <span>Clips ({segments.length})</span>
             </button>
           )}
 
@@ -1503,6 +1548,7 @@ export function ProjectTimelineEditor({
 
         {/* Moving Timeline Content Track */}
         <div
+          ref={trackSlideRef}
           style={{
             width: `${trackWidth}px`,
             transform: `translate3d(${trackTranslateX}px, 0, 0)`,
@@ -1838,7 +1884,7 @@ export function ProjectTimelineEditor({
         {segments.length === 0 ? (
           <div className="p-4 text-center space-y-2">
             <p className="text-xs text-[#525d6d] dark:text-[#8b95a5]">
-              All clips were deleted. Restore the original scenes to split and keep the clips you want.
+              All clips were deleted. Restore the original clips to split and keep the parts you want.
             </p>
             <button
               type="button"
@@ -1846,7 +1892,7 @@ export function ProjectTimelineEditor({
               className="h-8 px-3 rounded-md bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#061412] text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer transition-colors"
             >
               <RotateCcw className="w-3.5 h-3.5" />
-              <span>Restore Original Scenes</span>
+              <span>Restore Original Clips</span>
             </button>
           </div>
         ) : (
@@ -1877,7 +1923,7 @@ export function ProjectTimelineEditor({
                       {String(idx + 1).padStart(2, "0")}
                     </span>
                     <span className="text-xs font-semibold text-[#0e1217] dark:text-[#f1f3f5]">
-                      Scene {idx + 1}
+                      Clip {idx + 1}
                     </span>
                     <span className="text-xs font-mono-tabular text-[#525d6d] dark:text-[#8b95a5]">
                       {formatTimePrecise(seg.startSec)} – {formatTimePrecise(seg.endSec)}
@@ -1893,8 +1939,8 @@ export function ProjectTimelineEditor({
                         setActiveSceneId(seg.sceneId);
                         onPlayFromTime(seg.cutStart);
                       }}
-                      title={`Play Scene ${idx + 1}`}
-                      aria-label={`Play Scene ${idx + 1}`}
+                      title={`Play Clip ${idx + 1}`}
+                      aria-label={`Play Clip ${idx + 1}`}
                       className="p-1 text-[#525d6d] hover:text-teal-700 dark:text-[#8b95a5] dark:hover:text-teal-400 transition-colors cursor-pointer"
                     >
                       <Play className="w-3.5 h-3.5" />
@@ -1909,7 +1955,7 @@ export function ProjectTimelineEditor({
                         e.currentTarget.blur();
                         handleDeleteClip(seg.sceneId);
                       }}
-                      aria-label={`Delete scene ${idx + 1}`}
+                      aria-label={`Delete clip ${idx + 1}`}
                       className="p-1 text-[#525d6d] dark:text-[#8b95a5] hover:text-red-600 dark:hover:text-red-400 transition-colors cursor-pointer"
                     >
                       <Trash2 className="w-3.5 h-3.5" />

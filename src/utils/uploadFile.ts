@@ -1,3 +1,5 @@
+import type { SubtitleGenerationProgress } from "../types";
+
 const CHUNK_SIZE_BYTES = 8 * 1024 * 1024; // 8 MB chunks (safely under Express 16 MB & Cloud Run 32 MB limits)
 const MAX_UPLOAD_BYTES = 500 * 1024 * 1024; // 500 MB cumulative upload limit
 
@@ -25,6 +27,81 @@ export async function safeReadJson<T = Record<string, unknown>>(resp: Response):
   const titleMatch = trimmed.match(/<title>([^<]+)<\/title>/i);
   const hint = titleMatch?.[1]?.trim() || `HTTP ${resp.status}`;
   throw new Error(`Upload/processing request failed (${hint}). Please try again.`);
+}
+
+export async function readStreamingProcessResponse<T extends { error?: string }>(
+  resp: Response,
+  onProgress?: (ev: SubtitleGenerationProgress) => void
+): Promise<T> {
+  const contentType = resp.headers.get("content-type") || "";
+  if (!contentType.includes("application/x-ndjson") || !resp.body) {
+    const data = await safeReadJson<T>(resp);
+    if (!resp.ok) {
+      throw new Error(data.error || `Processing failed (HTTP ${resp.status}).`);
+    }
+    return data;
+  }
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finalResult: T | null = null;
+  let streamError: string | null = null;
+
+  const handleLine = (rawLine: string) => {
+    const line = rawLine.trim();
+    if (!line) return;
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      return;
+    }
+    if (parsed.type === "progress") {
+      onProgress?.({
+        stage: (parsed.stage as SubtitleGenerationProgress["stage"]) || "generating",
+        label: String(parsed.label || "Generating subtitles..."),
+        percent: Math.max(0, Math.min(100, Math.round(Number(parsed.percent) || 0))),
+        clipIndex: typeof parsed.clipIndex === "number" ? parsed.clipIndex : undefined,
+        totalClips: typeof parsed.totalClips === "number" ? parsed.totalClips : undefined,
+      });
+    } else if (parsed.type === "error") {
+      streamError = String(parsed.error || "Processing failed.");
+    } else if (parsed.type === "result") {
+      finalResult = parsed.data as T;
+    }
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (value) {
+      buffer += decoder.decode(value, { stream: true });
+      let newlineIdx = buffer.indexOf("\n");
+      while (newlineIdx !== -1) {
+        const line = buffer.slice(0, newlineIdx);
+        buffer = buffer.slice(newlineIdx + 1);
+        handleLine(line);
+        if (streamError) {
+          await reader.cancel().catch(() => undefined);
+          throw new Error(streamError);
+        }
+        newlineIdx = buffer.indexOf("\n");
+      }
+    }
+    if (done) break;
+  }
+
+  buffer += decoder.decode();
+  if (buffer.trim()) {
+    handleLine(buffer);
+  }
+  if (streamError) {
+    throw new Error(streamError);
+  }
+  if (!finalResult) {
+    throw new Error("Processing ended before returning subtitles. Please try again.");
+  }
+  return finalResult;
 }
 
 async function abortUploadSession(uploadId: string): Promise<void> {
@@ -111,63 +188,82 @@ export async function uploadBlobInChunks(
 
   const uploadId = initData.uploadId;
   try {
+    const chunkJobs: Array<{ offset: number; end: number }> = [];
     for (let offset = 0; offset < blob.size; offset += CHUNK_SIZE_BYTES) {
-      if (signal?.aborted) {
-        throw new DOMException("Aborted", "AbortError");
-      }
-      const chunkEnd = Math.min(blob.size, offset + CHUNK_SIZE_BYTES);
-      const chunk = blob.slice(offset, chunkEnd);
-      let chunkUploaded = false;
-      let lastErr: unknown = null;
+      chunkJobs.push({ offset, end: Math.min(blob.size, offset + CHUNK_SIZE_BYTES) });
+    }
 
-      for (let attempt = 0; attempt < 3; attempt++) {
+    const uploadedPerJob = new Array<number>(chunkJobs.length).fill(0);
+    let totalUploaded = 0;
+    let nextJobIdx = 0;
+    const workerCount = Math.min(3, Math.max(1, chunkJobs.length));
+
+    const runWorker = async () => {
+      while (nextJobIdx < chunkJobs.length) {
+        const jobIdx = nextJobIdx++;
         if (signal?.aborted) {
           throw new DOMException("Aborted", "AbortError");
         }
-        const chunkTimed = createTimedSignal(45_000, signal);
-        try {
-          const chunkResp = await fetch("/api/upload-chunk", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/octet-stream",
-              "x-upload-id": uploadId,
-              "x-chunk-offset": String(offset),
-            },
-            body: chunk,
-            signal: chunkTimed.signal,
-          });
-          const chunkData = await safeReadJson<{ ok?: boolean; error?: string }>(chunkResp);
-          if (chunkResp.ok) {
-            chunkUploaded = true;
-            onProgress?.(Math.min(1, chunkEnd / blob.size));
-            break;
-          }
-          // Retry only on transient gateway/server errors
-          const retryable = chunkResp.status >= 500 || chunkResp.status === 429;
-          lastErr = new Error(chunkData.error || `Failed while uploading video chunk (HTTP ${chunkResp.status}).`);
-          if (!retryable || attempt === 2) {
-            throw lastErr;
-          }
-        } catch (err) {
+        const job = chunkJobs[jobIdx];
+        const chunk = blob.slice(job.offset, job.end);
+        let chunkUploaded = false;
+        let lastErr: unknown = null;
+
+        for (let attempt = 0; attempt < 3; attempt++) {
           if (signal?.aborted) {
-            throw err;
+            throw new DOMException("Aborted", "AbortError");
           }
-          const resolvedErr = chunkTimed.didTimeout()
-            ? new Error("Video upload chunk timed out. Please check your network and try again.")
-            : err;
-          lastErr = resolvedErr;
-          if (attempt === 2) throw resolvedErr;
-        } finally {
-          chunkTimed.cleanup();
+          const chunkTimed = createTimedSignal(45_000, signal);
+          try {
+            const chunkResp = await fetch("/api/upload-chunk", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/octet-stream",
+                "x-upload-id": uploadId,
+                "x-chunk-offset": String(job.offset),
+                "x-chunk-mode": "parallel",
+              },
+              body: chunk,
+              signal: chunkTimed.signal,
+            });
+            const chunkData = await safeReadJson<{ ok?: boolean; error?: string }>(chunkResp);
+            if (chunkResp.ok) {
+              chunkUploaded = true;
+              const prev = uploadedPerJob[jobIdx];
+              uploadedPerJob[jobIdx] = chunk.size;
+              totalUploaded += chunk.size - prev;
+              onProgress?.(Math.min(1, totalUploaded / blob.size));
+              break;
+            }
+            const retryable = chunkResp.status >= 500 || chunkResp.status === 429;
+            lastErr = new Error(
+              chunkData.error || `Failed while uploading video chunk (HTTP ${chunkResp.status}).`
+            );
+            if (!retryable || attempt === 2) {
+              throw lastErr;
+            }
+          } catch (err) {
+            if (signal?.aborted) {
+              throw err;
+            }
+            const resolvedErr = chunkTimed.didTimeout()
+              ? new Error("Video upload chunk timed out. Please check your network and try again.")
+              : err;
+            lastErr = resolvedErr;
+            if (attempt === 2) throw resolvedErr;
+          } finally {
+            chunkTimed.cleanup();
+          }
+          await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
         }
-        await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
-      }
 
-      if (!chunkUploaded) {
-        throw lastErr instanceof Error ? lastErr : new Error("Failed while uploading video chunk.");
+        if (!chunkUploaded) {
+          throw lastErr instanceof Error ? lastErr : new Error("Failed while uploading video chunk.");
+        }
       }
-    }
+    };
 
+    await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
     return uploadId;
   } catch (err) {
     await abortUploadSession(uploadId);

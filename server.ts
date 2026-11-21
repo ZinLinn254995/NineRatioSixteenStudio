@@ -42,6 +42,7 @@ interface UploadSession {
   activeLocks: number;
   pendingDelete: boolean;
   writeChain: Promise<void>;
+  writtenOffsets: Map<number, number>;
 }
 
 const uploadSessions = new Map<string, UploadSession>();
@@ -63,6 +64,7 @@ function registerUploadSession(
     activeLocks: 0,
     pendingDelete: false,
     writeChain: Promise.resolve(),
+    writtenOffsets: new Map<number, number>(),
   };
   uploadSessions.set(uploadId, session);
   return session;
@@ -1929,6 +1931,8 @@ async function extractEmbeddedSubtitles(
           "ffmpeg",
           [
             "-y",
+            "-vn",
+            "-an",
             "-i",
             mediaPath,
             "-map",
@@ -2032,13 +2036,285 @@ function lockUtterancesToEmbeddedCues(
   };
 }
 
+interface ProcessProgressEvent {
+  stage: "extracting" | "detecting" | "generating" | "compiling";
+  label: string;
+  percent: number;
+  clipIndex?: number;
+  totalClips?: number;
+}
+
+type PreparedExtractedScene =
+  | {
+      kind: "embedded";
+      scene: SpeakingScene;
+      sceneCues: EmbeddedCue[];
+      audioBuf: Buffer | null;
+    }
+  | {
+      kind: "pcm";
+      scene: SpeakingScene;
+      fullPcm: Buffer | null;
+    };
+
+function pcmToWavBuffer(pcmSlice: Buffer, sampleRate = 16000): Buffer {
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0);
+  header.writeUInt32LE(36 + pcmSlice.length, 4);
+  header.write("WAVE", 8);
+  header.write("fmt ", 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(1, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(sampleRate * 2, 28);
+  header.writeUInt16LE(2, 32);
+  header.writeUInt16LE(16, 34);
+  header.write("data", 36);
+  header.writeUInt32LE(pcmSlice.length, 40);
+  return Buffer.concat([header, pcmSlice]);
+}
+
+async function transcribePreparedExtractedScenes(
+  scenes: SpeakingScene[],
+  extractedData: PreparedExtractedScene[],
+  translationTone: TranslationTone,
+  onProgress?: (ev: ProcessProgressEvent) => void
+) {
+  const ai = getGeminiClient();
+  const totalClips = scenes.length;
+
+  type PreparedSceneJob =
+    | {
+        mode: "embedded";
+        scene: SpeakingScene;
+        sceneCues: EmbeddedCue[];
+        audioBuf: Buffer | null;
+      }
+    | {
+        mode: "empty";
+      }
+    | {
+        mode: "audio";
+        scene: SpeakingScene;
+        fullPcm: Buffer;
+        fullRms: Float32Array;
+        fullSpeechWindows: { startSec: number; endSec: number }[];
+        subChunks: { startSec: number; endSec: number }[];
+      };
+
+  // Phase 2: Detect speech segments & plan audio chunks (40% -> 54%)
+  onProgress?.({
+    stage: "detecting",
+    label: "Detecting speech...",
+    percent: 44,
+    totalClips,
+  });
+
+  const preparedJobs: PreparedSceneJob[] = extractedData.map((item, idx) => {
+    if (item.kind === "embedded") {
+      return {
+        mode: "embedded",
+        scene: item.scene,
+        sceneCues: item.sceneCues,
+        audioBuf: item.audioBuf,
+      };
+    }
+    if (!item.fullPcm) {
+      return { mode: "empty" };
+    }
+    const fullRms = computeRmsEnvelope10ms(item.fullPcm);
+    const fullSpeechWindows = detectSpeechSegments10ms(fullRms, item.scene.durationSec);
+    const subChunks = planAudioChunks(
+      fullRms,
+      fullSpeechWindows,
+      item.scene.durationSec,
+      45
+    );
+    onProgress?.({
+      stage: "detecting",
+      label:
+        totalClips > 1
+          ? `Detecting speech (${idx + 1}/${totalClips})...`
+          : "Detecting speech...",
+      percent: Math.round(44 + ((idx + 1) / totalClips) * 10),
+      clipIndex: idx,
+      totalClips,
+    });
+    return {
+      mode: "audio",
+      scene: item.scene,
+      fullPcm: item.fullPcm,
+      fullRms,
+      fullSpeechWindows,
+      subChunks,
+    };
+  });
+
+  // Phase 3: Generate subtitles with Gemini (55% -> 94%)
+  const totalWorkUnits = Math.max(
+    1,
+    preparedJobs.reduce((sum, job) => {
+      if (job.mode === "embedded") return sum + 1;
+      if (job.mode === "audio") return sum + Math.max(1, job.subChunks.length);
+      return sum + 1;
+    }, 0)
+  );
+  let completedUnits = 0;
+
+  onProgress?.({
+    stage: "generating",
+    label: "Generating subtitles...",
+    percent: 55,
+    totalClips,
+  });
+
+  const advanceGenProgress = (clipIdx: number) => {
+    completedUnits += 1;
+    const pct = Math.min(94, Math.round(55 + (completedUnits / totalWorkUnits) * 39));
+    onProgress?.({
+      stage: "generating",
+      label:
+        totalClips > 1
+          ? `Generating subtitles (${Math.min(totalClips, clipIdx + 1)}/${totalClips})...`
+          : "Generating subtitles...",
+      percent: pct,
+      clipIndex: clipIdx,
+      totalClips,
+    });
+  };
+
+  const results = await Promise.all(
+    preparedJobs.map(async (job, idx) => {
+      if (job.mode === "empty") {
+        advanceGenProgress(idx);
+        return { hasDialogue: false, summary: "No audio", utterances: [] } as RawSceneUtterances;
+      }
+
+      if (job.mode === "embedded") {
+        const parts: Array<
+          { inlineData: { mimeType: string; data: string } } | { text: string }
+        > = [];
+        if (job.audioBuf) {
+          parts.push({
+            inlineData: { mimeType: "audio/mp3", data: job.audioBuf.toString("base64") },
+          });
+        }
+        parts.push({
+          text: getEmbeddedSubtitlesPrompt(job.scene.durationSec, job.sceneCues, translationTone),
+        });
+        const resp = await generateGroundedWithFailover(
+          ai,
+          { parts },
+          sceneTranscriptSchema,
+          ThinkingLevel.LOW
+        );
+        const rawRes = JSON.parse((resp.text || "{}").trim()) as RawSceneUtterances;
+        advanceGenProgress(idx);
+        return lockUtterancesToEmbeddedCues(rawRes, job.sceneCues);
+      }
+
+      const sc = job.scene;
+      const chunkResults = await Promise.all(
+        job.subChunks.map(async (ch) => {
+          const startFrame = Math.max(0, Math.floor(ch.startSec / 0.01));
+          const endFrame = Math.min(job.fullRms.length, Math.ceil(ch.endSec / 0.01));
+          const startByte = Math.min(job.fullPcm.length, startFrame * 320);
+          const endByte = Math.min(job.fullPcm.length, Math.max(startByte + 640, endFrame * 320));
+          const wavBuf = pcmToWavBuffer(job.fullPcm.subarray(startByte, endByte), 16000);
+
+          const chDur = Math.max(0.2, Number(((endByte - startByte) / 32000).toFixed(2)));
+          const absStart = Number((sc.startSec + startFrame * 0.01).toFixed(2));
+          const chRms = job.fullRms.subarray(startFrame, endFrame);
+          const chWindows = job.fullSpeechWindows
+            .filter((w) => w.endSec > ch.startSec + 0.05 && w.startSec < ch.endSec - 0.05)
+            .map((w) => ({
+              startSec: Number(Math.max(0, w.startSec - startFrame * 0.01).toFixed(2)),
+              endSec: Number(Math.min(chDur, w.endSec - startFrame * 0.01).toFixed(2)),
+            }));
+
+          const resp = await generateGroundedWithFailover(
+            ai,
+            {
+              parts: [
+                { inlineData: { mimeType: "audio/wav", data: wavBuf.toString("base64") } },
+                {
+                  text: getClipPrompt(
+                    chDur,
+                    absStart,
+                    absStart + chDur,
+                    chWindows,
+                    true,
+                    translationTone
+                  ),
+                },
+              ],
+            },
+            sceneTranscriptSchema,
+            ThinkingLevel.LOW
+          );
+
+          const rawChunk = JSON.parse((resp.text || "{}").trim()) as RawSceneUtterances;
+          const refinedChunk = refineUtterancesWithEnvelope(rawChunk, chRms, chDur, chWindows);
+          advanceGenProgress(idx);
+          return { chOffset: Number((startFrame * 0.01).toFixed(2)), refined: refinedChunk };
+        })
+      );
+
+      const mergedUtts: NonNullable<RawSceneUtterances["utterances"]> = [];
+      let firstSummary = "";
+      for (const item of chunkResults) {
+        if (item.refined?.summary && !firstSummary) firstSummary = item.refined.summary;
+        if (item.refined?.hasDialogue !== false && Array.isArray(item.refined?.utterances)) {
+          for (const u of item.refined.utterances) {
+            mergedUtts.push({
+              ...u,
+              startSec: Number((item.chOffset + u.startSec).toFixed(2)),
+              endSec: Number((item.chOffset + u.endSec).toFixed(2)),
+              words: Array.isArray(u.words)
+                ? u.words.map((w) => ({
+                    ...w,
+                    startSec:
+                      typeof w.startSec === "number"
+                        ? Number((item.chOffset + w.startSec).toFixed(2))
+                        : undefined,
+                    endSec:
+                      typeof w.endSec === "number"
+                        ? Number((item.chOffset + w.endSec).toFixed(2))
+                        : undefined,
+                  }))
+                : u.words,
+            });
+          }
+        }
+      }
+
+      return {
+        hasDialogue: mergedUtts.length > 0,
+        summary: firstSummary || "Scene dialogue",
+        utterances: mergedUtts,
+      } as RawSceneUtterances;
+    })
+  );
+
+  onProgress?.({
+    stage: "compiling",
+    label: "Compiling subtitles...",
+    percent: 96,
+    totalClips,
+  });
+
+  return compileSceneTranscripts(scenes, results, true);
+}
+
 async function processUploadedVideo(
   persistentPath: string,
   uploadId: string,
   title: string,
   durationSec: number,
   parsedScenes: { startSec: number; endSec: number }[],
-  translationTone: TranslationTone = "casual"
+  translationTone: TranslationTone = "casual",
+  onProgress?: (ev: ProcessProgressEvent) => void
 ) {
   const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "upload-vid-"));
   try {
@@ -2050,10 +2326,19 @@ async function processUploadedVideo(
       };
     }
 
-    const ai = getGeminiClient();
+    const totalClips = scenes.length;
+    onProgress?.({
+      stage: "extracting",
+      label: "Extracting audio...",
+      percent: 22,
+      totalClips,
+    });
+
     const embedded = await extractEmbeddedSubtitles(persistentPath, tmpDir);
 
-    const results = await Promise.all(
+    // Phase 1: Extract audio streams for each scene using fast input seeking (-ss before -i)
+    let extractedCount = 0;
+    const extractedData: PreparedExtractedScene[] = await Promise.all(
       scenes.map(async (sc, idx) => {
         const sceneCues = embedded
           ? embedded.cues
@@ -2068,19 +2353,21 @@ async function processUploadedVideo(
 
         if (sceneCues.length > 0) {
           const segAudioPath = path.join(tmpDir, `scene-${idx}.mp3`);
-          let hasAudio = false;
+          let audioBuf: Buffer | null = null;
           try {
             await execFileAsync(
               "ffmpeg",
               [
                 "-y",
-                "-vn",
-                "-i",
-                persistentPath,
                 "-ss",
                 String(sc.startSec),
+                "-i",
+                persistentPath,
                 "-t",
                 String(sc.durationSec),
+                "-vn",
+                "-sn",
+                "-dn",
                 "-ac",
                 "1",
                 "-ar",
@@ -2091,48 +2378,44 @@ async function processUploadedVideo(
               ],
               FFMPEG_EXEC_OPTS
             );
-            hasAudio = fs.existsSync(segAudioPath) && fs.statSync(segAudioPath).size > 0;
+            if (fs.existsSync(segAudioPath) && fs.statSync(segAudioPath).size > 0) {
+              audioBuf = await fs.promises.readFile(segAudioPath);
+            }
           } catch {
-            hasAudio = false;
+            audioBuf = null;
           }
-
-          const parts: Array<
-            { inlineData: { mimeType: string; data: string } } | { text: string }
-          > = [];
-          if (hasAudio) {
-            const audioBuf = await fs.promises.readFile(segAudioPath);
-            parts.push({ inlineData: { mimeType: "audio/mp3", data: audioBuf.toString("base64") } });
-          }
-          parts.push({
-            text: getEmbeddedSubtitlesPrompt(sc.durationSec, sceneCues, translationTone),
+          extractedCount += 1;
+          onProgress?.({
+            stage: "extracting",
+            label:
+              totalClips > 1
+                ? `Extracting audio (${extractedCount}/${totalClips})...`
+                : "Extracting audio...",
+            percent: Math.round(22 + (extractedCount / totalClips) * 18),
+            clipIndex: idx,
+            totalClips,
           });
-
-          const resp = await generateGroundedWithFailover(
-            ai,
-            { parts },
-            sceneTranscriptSchema
-          );
-          const rawRes = JSON.parse((resp.text || "{}").trim()) as RawSceneUtterances;
-          return lockUtterancesToEmbeddedCues(rawRes, sceneCues);
+          return { kind: "embedded" as const, scene: sc, sceneCues, audioBuf };
         }
 
-        // Extract full scene 16kHz mono PCM first so VAD & chunk boundaries are 10ms-exact
         const scenePcmPath = path.join(tmpDir, `scene-${idx}.pcm`);
-        let hasPcm = false;
+        let fullPcm: Buffer | null = null;
         try {
           await execFileAsync(
             "ffmpeg",
             [
               "-y",
-              "-vn",
-              "-i",
-              persistentPath,
-              "-af",
-              "aresample=async=1:first_pts=0",
               "-ss",
               String(sc.startSec),
+              "-i",
+              persistentPath,
               "-t",
               String(sc.durationSec),
+              "-vn",
+              "-sn",
+              "-dn",
+              "-af",
+              "aresample=async=1:first_pts=0",
               "-f",
               "s16le",
               "-ac",
@@ -2143,119 +2426,34 @@ async function processUploadedVideo(
             ],
             FFMPEG_EXEC_OPTS
           );
-          hasPcm = fs.existsSync(scenePcmPath) && fs.statSync(scenePcmPath).size > 0;
-        } catch {
-          hasPcm = false;
-        }
-
-        if (!hasPcm) {
-          return { hasDialogue: false, summary: "No audio", utterances: [] } as RawSceneUtterances;
-        }
-
-        const fullPcm = await fs.promises.readFile(scenePcmPath);
-        const fullRms = computeRmsEnvelope10ms(fullPcm);
-        const fullSpeechWindows = detectSpeechSegments10ms(fullRms, sc.durationSec);
-        const subChunks = planAudioChunks(fullRms, fullSpeechWindows, sc.durationSec, 30);
-
-        const pcmToWav = (pcmSlice: Buffer, sampleRate = 16000): Buffer => {
-          const header = Buffer.alloc(44);
-          header.write("RIFF", 0);
-          header.writeUInt32LE(36 + pcmSlice.length, 4);
-          header.write("WAVE", 8);
-          header.write("fmt ", 12);
-          header.writeUInt32LE(16, 16); // PCM chunk size
-          header.writeUInt16LE(1, 20); // PCM format
-          header.writeUInt16LE(1, 22); // mono
-          header.writeUInt32LE(sampleRate, 24);
-          header.writeUInt32LE(sampleRate * 2, 28); // byte rate
-          header.writeUInt16LE(2, 32); // block align
-          header.writeUInt16LE(16, 34); // bits per sample
-          header.write("data", 36);
-          header.writeUInt32LE(pcmSlice.length, 40);
-          return Buffer.concat([header, pcmSlice]);
-        };
-
-        const chunkResults = await Promise.all(
-          subChunks.map(async (ch) => {
-            const startFrame = Math.max(0, Math.floor(ch.startSec / 0.01));
-            const endFrame = Math.min(fullRms.length, Math.ceil(ch.endSec / 0.01));
-            const startByte = Math.min(fullPcm.length, startFrame * 320); // 160 samples * 2 bytes per 10ms frame
-            const endByte = Math.min(fullPcm.length, Math.max(startByte + 640, endFrame * 320));
-            const wavBuf = pcmToWav(fullPcm.subarray(startByte, endByte), 16000);
-
-            const chDur = Math.max(0.2, Number(((endByte - startByte) / 32000).toFixed(2)));
-            const absStart = Number((sc.startSec + startFrame * 0.01).toFixed(2));
-            const chRms = fullRms.subarray(startFrame, endFrame);
-            const chWindows = fullSpeechWindows
-              .filter((w) => w.endSec > ch.startSec + 0.05 && w.startSec < ch.endSec - 0.05)
-              .map((w) => ({
-                startSec: Number(Math.max(0, w.startSec - startFrame * 0.01).toFixed(2)),
-                endSec: Number(Math.min(chDur, w.endSec - startFrame * 0.01).toFixed(2)),
-              }));
-
-            const resp = await generateGroundedWithFailover(
-              ai,
-              {
-                parts: [
-                  { inlineData: { mimeType: "audio/wav", data: wavBuf.toString("base64") } },
-                  {
-                    text: getClipPrompt(
-                      chDur,
-                      absStart,
-                      absStart + chDur,
-                      chWindows,
-                      true,
-                      translationTone
-                    ),
-                  },
-                ],
-              },
-              sceneTranscriptSchema
-            );
-
-            const rawChunk = JSON.parse((resp.text || "{}").trim()) as RawSceneUtterances;
-            const refinedChunk = refineUtterancesWithEnvelope(rawChunk, chRms, chDur, chWindows);
-            return { chOffset: Number((startFrame * 0.01).toFixed(2)), refined: refinedChunk };
-          })
-        );
-
-        const mergedUtts: NonNullable<RawSceneUtterances["utterances"]> = [];
-        let firstSummary = "";
-        for (const item of chunkResults) {
-          if (item.refined?.summary && !firstSummary) firstSummary = item.refined.summary;
-          if (item.refined?.hasDialogue !== false && Array.isArray(item.refined?.utterances)) {
-            for (const u of item.refined.utterances) {
-              mergedUtts.push({
-                ...u,
-                startSec: Number((item.chOffset + u.startSec).toFixed(2)),
-                endSec: Number((item.chOffset + u.endSec).toFixed(2)),
-                words: Array.isArray(u.words)
-                  ? u.words.map((w) => ({
-                      ...w,
-                      startSec:
-                        typeof w.startSec === "number"
-                          ? Number((item.chOffset + w.startSec).toFixed(2))
-                          : undefined,
-                      endSec:
-                        typeof w.endSec === "number"
-                          ? Number((item.chOffset + w.endSec).toFixed(2))
-                          : undefined,
-                    }))
-                  : u.words,
-              });
-            }
+          if (fs.existsSync(scenePcmPath) && fs.statSync(scenePcmPath).size > 0) {
+            fullPcm = await fs.promises.readFile(scenePcmPath);
           }
+        } catch {
+          fullPcm = null;
         }
 
-        return {
-          hasDialogue: mergedUtts.length > 0,
-          summary: firstSummary || "Scene dialogue",
-          utterances: mergedUtts,
-        } as RawSceneUtterances;
+        extractedCount += 1;
+        onProgress?.({
+          stage: "extracting",
+          label:
+            totalClips > 1
+              ? `Extracting audio (${extractedCount}/${totalClips})...`
+              : "Extracting audio...",
+          percent: Math.round(22 + (extractedCount / totalClips) * 18),
+          clipIndex: idx,
+          totalClips,
+        });
+        return { kind: "pcm" as const, scene: sc, fullPcm };
       })
     );
 
-    const compiled = compileSceneTranscripts(scenes, results, true);
+    const compiled = await transcribePreparedExtractedScenes(
+      scenes,
+      extractedData,
+      translationTone,
+      onProgress
+    );
     if (compiled.subtitles.length === 0) {
       return {
         status: 422 as const,
@@ -2329,7 +2527,7 @@ app.post("/api/upload-init", async (req, res) => {
   }
 });
 
-// Append binary chunk to an initialized upload (with cumulative limit + idempotent offset support)
+// Append binary chunk to an initialized upload (supports concurrent random-offset pwrite + sequential fallback)
 app.post(
   "/api/upload-chunk",
   express.raw({ type: ["application/octet-stream", "video/*"], limit: "16mb" }),
@@ -2360,6 +2558,48 @@ app.post(
         return;
       }
 
+      const isParallelMode =
+        String(req.headers["x-chunk-mode"] || "") === "parallel" && declaredOffset !== undefined;
+
+      if (isParallelMode && declaredOffset !== undefined) {
+        if (declaredOffset + chunk.length > MAX_UPLOAD_BYTES) {
+          await deleteUploadSession(session.id);
+          res.status(413).json({ error: "Video upload exceeds the 500 MB server limit." });
+          return;
+        }
+        if (
+          session.expectedSize !== undefined &&
+          declaredOffset + chunk.length > session.expectedSize
+        ) {
+          await deleteUploadSession(session.id);
+          res.status(413).json({ error: "Upload exceeded declared file size." });
+          return;
+        }
+
+        const fh = await fs.promises.open(session.filePath, "r+");
+        try {
+          await fh.write(chunk, 0, chunk.length, declaredOffset);
+        } finally {
+          await fh.close();
+        }
+
+        if (session.pendingDelete) {
+          res.status(404).json({ error: "Upload session expired." });
+          return;
+        }
+        session.writtenOffsets.set(declaredOffset, chunk.length);
+        let totalWritten = 0;
+        for (const len of session.writtenOffsets.values()) {
+          totalWritten += len;
+        }
+        session.receivedBytes = totalWritten;
+        const reachedEnd =
+          session.expectedSize !== undefined && session.receivedBytes >= session.expectedSize;
+        touchUploadSession(session, reachedEnd);
+        res.status(200).json({ ok: true, receivedBytes: session.receivedBytes });
+        return;
+      }
+
       const result = await new Promise<{
         status: number;
         body: Record<string, unknown>;
@@ -2375,7 +2615,6 @@ app.post(
             }
 
             if (declaredOffset !== undefined) {
-              // Idempotent retry handling when previous chunk response was dropped
               if (
                 declaredOffset < session.receivedBytes &&
                 declaredOffset + chunk.length === session.receivedBytes
@@ -2463,26 +2702,234 @@ app.post("/api/upload-abort", async (req, res) => {
   }
 });
 
-// Process an already-uploaded video file (detects embedded subtitles first, else transcribes audio)
-app.post("/api/process-upload", async (req, res) => {
-  try {
-    const {
-      uploadId,
-      title = "Uploaded Video",
-      durationSec = 120,
-      selectedScenes = [],
-      translationTone,
-    } = req.body as {
-      uploadId?: string;
-      title?: string;
+// Fast path: transcribe pre-sliced client-extracted audio clips without uploading full multi-hundred-MB video files
+app.post("/api/process-clip-audio", async (req, res) => {
+  const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "clip-audio-"));
+  const {
+    title = "Uploaded Video",
+    durationSec = 120,
+    clips = [],
+    translationTone,
+    stream = false,
+  } = (req.body || {}) as {
+    title?: string;
+    durationSec?: number;
+    clips?: Array<{
+      startSec: number;
+      endSec: number;
+      trimLeadSec?: number;
       durationSec?: number;
-      selectedScenes?: { startSec: number; endSec: number }[];
-      translationTone?: TranslationTone;
+      audioBase64: string;
+      mimeType?: string;
+    }>;
+    translationTone?: TranslationTone;
+    stream?: boolean;
+  };
+
+  const wantStream = Boolean(stream) || Boolean(req.headers.accept?.includes("application/x-ndjson"));
+  const sendNdjson = (payload: Record<string, unknown>) => {
+    if (!res.writableEnded) {
+      res.write(`${JSON.stringify(payload)}\n`);
+    }
+  };
+  const emitProgress = (ev: ProcessProgressEvent) => {
+    if (wantStream) {
+      sendNdjson({ type: "progress", ...ev });
+    }
+  };
+
+  try {
+    if (!Array.isArray(clips) || clips.length === 0) {
+      res.status(400).json({ error: "No audio clips provided." });
+      return;
+    }
+
+    const totalDuration = Math.max(5, Number(durationSec) || 120);
+    const scenes = normalizeSelectedScenes(
+      clips.map((c) => ({ startSec: c.startSec, endSec: c.endSec })),
+      totalDuration
+    );
+    if (scenes.length === 0) {
+      res.status(400).json({ error: "Select at least one scene before generating subtitles." });
+      return;
+    }
+
+    if (wantStream) {
+      res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache, no-transform");
+      res.setHeader("X-Accel-Buffering", "no");
+      res.flushHeaders?.();
+    }
+
+    const tone = normalizeTranslationTone(translationTone);
+    const totalClips = scenes.length;
+    emitProgress({
+      stage: "extracting",
+      label: "Decoding clip audio...",
+      percent: 22,
+      totalClips,
+    });
+
+    let decodedCount = 0;
+    const extractedData: PreparedExtractedScene[] = await Promise.all(
+      scenes.map(async (sc, idx) => {
+        const clip = clips[idx];
+        const rawBuf = clip?.audioBase64 ? Buffer.from(clip.audioBase64, "base64") : null;
+        if (!rawBuf || rawBuf.length < 32) {
+          decodedCount += 1;
+          return { kind: "pcm" as const, scene: sc, fullPcm: null };
+        }
+        const ext = clip.mimeType?.includes("wav") ? ".wav" : ".m4a";
+        const inPath = path.join(tmpDir, `clip-${idx}${ext}`);
+        const outPcmPath = path.join(tmpDir, `clip-${idx}.pcm`);
+        await fs.promises.writeFile(inPath, rawBuf);
+        let fullPcm: Buffer | null = null;
+        const trimLead = Math.max(0, Number(clip.trimLeadSec) || 0);
+        try {
+          await execFileAsync(
+            "ffmpeg",
+            [
+              "-y",
+              "-ss",
+              trimLead.toFixed(4),
+              "-i",
+              inPath,
+              "-t",
+              String(sc.durationSec),
+              "-vn",
+              "-sn",
+              "-dn",
+              "-af",
+              "aresample=async=1:first_pts=0",
+              "-f",
+              "s16le",
+              "-ac",
+              "1",
+              "-ar",
+              "16000",
+              outPcmPath,
+            ],
+            FFMPEG_EXEC_OPTS
+          );
+          if (fs.existsSync(outPcmPath) && fs.statSync(outPcmPath).size > 0) {
+            fullPcm = await fs.promises.readFile(outPcmPath);
+          }
+        } catch {
+          fullPcm = null;
+        }
+        decodedCount += 1;
+        emitProgress({
+          stage: "extracting",
+          label:
+            totalClips > 1
+              ? `Preparing audio (${decodedCount}/${totalClips})...`
+              : "Preparing audio...",
+          percent: Math.round(22 + (decodedCount / totalClips) * 18),
+          clipIndex: idx,
+          totalClips,
+        });
+        return { kind: "pcm" as const, scene: sc, fullPcm };
+      })
+    );
+
+    const compiled = await transcribePreparedExtractedScenes(
+      scenes,
+      extractedData,
+      tone,
+      emitProgress
+    );
+
+    if (compiled.subtitles.length === 0) {
+      const msg = "No spoken dialogue or subtitles were detected inside your selected scenes.";
+      if (wantStream) {
+        sendNdjson({ type: "error", status: 422, error: msg });
+        res.end();
+      } else {
+        res.status(422).json({ error: msg });
+      }
+      return;
+    }
+
+    const speechRegions = compiled.subtitles.map((s) => ({
+      sourceStartSec: s.sourceStartSec,
+      sourceEndSec: s.sourceEndSec,
+    }));
+
+    const payload = {
+      sourceType: "local" as const,
+      title,
+      channel: "Local Video",
+      sourceDurationSec: totalDuration,
+      targetDurationSec: compiled.targetDurationSec,
+      scenes: compiled.scenes,
+      subtitles: compiled.subtitles,
+      speechRegions,
+      keyframeUrls: [],
     };
 
+    if (wantStream) {
+      emitProgress({
+        stage: "compiling",
+        label: "Subtitles ready",
+        percent: 100,
+        totalClips,
+      });
+      sendNdjson({ type: "result", status: 200, data: payload });
+      res.end();
+      return;
+    }
+
+    res.json(payload);
+  } catch (err) {
+    console.error("Process clip audio error:", err);
+    const msg = err instanceof Error ? err.message : "Failed to process clip audio.";
+    if (wantStream && res.headersSent) {
+      sendNdjson({ type: "error", status: 500, error: msg });
+      res.end();
+      return;
+    }
+    res.status(500).json({ error: msg });
+  } finally {
+    await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
+// Process an already-uploaded video file (detects embedded subtitles first, else transcribes audio)
+app.post("/api/process-upload", async (req, res) => {
+  const {
+    uploadId,
+    title = "Uploaded Video",
+    durationSec = 120,
+    selectedScenes = [],
+    translationTone,
+    stream = false,
+  } = req.body as {
+    uploadId?: string;
+    title?: string;
+    durationSec?: number;
+    selectedScenes?: { startSec: number; endSec: number }[];
+    translationTone?: TranslationTone;
+    stream?: boolean;
+  };
+
+  const wantStream = Boolean(stream) || Boolean(req.headers.accept?.includes("application/x-ndjson"));
+  const sendNdjson = (payload: Record<string, unknown>) => {
+    if (!res.writableEnded) {
+      res.write(`${JSON.stringify(payload)}\n`);
+    }
+  };
+
+  try {
     if (!uploadId) {
       res.status(404).json({ error: "Uploaded video file not found. Please try again." });
       return;
+    }
+
+    if (wantStream) {
+      res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache, no-transform");
+      res.setHeader("X-Accel-Buffering", "no");
+      res.flushHeaders?.();
     }
 
     const tone = normalizeTranslationTone(translationTone);
@@ -2495,22 +2942,56 @@ app.post("/api/process-upload", async (req, res) => {
           title,
           Math.max(5, Number(durationSec) || 120),
           selectedScenes,
-          tone
+          tone,
+          wantStream ? (ev) => sendNdjson({ type: "progress", ...ev }) : undefined
         ),
       { markFinalized: true }
     );
 
     if (!lockedResult) {
-      res.status(404).json({ error: "Uploaded video file not found. Please try again." });
+      if (wantStream) {
+        sendNdjson({
+          type: "error",
+          status: 404,
+          error: "Uploaded video file not found. Please try again.",
+        });
+        res.end();
+      } else {
+        res.status(404).json({ error: "Uploaded video file not found. Please try again." });
+      }
+      return;
+    }
+
+    if (wantStream) {
+      if (lockedResult.status !== 200) {
+        sendNdjson({
+          type: "error",
+          status: lockedResult.status,
+          error: (lockedResult.body as { error?: string }).error || "Failed to process uploaded video.",
+        });
+      } else {
+        sendNdjson({
+          type: "progress",
+          stage: "compiling",
+          label: "Subtitles ready",
+          percent: 100,
+        });
+        sendNdjson({ type: "result", status: 200, data: lockedResult.body });
+      }
+      res.end();
       return;
     }
 
     res.status(lockedResult.status).json(lockedResult.body);
   } catch (err) {
     console.error("Process upload error:", err);
-    res.status(500).json({
-      error: err instanceof Error ? err.message : "Failed to process uploaded video.",
-    });
+    const msg = err instanceof Error ? err.message : "Failed to process uploaded video.";
+    if (wantStream && res.headersSent) {
+      sendNdjson({ type: "error", status: 500, error: msg });
+      res.end();
+      return;
+    }
+    res.status(500).json({ error: msg });
   }
 });
 
@@ -2598,23 +3079,37 @@ app.post(
 
 // Transcribe ONLY the user-selected multiple scenes from a YouTube video
 app.post("/api/process-video", async (req, res) => {
-  try {
-    const {
-      videoId,
-      title,
-      channel,
-      durationSec = 180,
-      selectedScenes = [],
-      translationTone,
-    } = req.body as {
-      videoId?: string;
-      title?: string;
-      channel?: string;
-      durationSec?: number;
-      selectedScenes?: { startSec: number; endSec: number }[];
-      translationTone?: TranslationTone;
-    };
+  const {
+    videoId,
+    title,
+    channel,
+    durationSec = 180,
+    selectedScenes = [],
+    translationTone,
+    stream = false,
+  } = req.body as {
+    videoId?: string;
+    title?: string;
+    channel?: string;
+    durationSec?: number;
+    selectedScenes?: { startSec: number; endSec: number }[];
+    translationTone?: TranslationTone;
+    stream?: boolean;
+  };
 
+  const wantStream = Boolean(stream) || Boolean(req.headers.accept?.includes("application/x-ndjson"));
+  const sendNdjson = (payload: Record<string, unknown>) => {
+    if (!res.writableEnded) {
+      res.write(`${JSON.stringify(payload)}\n`);
+    }
+  };
+  const emitProgress = (ev: ProcessProgressEvent) => {
+    if (wantStream) {
+      sendNdjson({ type: "progress", ...ev });
+    }
+  };
+
+  try {
     if (!videoId) {
       res.status(400).json({ error: "Missing YouTube videoId." });
       return;
@@ -2627,11 +3122,52 @@ app.post("/api/process-video", async (req, res) => {
       return;
     }
 
-    const ai = getGeminiClient();
+    if (wantStream) {
+      res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache, no-transform");
+      res.setHeader("X-Accel-Buffering", "no");
+      res.flushHeaders?.();
+    }
 
+    const ai = getGeminiClient();
+    const totalClips = scenes.length;
+    emitProgress({
+      stage: "extracting",
+      label:
+        totalClips === 1
+          ? "Preparing clip stream..."
+          : `Preparing ${totalClips} clip streams...`,
+      percent: 18,
+      clipIndex: 1,
+      totalClips,
+    });
+
+    emitProgress({
+      stage: "detecting",
+      label:
+        totalClips === 1
+          ? "Detecting speech in clip..."
+          : `Detecting speech in ${totalClips} clips...`,
+      percent: 32,
+      clipIndex: 1,
+      totalClips,
+    });
+
+    emitProgress({
+      stage: "generating",
+      label:
+        totalClips === 1
+          ? "Generating Thai & Burmese subtitles..."
+          : `Generating subtitles (0/${totalClips} clips)...`,
+      percent: 42,
+      clipIndex: 1,
+      totalClips,
+    });
+
+    let completedClips = 0;
     // Analyze each user-selected scene individually with exact startOffset / endOffset
     const results = await Promise.all(
-      scenes.map(async (sc) => {
+      scenes.map(async (sc, idx) => {
         const resp = await generateGroundedWithFailover(
           ai,
           [
@@ -2661,17 +3197,41 @@ app.post("/api/process-video", async (req, res) => {
               ],
             },
           ],
-          sceneTranscriptSchema
+          sceneTranscriptSchema,
+          ThinkingLevel.LOW
         );
+        completedClips++;
+        const pct = 42 + Math.round((completedClips / Math.max(1, totalClips)) * 48);
+        emitProgress({
+          stage: "generating",
+          label:
+            totalClips === 1
+              ? "Translating Thai dialogue..."
+              : `Generating subtitles (${completedClips}/${totalClips} clips)...`,
+          percent: Math.min(92, pct),
+          clipIndex: idx + 1,
+          totalClips,
+        });
         return JSON.parse((resp.text || "{}").trim()) as RawSceneUtterances;
       })
     );
 
+    emitProgress({
+      stage: "compiling",
+      label: "Compiling & syncing subtitles...",
+      percent: 96,
+      totalClips,
+    });
+
     const compiled = compileSceneTranscripts(scenes, results);
     if (compiled.subtitles.length === 0) {
-      res.status(422).json({
-        error: "No spoken dialogue was detected inside your selected scenes.",
-      });
+      const msg = "No spoken dialogue was detected inside your selected scenes.";
+      if (wantStream) {
+        sendNdjson({ type: "error", status: 422, error: msg });
+        res.end();
+      } else {
+        res.status(422).json({ error: msg });
+      }
       return;
     }
 
@@ -2688,8 +3248,8 @@ app.post("/api/process-video", async (req, res) => {
       sourceEndSec: s.sourceEndSec,
     }));
 
-    res.json({
-      sourceType: "youtube",
+    const payload = {
+      sourceType: "youtube" as const,
       videoId,
       title: title || "YouTube Video",
       channel: channel || "YouTube",
@@ -2699,12 +3259,30 @@ app.post("/api/process-video", async (req, res) => {
       subtitles: compiled.subtitles,
       speechRegions,
       keyframeUrls,
-    });
+    };
+
+    if (wantStream) {
+      emitProgress({
+        stage: "compiling",
+        label: "Subtitles ready",
+        percent: 100,
+        totalClips,
+      });
+      sendNdjson({ type: "result", status: 200, data: payload });
+      res.end();
+      return;
+    }
+
+    res.json(payload);
   } catch (err) {
     console.error("Process video error:", err);
-    res.status(500).json({
-      error: err instanceof Error ? err.message : "Failed to transcribe selected scenes.",
-    });
+    const msg = err instanceof Error ? err.message : "Failed to transcribe selected scenes.";
+    if (wantStream && res.headersSent) {
+      sendNdjson({ type: "error", status: 500, error: msg });
+      res.end();
+      return;
+    }
+    res.status(500).json({ error: msg });
   }
 });
 
@@ -2763,6 +3341,8 @@ app.post("/api/regenerate-subtitle", async (req, res) => {
       sourceType,
       videoId,
       uploadId,
+      clipAudioBase64,
+      clipMimeType,
       subtitle,
       prevContext,
       nextContext,
@@ -2772,6 +3352,8 @@ app.post("/api/regenerate-subtitle", async (req, res) => {
       sourceType?: "local" | "youtube";
       videoId?: string;
       uploadId?: string;
+      clipAudioBase64?: string;
+      clipMimeType?: string;
       subtitle?: {
         id?: string;
         startTime?: number;
@@ -2830,7 +3412,25 @@ app.post("/api/regenerate-subtitle", async (req, res) => {
 - burmese: ${subtitle.burmese || "(none)"}`;
 
     let audioBase64: string | null = null;
-    if (sourceType === "local" && uploadId) {
+    if (sourceType === "local" && clipAudioBase64) {
+      const rawBuf = Buffer.from(clipAudioBase64, "base64");
+      const ext = clipMimeType?.includes("wav") ? ".wav" : ".m4a";
+      const inClip = path.join(tmpDir, `inline-line${ext}`);
+      const wavPath = path.join(tmpDir, "line.wav");
+      try {
+        await fs.promises.writeFile(inClip, rawBuf);
+        await execFileAsync(
+          "ffmpeg",
+          ["-y", "-vn", "-i", inClip, "-ac", "1", "-ar", "16000", wavPath],
+          FFMPEG_EXEC_OPTS
+        );
+        if (fs.existsSync(wavPath) && fs.statSync(wavPath).size > 44) {
+          audioBase64 = (await fs.promises.readFile(wavPath)).toString("base64");
+        }
+      } catch {
+        audioBase64 = null;
+      }
+    } else if (sourceType === "local" && uploadId) {
       audioBase64 = await withUploadSessionLock(uploadId, async (uploadedPath) => {
         const clipStart = Math.max(0, srcStart - 0.18);
         const clipDur = Math.max(0.5, srcEnd - clipStart + 0.18);
@@ -2840,13 +3440,15 @@ app.post("/api/regenerate-subtitle", async (req, res) => {
             "ffmpeg",
             [
               "-y",
-              "-vn",
               "-ss",
               clipStart.toFixed(3),
-              "-t",
-              clipDur.toFixed(3),
               "-i",
               uploadedPath,
+              "-t",
+              clipDur.toFixed(3),
+              "-vn",
+              "-sn",
+              "-dn",
               "-ac",
               "1",
               "-ar",
@@ -3146,12 +3748,19 @@ app.post("/api/resync-subtitles", async (req, res) => {
       sourceType,
       videoId,
       uploadId,
+      clipsAudio,
       scenes = [],
       subtitles = [],
     } = (req.body || {}) as {
       sourceType?: "local" | "youtube";
       videoId?: string;
       uploadId?: string;
+      clipsAudio?: Array<{
+        trimLeadSec?: number;
+        durationSec: number;
+        audioBase64: string;
+        mimeType?: string;
+      }>;
       scenes?: { startSec: number; endSec: number; durationSec?: number }[];
       subtitles?: Array<{
         id: string;
@@ -3197,35 +3806,37 @@ app.post("/api/resync-subtitles", async (req, res) => {
     const ai = getGeminiClient();
 
     if (sourceType === "local") {
-      if (!uploadId) {
-        res.status(404).json({ error: "Uploaded video session not found." });
-        return;
-      }
+      let audioPrep: {
+        mp3Base64: string;
+        rms: Float32Array;
+        speechWindows: SpeechWindow[];
+      } | null = null;
 
-      const audioPrep = await withUploadSessionLock(uploadId, async (uploadedPath) => {
+      if (Array.isArray(clipsAudio) && clipsAudio.length > 0) {
         const pcmBuffers: Buffer[] = [];
-        const sceneList =
-          normalizedScenes.length > 0
-            ? normalizedScenes
-            : [{ startSec: 0, endSec: totalCutDur, durationSec: totalCutDur }];
-
-        for (let i = 0; i < sceneList.length; i++) {
-          const sc = sceneList[i];
-          const scPcmPath = path.join(tmpDir, `sc-${i}.pcm`);
+        for (let i = 0; i < clipsAudio.length; i++) {
+          const clip = clipsAudio[i];
+          const dur = Math.max(0.2, Number(clip.durationSec) || 1);
+          const ext = clip.mimeType?.includes("wav") ? ".wav" : ".m4a";
+          const inClip = path.join(tmpDir, `inline-sc-${i}${ext}`);
+          const scPcmPath = path.join(tmpDir, `inline-sc-${i}.pcm`);
           try {
+            await fs.promises.writeFile(inClip, Buffer.from(clip.audioBase64, "base64"));
             await execFileAsync(
               "ffmpeg",
               [
                 "-y",
-                "-vn",
+                "-ss",
+                Math.max(0, Number(clip.trimLeadSec) || 0).toFixed(4),
                 "-i",
-                uploadedPath,
+                inClip,
+                "-t",
+                dur.toFixed(3),
+                "-vn",
+                "-sn",
+                "-dn",
                 "-af",
                 "aresample=async=1:first_pts=0",
-                "-ss",
-                sc.startSec.toFixed(3),
-                "-t",
-                sc.durationSec.toFixed(3),
                 "-f",
                 "s16le",
                 "-ac",
@@ -3240,48 +3851,131 @@ app.post("/api/resync-subtitles", async (req, res) => {
               pcmBuffers.push(await fs.promises.readFile(scPcmPath));
             }
           } catch {
-            // Append silent frame buffer matching scene duration if audio track is missing in segment
-            const silentBytes = Math.max(320, Math.round(sc.durationSec * 16000) * 2);
+            const silentBytes = Math.max(320, Math.round(dur * 16000) * 2);
             pcmBuffers.push(Buffer.alloc(silentBytes));
           }
         }
-
         const cutPcm = Buffer.concat(pcmBuffers);
-        if (cutPcm.length < 640) {
-          return null;
+        if (cutPcm.length >= 640) {
+          const cutPcmPath = path.join(tmpDir, "cut-all.pcm");
+          const cutMp3Path = path.join(tmpDir, "cut-all.mp3");
+          await fs.promises.writeFile(cutPcmPath, cutPcm);
+          await execFileAsync(
+            "ffmpeg",
+            [
+              "-y",
+              "-f",
+              "s16le",
+              "-ar",
+              "16000",
+              "-ac",
+              "1",
+              "-i",
+              cutPcmPath,
+              "-b:a",
+              "32k",
+              cutMp3Path,
+            ],
+            FFMPEG_EXEC_OPTS
+          );
+          const mp3Buf = await fs.promises.readFile(cutMp3Path);
+          const rms = computeRmsEnvelope10ms(cutPcm);
+          const speechWindows = detectSpeechSegments10ms(rms, totalCutDur);
+          audioPrep = {
+            mp3Base64: mp3Buf.toString("base64"),
+            rms,
+            speechWindows,
+          };
+        }
+      } else {
+        if (!uploadId) {
+          res.status(404).json({ error: "Uploaded video session not found." });
+          return;
         }
 
-        const cutPcmPath = path.join(tmpDir, "cut-all.pcm");
-        const cutMp3Path = path.join(tmpDir, "cut-all.mp3");
-        await fs.promises.writeFile(cutPcmPath, cutPcm);
-        await execFileAsync(
-          "ffmpeg",
-          [
-            "-y",
-            "-f",
-            "s16le",
-            "-ar",
-            "16000",
-            "-ac",
-            "1",
-            "-i",
-            cutPcmPath,
-            "-b:a",
-            "32k",
-            cutMp3Path,
-          ],
-          FFMPEG_EXEC_OPTS
-        );
+        audioPrep = await withUploadSessionLock(uploadId, async (uploadedPath) => {
+          const pcmBuffers: Buffer[] = [];
+          const sceneList =
+            normalizedScenes.length > 0
+              ? normalizedScenes
+              : [{ startSec: 0, endSec: totalCutDur, durationSec: totalCutDur }];
 
-        const mp3Buf = await fs.promises.readFile(cutMp3Path);
-        const rms = computeRmsEnvelope10ms(cutPcm);
-        const speechWindows = detectSpeechSegments10ms(rms, totalCutDur);
-        return {
-          mp3Base64: mp3Buf.toString("base64"),
-          rms,
-          speechWindows,
-        };
-      });
+          for (let i = 0; i < sceneList.length; i++) {
+            const sc = sceneList[i];
+            const scPcmPath = path.join(tmpDir, `sc-${i}.pcm`);
+            try {
+              await execFileAsync(
+                "ffmpeg",
+                [
+                  "-y",
+                  "-ss",
+                  sc.startSec.toFixed(3),
+                  "-i",
+                  uploadedPath,
+                  "-t",
+                  sc.durationSec.toFixed(3),
+                  "-vn",
+                  "-sn",
+                  "-dn",
+                  "-af",
+                  "aresample=async=1:first_pts=0",
+                  "-f",
+                  "s16le",
+                  "-ac",
+                  "1",
+                  "-ar",
+                  "16000",
+                  scPcmPath,
+                ],
+                FFMPEG_EXEC_OPTS
+              );
+              if (fs.existsSync(scPcmPath)) {
+                pcmBuffers.push(await fs.promises.readFile(scPcmPath));
+              }
+            } catch {
+              // Append silent frame buffer matching scene duration if audio track is missing in segment
+              const silentBytes = Math.max(320, Math.round(sc.durationSec * 16000) * 2);
+              pcmBuffers.push(Buffer.alloc(silentBytes));
+            }
+          }
+
+          const cutPcm = Buffer.concat(pcmBuffers);
+          if (cutPcm.length < 640) {
+            return null;
+          }
+
+          const cutPcmPath = path.join(tmpDir, "cut-all.pcm");
+          const cutMp3Path = path.join(tmpDir, "cut-all.mp3");
+          await fs.promises.writeFile(cutPcmPath, cutPcm);
+          await execFileAsync(
+            "ffmpeg",
+            [
+              "-y",
+              "-f",
+              "s16le",
+              "-ar",
+              "16000",
+              "-ac",
+              "1",
+              "-i",
+              cutPcmPath,
+              "-b:a",
+              "32k",
+              cutMp3Path,
+            ],
+            FFMPEG_EXEC_OPTS
+          );
+
+          const mp3Buf = await fs.promises.readFile(cutMp3Path);
+          const rms = computeRmsEnvelope10ms(cutPcm);
+          const speechWindows = detectSpeechSegments10ms(rms, totalCutDur);
+          return {
+            mp3Base64: mp3Buf.toString("base64"),
+            rms,
+            speechWindows,
+          };
+        });
+      }
 
       if (!audioPrep) {
         res.status(404).json({ error: "Uploaded video session not found." });

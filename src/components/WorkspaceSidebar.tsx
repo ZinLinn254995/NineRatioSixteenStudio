@@ -1,4 +1,12 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+  type TouchEvent as ReactTouchEvent,
+} from "react";
 import {
   BookOpen,
   Captions,
@@ -27,6 +35,7 @@ import {
   Square,
   Trash2,
   Undo2,
+  Upload,
   Wand2,
   X,
 } from "lucide-react";
@@ -36,6 +45,7 @@ import type {
   SceneSelection,
   SpeakingScene,
   SubtitleFontScale,
+  SubtitleGenerationProgress,
   SubtitleHighlightColor,
   SubtitleItem,
   SubtitleTheme,
@@ -50,6 +60,7 @@ import { ScenePicker } from "./ScenePicker";
 import { YouTubePreviewPanel } from "./YouTubePreviewPanel";
 import { VideoEditPanel, getVideoEditDirtyMap } from "./VideoEditPanel";
 import { ProjectTimelineEditor } from "./ProjectTimelineEditor";
+import { DEFAULT_STAGE_PREVIEW_SCALE, getCompactStageBounds } from "./Stage9x16";
 import { SavedProjectsPanel } from "./SavedProjectsPanel";
 import { DEFAULT_VOICE_SETTINGS, getEffectivePlaybackSpeed } from "../utils/voicePresets";
 import { findActiveSubtitle, getSceneDurationSec } from "../utils/projectTimeline";
@@ -62,13 +73,12 @@ import {
   makeSafeFileSlug,
 } from "../utils/exportSubtitles";
 
-export type WorkspaceTab = "youtube" | "scenes" | "studio" | "projects";
+export type WorkspaceTab = "youtube" | "studio" | "projects";
 
-export type StudioSectionId = "captions" | "visual" | "audio" | "timeline";
+export type StudioSectionId = "clips" | "captions" | "visual" | "audio" | "timeline";
 
 interface WorkspaceSidebarProps {
   activeTab: WorkspaceTab;
-  onTabChange: (tab: WorkspaceTab) => void;
   isWorkspaceVisible?: boolean;
   videos: YouTubeVideo[];
   selectedVideoId?: string;
@@ -84,11 +94,16 @@ interface WorkspaceSidebarProps {
   editSettings: VideoEditSettings;
   isSearching: boolean;
   isProcessing: boolean;
+  generationProgress?: SubtitleGenerationProgress | null;
+  clipSubtitleCounts?: Record<string, number>;
+  regeneratingClipId?: string | null;
+  regeneratingClipPercent?: number | null;
   isPlaying: boolean;
   timelineDirty: boolean;
   searchError: string | null;
   project: VideoProject | null;
   cutTime: number;
+  subscribeCutTime?: (listener: (sec: number) => void) => () => void;
   savedProjects: SavedProjectRecord[];
   activeSavedId: string | null;
   canSaveCurrent: boolean;
@@ -106,6 +121,7 @@ interface WorkspaceSidebarProps {
   onDetectedLocalDuration: (dur: number) => void;
   onDetectedYouTubeDuration: (dur: number) => void;
   onGenerateSubtitles: () => void;
+  onGenerateSingleClip?: (sceneId: string) => void;
   onCancelGenerateSubtitles?: () => void;
   onChangeVoiceSettings: (next: VoiceSettings) => void;
   onChangeEditSettings: (next: VideoEditSettings) => void;
@@ -175,6 +191,9 @@ interface WorkspaceSidebarProps {
   ytSeekRequest?: { sec: number; nonce: number } | null;
   onYtCurrentSecChange?: (sec: number) => void;
   inlineStage?: ReactNode;
+  isMobileStudio?: boolean;
+  stagePreviewScale?: number;
+  onChangeStagePreviewScale?: (scale: number) => void;
   searchInput: string;
   onChangeSearchInput: (value: string) => void;
   onSubmitSearch: () => void;
@@ -207,7 +226,6 @@ function formatRangeSec(sec: number): string {
 
 export function WorkspaceSidebar({
   activeTab,
-  onTabChange,
   isWorkspaceVisible = true,
   videos,
   selectedVideoId,
@@ -223,11 +241,16 @@ export function WorkspaceSidebar({
   editSettings,
   isSearching,
   isProcessing,
+  generationProgress = null,
+  clipSubtitleCounts,
+  regeneratingClipId = null,
+  regeneratingClipPercent = null,
   isPlaying,
   timelineDirty,
   searchError,
   project,
   cutTime,
+  subscribeCutTime,
   savedProjects,
   activeSavedId,
   canSaveCurrent,
@@ -245,6 +268,7 @@ export function WorkspaceSidebar({
   onDetectedLocalDuration,
   onDetectedYouTubeDuration,
   onGenerateSubtitles,
+  onGenerateSingleClip,
   onCancelGenerateSubtitles,
   onChangeVoiceSettings,
   onChangeEditSettings,
@@ -295,6 +319,9 @@ export function WorkspaceSidebar({
   ytSeekRequest,
   onYtCurrentSecChange,
   inlineStage,
+  isMobileStudio = false,
+  stagePreviewScale,
+  onChangeStagePreviewScale,
   searchInput,
   onChangeSearchInput,
   onSubmitSearch,
@@ -305,6 +332,28 @@ export function WorkspaceSidebar({
 }: WorkspaceSidebarProps) {
   const scrollRootRef = useRef<HTMLDivElement | null>(null);
   const loadMoreSentinelRef = useRef<HTMLDivElement | null>(null);
+  const mobileStageWrapperRef = useRef<HTMLDivElement | null>(null);
+  const [mobileClipsStageEl, setMobileClipsStageEl] = useState<HTMLDivElement | null>(null);
+  const [mobileStageWidth, setMobileStageWidth] = useState<number>(() =>
+    typeof window !== "undefined"
+      ? document.documentElement?.clientWidth || window.innerWidth
+      : 390
+  );
+  const [viewportHeight, setViewportHeight] = useState<number>(() =>
+    typeof window !== "undefined" ? window.innerHeight : 800
+  );
+  const [localClipsScale, setLocalClipsScale] = useState<number>(DEFAULT_STAGE_PREVIEW_SCALE);
+  const [isClipsResizing, setIsClipsResizing] = useState(false);
+  const clipsDragStartRef = useRef<{
+    startY: number;
+    startScale: number;
+    spanHeightPx: number;
+    pointerId: number | null;
+    source: "pointer" | "touch";
+  } | null>(null);
+  const clipsDragCleanupRef = useRef<(() => void) | null>(null);
+  const onChangeStagePreviewScaleRef = useRef(onChangeStagePreviewScale);
+  onChangeStagePreviewScaleRef.current = onChangeStagePreviewScale;
   const [showAddSub, setShowAddSub] = useState(false);
   const [newSubStart, setNewSubStart] = useState("0.0");
   const [newSubEnd, setNewSubEnd] = useState("2.5");
@@ -348,6 +397,175 @@ export function WorkspaceSidebar({
     const t = setTimeout(() => setReplaceFeedback(null), 2600);
     return () => clearTimeout(t);
   }, [replaceFeedback]);
+
+  useEffect(() => {
+    const updateViewport = () => {
+      setViewportHeight(window.innerHeight);
+    };
+    window.addEventListener("resize", updateViewport);
+    return () => window.removeEventListener("resize", updateViewport);
+  }, []);
+
+  useEffect(() => {
+    const el = mobileStageWrapperRef.current;
+    if (!el) return;
+    const updateWidth = () => {
+      if (el.clientWidth > 0) setMobileStageWidth(el.clientWidth);
+    };
+    updateWidth();
+    const ro = new ResizeObserver(updateWidth);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [isMobileStudio, activeTab]);
+
+  useEffect(() => {
+    return () => {
+      clipsDragCleanupRef.current?.();
+      clipsDragCleanupRef.current = null;
+      clipsDragStartRef.current = null;
+    };
+  }, []);
+
+  const effectiveClipsScale = stagePreviewScale ?? localClipsScale;
+  const updateClipsScale = (next: number) => {
+    setLocalClipsScale(next);
+    onChangeStagePreviewScaleRef.current?.(next);
+  };
+
+  const compactBounds = getCompactStageBounds(
+    mobileStageWidth > 0 ? mobileStageWidth : 390,
+    viewportHeight
+  );
+  const clampedClipsScale = Math.max(0, Math.min(1, effectiveClipsScale));
+  const clipsWidthPx = Math.round(
+    compactBounds.minWidthPx + clampedClipsScale * compactBounds.spanWidthPx
+  );
+  const clipsHeightPx = Math.round(
+    compactBounds.minHeightPx + clampedClipsScale * compactBounds.spanHeightPx
+  );
+  const isClipsFullWidth =
+    clampedClipsScale >= 0.999 && compactBounds.maxWidthPx >= compactBounds.availWidth;
+  const clipsSpanHeightPx = compactBounds.spanHeightPx;
+  const clipsScaleLabel =
+    clampedClipsScale < 0.28 ? "Small" : clampedClipsScale > 0.72 ? "Large" : "Normal";
+
+  const applyClipsDragClientY = (clientY: number) => {
+    const active = clipsDragStartRef.current;
+    if (!active) return;
+    const dy = clientY - active.startY;
+    const nextScale = Math.max(0, Math.min(1, active.startScale + dy / active.spanHeightPx));
+    updateClipsScale(Number(nextScale.toFixed(4)));
+  };
+
+  const endClipsDragResize = () => {
+    clipsDragCleanupRef.current?.();
+    clipsDragCleanupRef.current = null;
+    if (!clipsDragStartRef.current) return;
+    clipsDragStartRef.current = null;
+    setIsClipsResizing(false);
+  };
+
+  const beginClipsDragSession = (
+    startY: number,
+    source: "pointer" | "touch",
+    pointerId: number | null
+  ) => {
+    clipsDragCleanupRef.current?.();
+    clipsDragStartRef.current = {
+      startY,
+      startScale: clampedClipsScale,
+      spanHeightPx: clipsSpanHeightPx,
+      pointerId,
+      source,
+    };
+    setIsClipsResizing(true);
+
+    const onWinPointerMove = (ev: PointerEvent) => {
+      const active = clipsDragStartRef.current;
+      if (!active || active.source !== "pointer") return;
+      if (active.pointerId !== null && ev.pointerId !== active.pointerId) return;
+      if (ev.cancelable) ev.preventDefault();
+      applyClipsDragClientY(ev.clientY);
+    };
+
+    const onWinPointerEnd = (ev: PointerEvent) => {
+      const active = clipsDragStartRef.current;
+      if (!active || active.source !== "pointer") return;
+      if (active.pointerId !== null && ev.pointerId !== active.pointerId) return;
+      endClipsDragResize();
+    };
+
+    const onWinTouchMove = (ev: TouchEvent) => {
+      const active = clipsDragStartRef.current;
+      if (!active) return;
+      if (ev.cancelable) ev.preventDefault();
+      if (active.source === "touch" && ev.touches.length > 0) {
+        applyClipsDragClientY(ev.touches[0].clientY);
+      }
+    };
+
+    const onWinTouchEnd = () => {
+      const active = clipsDragStartRef.current;
+      if (!active) return;
+      endClipsDragResize();
+    };
+
+    window.addEventListener("pointermove", onWinPointerMove, { passive: false });
+    window.addEventListener("pointerup", onWinPointerEnd);
+    window.addEventListener("pointercancel", onWinPointerEnd);
+    window.addEventListener("touchmove", onWinTouchMove, { passive: false });
+    window.addEventListener("touchend", onWinTouchEnd);
+    window.addEventListener("touchcancel", onWinTouchEnd);
+
+    clipsDragCleanupRef.current = () => {
+      window.removeEventListener("pointermove", onWinPointerMove);
+      window.removeEventListener("pointerup", onWinPointerEnd);
+      window.removeEventListener("pointercancel", onWinPointerEnd);
+      window.removeEventListener("touchmove", onWinTouchMove);
+      window.removeEventListener("touchend", onWinTouchEnd);
+      window.removeEventListener("touchcancel", onWinTouchEnd);
+    };
+  };
+
+  const handleClipsDragPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0 && e.pointerType === "mouse") return;
+    e.preventDefault();
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      // ignore if capture unavailable
+    }
+    beginClipsDragSession(e.clientY, "pointer", e.pointerId);
+  };
+
+  const handleClipsDragTouchStart = (e: ReactTouchEvent<HTMLDivElement>) => {
+    if (clipsDragStartRef.current) return;
+    if (e.touches.length !== 1) return;
+    beginClipsDragSession(e.touches[0].clientY, "touch", null);
+  };
+
+  const handleClipsDragDoubleClick = () => {
+    updateClipsScale(clampedClipsScale >= 0.99 ? 0.5 : DEFAULT_STAGE_PREVIEW_SCALE);
+  };
+
+  const handleClipsDragKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (e.key === "ArrowUp" || e.key === "ArrowLeft") {
+      e.preventDefault();
+      updateClipsScale(Math.max(0, Number((clampedClipsScale - 0.05).toFixed(2))));
+    } else if (e.key === "ArrowDown" || e.key === "ArrowRight") {
+      e.preventDefault();
+      updateClipsScale(Math.min(1, Number((clampedClipsScale + 0.05).toFixed(2))));
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      updateClipsScale(0);
+    } else if (e.key === "End") {
+      e.preventDefault();
+      updateClipsScale(1);
+    } else if (e.key === "0" || e.key === "Enter") {
+      e.preventDefault();
+      updateClipsScale(DEFAULT_STAGE_PREVIEW_SCALE);
+    }
+  };
 
   const jumpToActiveSubtitle = () => {
     if (!project || project.subtitles.length === 0) return;
@@ -414,11 +632,20 @@ export function WorkspaceSidebar({
     count?: number;
   }[] = [
     {
+      id: "clips",
+      label: "Upload & Cut",
+      icon: Upload,
+      count: !project && selectedScenes.length > 0 ? selectedScenes.length : undefined,
+    },
+    {
       id: "captions",
       label: "Captions",
       icon: Captions,
       count: project?.subtitles.length,
     },
+    ...(showMobileTimelineTab
+      ? [{ id: "timeline" as const, label: "Timeline", icon: Scissors, dirty: timelineDirty }]
+      : []),
     {
       id: "visual",
       label: "Video & Look",
@@ -431,11 +658,9 @@ export function WorkspaceSidebar({
       icon: Mic,
       dirty: dirtyMap.audioDirty,
     },
-    ...(showMobileTimelineTab
-      ? [{ id: "timeline" as const, label: "Timeline", icon: Scissors, dirty: timelineDirty }]
-      : []),
   ];
 
+  const hasStudioVideo = Boolean(localMedia || project);
   const isStudioView = activeTab === "studio";
 
   const studioHeaderDuration = project
@@ -451,14 +676,81 @@ export function WorkspaceSidebar({
 
   return (
     <div className="flex flex-col h-full min-h-0">
-      {/* Inline 9:16 Stage directly on top in compact mobile/tablet Studio view */}
-      {inlineStage && (
-        <div className="bg-[#e6e9ef] dark:bg-[#07080a] pt-2.5 shrink-0 flex justify-center">
-          {inlineStage}
+      {/* Inline Stage directly on top in compact mobile/tablet Studio view */}
+      {(inlineStage || isMobileStudio) && (
+        <div
+          ref={mobileStageWrapperRef}
+          className={
+            isStudioView
+              ? "bg-[#e6e9ef] dark:bg-[#07080a] shrink-0"
+              : "hidden"
+          }
+        >
+          {inlineStage && (
+            <div
+              className={
+                isMobileStudio && studioSection === "clips"
+                  ? "hidden"
+                  : "pt-2.5 w-full flex justify-center"
+              }
+            >
+              {inlineStage}
+            </div>
+          )}
+          {isMobileStudio && (
+            <div
+              className={
+                studioSection === "clips"
+                  ? "w-full flex flex-col items-center"
+                  : "hidden"
+              }
+            >
+              <div className="w-full px-2.5 pt-2.5 pb-2 flex justify-center">
+                <div
+                  ref={setMobileClipsStageEl}
+                  style={{
+                    width: isClipsFullWidth ? "100%" : `${clipsWidthPx}px`,
+                    height: `${clipsHeightPx}px`,
+                  }}
+                  className={`max-w-full ${
+                    isClipsResizing ? "transition-none" : "transition-[width,height] duration-150"
+                  }`}
+                />
+              </div>
+              <div
+                role="slider"
+                tabIndex={0}
+                aria-label="Resize 16:9 preview (drag up to shrink, down to enlarge, double-click to toggle)"
+                aria-orientation="vertical"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={Math.round(clampedClipsScale * 100)}
+                title="Drag up to shrink · Drag down to enlarge · Double-click to toggle size"
+                onPointerDown={handleClipsDragPointerDown}
+                onTouchStart={handleClipsDragTouchStart}
+                onDoubleClick={handleClipsDragDoubleClick}
+                onKeyDown={handleClipsDragKeyDown}
+                className="relative group w-full h-6 shrink-0 flex items-center justify-center cursor-ns-resize touch-none select-none border-b border-[#dde2e9] dark:border-[#242a34] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-700 dark:focus-visible:ring-teal-400"
+              >
+                <span
+                  className={`h-1 rounded-full transition-all ${
+                    isClipsResizing
+                      ? "w-16 bg-teal-700 dark:bg-teal-400"
+                      : "w-10 bg-[#b8c2d0] dark:bg-[#323a48] group-hover:w-14 group-hover:bg-teal-700/80 dark:group-hover:bg-teal-400/80"
+                  }`}
+                />
+                {isClipsResizing && (
+                  <span className="pointer-events-none absolute -top-6 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded bg-teal-700 text-white dark:bg-teal-400 dark:text-[#061412] text-[10px] font-mono-tabular font-semibold whitespace-nowrap shadow-sm">
+                    {clipsScaleLabel} · {Math.round(clampedClipsScale * 100)}%
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
-      {/* Non-Studio Views (Source, Scenes, Projects) */}
+      {/* Non-Studio Views (Source, Projects) */}
       <div
         ref={scrollRootRef}
         className={
@@ -478,7 +770,7 @@ export function WorkspaceSidebar({
             <div className="px-3.5 py-2.5 rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] flex items-center justify-between gap-3 text-xs sm:text-sm text-[#0e1217] dark:text-[#f1f3f5]">
               <div className="flex items-center gap-2.5 min-w-0">
                 <Loader2 className="w-4 h-4 animate-spin text-teal-700 dark:text-teal-400 shrink-0" />
-                <span className="truncate">Transcribing spoken dialogue in your selected scenes...</span>
+                <span className="truncate">Transcribing spoken dialogue in your selected clips...</span>
               </div>
               {onCancelGenerateSubtitles && (
                 <button
@@ -533,10 +825,10 @@ export function WorkspaceSidebar({
                 </form>
 
                 {/* Inline Feed Filters */}
-                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <div className="w-full lg:w-auto flex flex-wrap items-center justify-between gap-2 shrink-0">
                   <label
                     title="Show Thai-language videos only"
-                    className={`inline-flex items-center gap-2 h-9 px-2 rounded-md text-xs font-medium whitespace-nowrap shrink-0 select-none transition-colors ${
+                    className={`inline-flex items-center gap-2 h-9 pr-2 pl-0.5 rounded-md text-xs font-medium whitespace-nowrap shrink-0 select-none transition-colors ${
                       isSearching ? "opacity-50 cursor-not-allowed" : "cursor-pointer"
                     } ${
                       thaiOnly
@@ -564,58 +856,60 @@ export function WorkspaceSidebar({
                     <span>Thai only</span>
                   </label>
 
-                  <div
-                    role="group"
-                    aria-label="Reuse license filter"
-                    className="h-9 inline-flex items-center p-0.5 rounded-md bg-[#eceff3] dark:bg-[#181c23] border border-[#dde2e9] dark:border-[#242a34] shrink-0"
-                  >
-                    {(
-                      [
-                        { id: "all", label: "All" },
-                        { id: "creative_commons", label: "CC" },
-                        { id: "standard", label: "Standard" },
-                      ] as const
-                    ).map((opt) => {
-                      const selected = licenseFilter === opt.id;
-                      return (
-                        <button
-                          key={opt.id}
-                          type="button"
-                          onClick={() => onChangeLicenseFilter(opt.id)}
-                          className={`h-full px-2.5 text-xs font-medium rounded-sm whitespace-nowrap shrink-0 transition-colors cursor-pointer flex items-center ${
-                            selected
-                              ? "bg-white dark:bg-[#12151a] text-teal-700 dark:text-teal-400 font-semibold shadow-xs"
-                              : "text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5]"
-                          }`}
-                        >
-                          {opt.label}
-                        </button>
-                      );
-                    })}
-                  </div>
-
-                  {activeQuery ? (
-                    <button
-                      type="button"
-                      onClick={onResetToRecommended}
-                      className="h-9 px-3 rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] hover:bg-[#eceff3] dark:hover:bg-[#181c23] text-xs font-medium text-teal-700 dark:text-teal-400 whitespace-nowrap shrink-0 cursor-pointer transition-colors"
+                  <div className="flex items-center gap-2 ml-auto shrink-0">
+                    <div
+                      role="group"
+                      aria-label="Reuse license filter"
+                      className="h-9 inline-flex items-center p-0.5 rounded-md bg-[#eceff3] dark:bg-[#181c23] border border-[#dde2e9] dark:border-[#242a34] shrink-0"
                     >
-                      Recommended
-                    </button>
-                  ) : (
-                    onRefreshRecommended && (
+                      {(
+                        [
+                          { id: "all", label: "All" },
+                          { id: "creative_commons", label: "CC" },
+                          { id: "standard", label: "Standard" },
+                        ] as const
+                      ).map((opt) => {
+                        const selected = licenseFilter === opt.id;
+                        return (
+                          <button
+                            key={opt.id}
+                            type="button"
+                            onClick={() => onChangeLicenseFilter(opt.id)}
+                            className={`h-full px-2.5 text-xs font-medium rounded-sm whitespace-nowrap shrink-0 transition-colors cursor-pointer flex items-center ${
+                              selected
+                                ? "bg-white dark:bg-[#12151a] text-teal-700 dark:text-teal-400 font-semibold shadow-xs"
+                                : "text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5]"
+                            }`}
+                          >
+                            {opt.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {activeQuery ? (
                       <button
                         type="button"
-                        onClick={onRefreshRecommended}
-                        disabled={isSearching}
-                        title="Refresh recommended videos"
-                        aria-label="Refresh recommended videos"
-                        className="h-9 w-9 rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] hover:bg-[#eceff3] dark:hover:bg-[#181c23] text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5] flex items-center justify-center shrink-0 cursor-pointer disabled:opacity-40 transition-colors"
+                        onClick={onResetToRecommended}
+                        className="h-9 px-3 rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] hover:bg-[#eceff3] dark:hover:bg-[#181c23] text-xs font-medium text-teal-700 dark:text-teal-400 whitespace-nowrap shrink-0 cursor-pointer transition-colors"
                       >
-                        <RefreshCw className={`w-3.5 h-3.5 ${isSearching ? "animate-spin" : ""}`} />
+                        Recommended
                       </button>
-                    )
-                  )}
+                    ) : (
+                      onRefreshRecommended && (
+                        <button
+                          type="button"
+                          onClick={onRefreshRecommended}
+                          disabled={isSearching}
+                          title="Refresh recommended videos"
+                          aria-label="Refresh recommended videos"
+                          className="h-9 w-9 rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] hover:bg-[#eceff3] dark:hover:bg-[#181c23] text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5] flex items-center justify-center shrink-0 cursor-pointer disabled:opacity-40 transition-colors"
+                        >
+                          <RefreshCw className={`w-3.5 h-3.5 ${isSearching ? "animate-spin" : ""}`} />
+                        </button>
+                      )
+                    )}
+                  </div>
                 </div>
               </div>
 
@@ -791,48 +1085,6 @@ export function WorkspaceSidebar({
             </div>
           )}
 
-          {localMedia && (
-            <div className={activeTab === "scenes" ? "" : "hidden"}>
-              <ScenePicker
-                media={localMedia}
-                scenes={selectedScenes}
-                isProcessing={isProcessing}
-                isTabActive={isWorkspaceVisible && activeTab === "scenes"}
-                translationTone={editSettings.translationTone}
-                onChangeTranslationTone={(tone) =>
-                  onChangeEditSettings({ ...editSettings, translationTone: tone })
-                }
-                onUpdateScene={onUpdateScene}
-                onRemoveScene={onRemoveScene}
-                onReplaceScenes={onReplaceScenes}
-                onDetectedDuration={onDetectedLocalDuration}
-                onGenerate={onGenerateSubtitles}
-                onUploadVideo={onUploadLocalVideo}
-                onClearVideo={onClearLocalVideo}
-              />
-            </div>
-          )}
-
-          {!localMedia && activeTab === "scenes" && (
-            <ScenePicker
-              media={null}
-              scenes={selectedScenes}
-              isProcessing={isProcessing}
-              isTabActive={isWorkspaceVisible && activeTab === "scenes"}
-              translationTone={editSettings.translationTone}
-              onChangeTranslationTone={(tone) =>
-                onChangeEditSettings({ ...editSettings, translationTone: tone })
-              }
-              onUpdateScene={onUpdateScene}
-              onRemoveScene={onRemoveScene}
-              onReplaceScenes={onReplaceScenes}
-              onDetectedDuration={onDetectedLocalDuration}
-              onGenerate={onGenerateSubtitles}
-              onUploadVideo={onUploadLocalVideo}
-              onClearVideo={onClearLocalVideo}
-            />
-          )}
-
           {activeTab === "projects" && (
             <SavedProjectsPanel
               projects={savedProjects}
@@ -853,8 +1105,13 @@ export function WorkspaceSidebar({
       </div>
 
       {/* Unified Compact Studio Inspector: Single Underline Tab Header + Zero Nested Container Bloat */}
-      {isStudioView && (
-        <div className="flex-1 min-h-0 flex flex-col bg-white dark:bg-[#12151a] overflow-hidden">
+      <div
+        className={
+          isStudioView
+            ? "flex-1 min-h-0 flex flex-col bg-white dark:bg-[#12151a] overflow-hidden"
+            : "hidden"
+        }
+      >
           {/* Single Edge-to-Edge Studio Underline Tab Bar */}
           <div className="h-10 shrink-0 px-3.5 border-b border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8]/70 dark:bg-[#0b0d10]/70 flex items-center justify-between gap-2">
             <div
@@ -865,22 +1122,30 @@ export function WorkspaceSidebar({
               {studioTabs.map((item) => {
                 const Icon = item.icon;
                 const active = studioSection === item.id;
+                const isDisabled = !hasStudioVideo && item.id !== "clips";
                 return (
                   <button
                     key={item.id}
                     type="button"
                     role="tab"
                     aria-selected={active}
-                    onClick={() => onChangeStudioSection(item.id)}
-                    className={`relative h-full border-b-2 text-xs whitespace-nowrap shrink-0 flex items-center gap-1.5 transition-colors cursor-pointer ${
-                      active
-                        ? "border-teal-700 dark:border-teal-400 text-[#0e1217] dark:text-[#f1f3f5] font-semibold"
-                        : "border-transparent text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5] font-medium"
+                    aria-disabled={isDisabled || undefined}
+                    disabled={isDisabled}
+                    title={isDisabled ? "Upload a video first" : undefined}
+                    onClick={() => {
+                      if (!isDisabled) onChangeStudioSection(item.id);
+                    }}
+                    className={`relative h-full border-b-2 text-xs whitespace-nowrap shrink-0 flex items-center gap-1.5 transition-colors ${
+                      isDisabled
+                        ? "border-transparent text-[#525d6d]/45 dark:text-[#8b95a5]/40 font-medium opacity-45 cursor-not-allowed"
+                        : active
+                          ? "border-teal-700 dark:border-teal-400 text-[#0e1217] dark:text-[#f1f3f5] font-semibold cursor-pointer"
+                          : "border-transparent text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5] font-medium cursor-pointer"
                     }`}
                   >
                     <Icon
                       className={`w-3.5 h-3.5 shrink-0 ${
-                        active ? "text-teal-700 dark:text-teal-400" : ""
+                        !isDisabled && active ? "text-teal-700 dark:text-teal-400" : ""
                       }`}
                     />
                     <span>{item.label}</span>
@@ -889,7 +1154,7 @@ export function WorkspaceSidebar({
                         {item.count}
                       </span>
                     )}
-                    {item.dirty && (
+                    {item.dirty && !isDisabled && (
                       <span
                         aria-hidden="true"
                         className="w-1.5 h-1.5 rounded-full bg-teal-600 dark:bg-teal-400 shrink-0"
@@ -935,23 +1200,144 @@ export function WorkspaceSidebar({
 
           {/* Flat Edge-to-Edge Studio Body */}
           <div className="flex-1 overflow-y-auto overscroll-y-contain studio-scrollbar min-h-0">
-            {isProcessing && (
-              <div className="px-3.5 py-2.5 border-b border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] flex items-center justify-between gap-3 text-xs text-[#0e1217] dark:text-[#f1f3f5]">
-                <div className="flex items-center gap-2.5 min-w-0">
-                  <Loader2 className="w-3.5 h-3.5 animate-spin text-teal-700 dark:text-teal-400 shrink-0" />
-                  <span className="truncate">Transcribing spoken dialogue in selected scenes...</span>
+            {(isProcessing || Boolean(regeneratingClipId)) && (() => {
+              const stage = generationProgress?.stage ?? "extracting";
+              const percent = Math.max(0, Math.min(100, generationProgress?.percent ?? 5));
+              const label =
+                generationProgress?.label || "Transcribing spoken dialogue in selected clips...";
+              const steps: { id: "extracting" | "detecting" | "generating"; text: string }[] = [
+                { id: "extracting", text: "Extract" },
+                { id: "detecting", text: "Speech" },
+                { id: "generating", text: "Subtitles" },
+              ];
+              const rankMap: Record<string, number> = {
+                uploading: -1,
+                extracting: 0,
+                detecting: 1,
+                generating: 2,
+                compiling: 3,
+              };
+              const currentRank = rankMap[stage] ?? 0;
+
+              return (
+                <div className="px-3.5 py-2.5 border-b border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] space-y-2 text-xs text-[#0e1217] dark:text-[#f1f3f5]">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-teal-700 dark:text-teal-400 shrink-0" />
+                      <span className="truncate font-medium">{label}</span>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className="text-[11px] font-mono-tabular font-semibold text-teal-700 dark:text-teal-400">
+                        {percent}%
+                      </span>
+                      {onCancelGenerateSubtitles && (
+                        <button
+                          type="button"
+                          onClick={onCancelGenerateSubtitles}
+                          className="h-6 px-2 rounded-sm border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/60 hover:bg-red-100 dark:hover:bg-red-900/70 text-[11px] font-semibold text-red-700 dark:text-red-300 flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer transition-colors"
+                        >
+                          <Square className="w-2.5 h-2.5 fill-current" />
+                          <span>Stop</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="w-full h-1 rounded-full bg-[#dde2e9] dark:bg-[#242a34] overflow-hidden">
+                    <div
+                      className="h-full bg-teal-700 dark:bg-teal-400 transition-[width] duration-300"
+                      style={{ width: `${Math.max(4, percent)}%` }}
+                    />
+                  </div>
+
+                  <div className="flex items-center gap-2 text-[10px] font-medium">
+                    {stage === "uploading" && (
+                      <>
+                        <span className="text-teal-700 dark:text-teal-400 font-semibold">
+                          Uploading
+                        </span>
+                        <span className="text-[#8b95a5]">→</span>
+                      </>
+                    )}
+                    {steps.map((step, sIdx) => {
+                      const done = currentRank > sIdx;
+                      const active = currentRank === sIdx;
+                      return (
+                        <span key={step.id} className="inline-flex items-center gap-1.5">
+                          {sIdx > 0 && <span className="text-[#8b95a5]">→</span>}
+                          <span
+                            className={
+                              active
+                                ? "text-teal-700 dark:text-teal-400 font-semibold"
+                                : done
+                                  ? "text-emerald-700 dark:text-emerald-400"
+                                  : "text-[#525d6d] dark:text-[#8b95a5]"
+                            }
+                          >
+                            {done ? `✓ ${step.text}` : step.text}
+                          </span>
+                        </span>
+                      );
+                    })}
+                  </div>
                 </div>
-                {onCancelGenerateSubtitles && (
-                  <button
-                    type="button"
-                    onClick={onCancelGenerateSubtitles}
-                    className="h-6 px-2 rounded-sm border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/60 hover:bg-red-100 dark:hover:bg-red-900/70 text-[11px] font-semibold text-red-700 dark:text-red-300 flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer transition-colors"
-                  >
-                    <Square className="w-2.5 h-2.5 fill-current" />
-                    <span>Stop</span>
-                  </button>
-                )}
+              );
+            })()}
+
+            {localMedia ? (
+              <div className={studioSection === "clips" ? "px-3.5 py-3" : "hidden"}>
+                <ScenePicker
+                  media={localMedia}
+                  scenes={selectedScenes}
+                  isProcessing={isProcessing}
+                  generationProgress={generationProgress}
+                  clipSubtitleCounts={clipSubtitleCounts}
+                  regeneratingClipId={regeneratingClipId}
+                  regeneratingClipPercent={regeneratingClipPercent}
+                  isTabActive={isWorkspaceVisible && isStudioView && studioSection === "clips"}
+                  mobileStageTarget={isMobileStudio ? mobileClipsStageEl : null}
+                  translationTone={editSettings.translationTone}
+                  onChangeTranslationTone={(tone) =>
+                    onChangeEditSettings({ ...editSettings, translationTone: tone })
+                  }
+                  onUpdateScene={onUpdateScene}
+                  onRemoveScene={onRemoveScene}
+                  onReplaceScenes={onReplaceScenes}
+                  onDetectedDuration={onDetectedLocalDuration}
+                  onGenerate={onGenerateSubtitles}
+                  onGenerateSingleClip={onGenerateSingleClip}
+                  onUploadVideo={onUploadLocalVideo}
+                  onClearVideo={onClearLocalVideo}
+                />
               </div>
+            ) : (
+              studioSection === "clips" && (
+                <div className="px-3.5 py-3">
+                  <ScenePicker
+                    media={null}
+                    scenes={selectedScenes}
+                    isProcessing={isProcessing}
+                    generationProgress={generationProgress}
+                    clipSubtitleCounts={clipSubtitleCounts}
+                    regeneratingClipId={regeneratingClipId}
+                    regeneratingClipPercent={regeneratingClipPercent}
+                    isTabActive={isWorkspaceVisible && isStudioView && studioSection === "clips"}
+                    mobileStageTarget={isMobileStudio ? mobileClipsStageEl : null}
+                    translationTone={editSettings.translationTone}
+                    onChangeTranslationTone={(tone) =>
+                      onChangeEditSettings({ ...editSettings, translationTone: tone })
+                    }
+                    onUpdateScene={onUpdateScene}
+                    onRemoveScene={onRemoveScene}
+                    onReplaceScenes={onReplaceScenes}
+                    onDetectedDuration={onDetectedLocalDuration}
+                    onGenerate={onGenerateSubtitles}
+                    onGenerateSingleClip={onGenerateSingleClip}
+                    onUploadVideo={onUploadLocalVideo}
+                    onClearVideo={onClearLocalVideo}
+                  />
+                </div>
+              )
             )}
 
             {studioSection === "captions" && !project && (
@@ -964,15 +1350,15 @@ export function WorkspaceSidebar({
                     No generated captions yet
                   </p>
                   <p className="text-xs text-[#525d6d] dark:text-[#8b95a5] leading-relaxed">
-                    Pick scenes and generate subtitles in Scenes to edit Thai phonetics, Burmese translations, styling, and timeline cuts.
+                    Upload a video, cut the clips you want, and generate subtitles in Upload &amp; Cut to edit Thai phonetics, Burmese translations, and styling.
                   </p>
                 </div>
                 <button
                   type="button"
-                  onClick={() => onTabChange("scenes")}
+                  onClick={() => onChangeStudioSection("clips")}
                   className="h-8 px-3.5 rounded-md bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#061412] text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer transition-colors"
                 >
-                  <span>Go to Scenes</span>
+                  <span>Upload &amp; Cut</span>
                 </button>
               </div>
             )}
@@ -2211,6 +2597,7 @@ export function WorkspaceSidebar({
                 <ProjectTimelineEditor
                   project={project}
                   cutTime={cutTime}
+                  subscribeCutTime={subscribeCutTime}
                   isPlaying={isPlaying}
                   isActive={isWorkspaceVisible && activeTab === "studio" && studioSection === "timeline"}
                   onTogglePlay={onTogglePlay}
@@ -2221,7 +2608,7 @@ export function WorkspaceSidebar({
                   onUpdateSubtitleTiming={onUpdateSubtitleTiming}
                   onRestoreSnapshot={onRestoreProjectSnapshot}
                   onResetTimeline={onResetTimeline}
-                  onGoToScenes={() => onTabChange("scenes")}
+                  onGoToScenes={() => onChangeStudioSection("clips")}
                 />
               </div>
             )}
@@ -2264,13 +2651,12 @@ export function WorkspaceSidebar({
                   onUpdateSubtitleTiming={onUpdateSubtitleTiming}
                   onRestoreProjectSnapshot={onRestoreProjectSnapshot}
                   onResetTimeline={onResetTimeline}
-                  onGoToScenes={() => onTabChange("scenes")}
+                  onGoToScenes={() => onChangeStudioSection("clips")}
                 />
               </div>
             )}
           </div>
         </div>
-      )}
     </div>
   );
 }

@@ -1,9 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
+  Loader2,
   Pause,
   Play,
+  RefreshCw,
   RotateCcw,
   Scissors,
+  Sparkles,
   Trash2,
   Undo2,
   ZoomIn,
@@ -15,11 +19,17 @@ import { hasVerticalScrollRoom, scrollVerticalAncestors } from "../utils/timelin
 interface LocalVideoTimelineEditorProps {
   media: ActiveMediaSource;
   scenes: SceneSelection[];
+  clipSubtitleCounts?: Record<string, number>;
+  regeneratingClipId?: string | null;
+  regeneratingClipPercent?: number | null;
+  isProcessingAll?: boolean;
+  onGenerateSingleClip?: (sceneId: string) => void;
   onUpdateScene: (id: string, startSec: number, endSec: number) => void;
   onRemoveScene: (id: string) => void;
   onReplaceScenes?: (scenes: SceneSelection[]) => void;
   onDetectedDuration?: (dur: number) => void;
   isTabActive?: boolean;
+  mobileStageTarget?: HTMLElement | null;
 }
 
 interface ClipSegment {
@@ -86,11 +96,17 @@ function clampZoom(z: number): number {
 export function LocalVideoTimelineEditor({
   media,
   scenes,
+  clipSubtitleCounts,
+  regeneratingClipId = null,
+  regeneratingClipPercent = null,
+  isProcessingAll = false,
+  onGenerateSingleClip,
   onUpdateScene,
   onRemoveScene,
   onReplaceScenes,
   onDetectedDuration,
   isTabActive = true,
+  mobileStageTarget = null,
 }: LocalVideoTimelineEditorProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -100,6 +116,8 @@ export function LocalVideoTimelineEditor({
   const [sourceDuration, setSourceDuration] = useState<number>(() =>
     Math.max(1, media.durationSec || 30)
   );
+  const sourceDurationRef = useRef(sourceDuration);
+  sourceDurationRef.current = sourceDuration;
   const [cutTime, setCutTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [pxPerSec, setPxPerSec] = useState(32);
@@ -145,6 +163,10 @@ export function LocalVideoTimelineEditor({
   const lastDragTargetRef = useRef<{ cutTime: number; sourceSec: number } | null>(null);
   const trimPreUndoRef = useRef<SceneSelection[] | null>(null);
   const pendingSeekSecRef = useRef<number | null>(null);
+  const pendingPlayRef = useRef<boolean>(false);
+  const playAttemptPendingRef = useRef<boolean>(false);
+  const reloadAttemptedRef = useRef<boolean>(false);
+  const seekSettleUntilRef = useRef<number>(0);
   const lastSeekFixAtRef = useRef<number>(0);
   const seekRafRef = useRef<number>(0);
   const activePlaybackIdxRef = useRef<number>(0);
@@ -219,14 +241,21 @@ export function LocalVideoTimelineEditor({
     setPlayError(null);
     setUndoStack([]);
     pendingSeekSecRef.current = null;
+    pendingPlayRef.current = false;
+    playAttemptPendingRef.current = false;
+    reloadAttemptedRef.current = false;
+    seekSettleUntilRef.current = 0;
     activePlaybackIdxRef.current = 0;
     const safeDur = Number.isFinite(media.durationSec) && media.durationSec > 0 ? media.durationSec : 30;
     setSourceDuration(Math.max(1, safeDur));
   }, [media.localUrl]);
 
-  // Pause timeline playback and clean up active drag/pointer state when tab or workspace is hidden
+  // Pause timeline playback and clean up active drag/pointer state when hidden,
+  // and recover any browser-evicted media pipeline when returning to this tab
   useEffect(() => {
     if (!isTabActive) {
+      pendingPlayRef.current = false;
+      playAttemptPendingRef.current = false;
       if (videoRef.current && !videoRef.current.paused) {
         videoRef.current.pause();
       }
@@ -243,8 +272,26 @@ export function LocalVideoTimelineEditor({
       setFrozenTrackTime(null);
       setDragBadge(null);
       updateDragState(null);
+      return;
     }
-  }, [isTabActive, updateDragState]);
+
+    const vid = videoRef.current;
+    if (
+      vid &&
+      media.localUrl &&
+      (vid.error ||
+        vid.networkState === HTMLMediaElement.NETWORK_NO_SOURCE ||
+        vid.networkState === HTMLMediaElement.NETWORK_EMPTY)
+    ) {
+      reloadAttemptedRef.current = false;
+      pendingSeekSecRef.current = mapCutTimeToSource(cutTimeRef.current).sourceSec;
+      try {
+        vid.load();
+      } catch {
+        // ignore
+      }
+    }
+  }, [isTabActive, media.localUrl, mapCutTimeToSource, updateDragState]);
 
   // Clear activeSceneId only if the selected scene was removed (never auto-select clips)
   useEffect(() => {
@@ -279,21 +326,34 @@ export function LocalVideoTimelineEditor({
 
   // Capture lightweight filmstrip thumbnails across the full source video
   useEffect(() => {
-    if (!media.localUrl || sourceDuration <= 0) {
+    const estDur = sourceDurationRef.current;
+    if (!media.localUrl || estDur <= 0) {
       setThumbnails([]);
       return;
     }
 
     let cancelled = false;
-    const targetCount = Math.min(24, Math.max(10, Math.ceil(sourceDuration / 4)));
+    const targetCount = Math.min(12, Math.max(6, Math.ceil(estDur / 6)));
     const hiddenVid = document.createElement("video");
     hiddenVid.muted = true;
     hiddenVid.playsInline = true;
     hiddenVid.preload = "metadata";
 
+    const releaseHiddenVid = () => {
+      hiddenVid.onloadeddata = null;
+      hiddenVid.onerror = null;
+      try {
+        hiddenVid.pause();
+        hiddenVid.removeAttribute("src");
+        hiddenVid.load();
+      } catch {
+        // ignore
+      }
+    };
+
     const captureFrames = async () => {
       // Give the primary preview <video> element priority before decoding filmstrip frames
-      await new Promise((r) => setTimeout(r, 180));
+      await new Promise((r) => setTimeout(r, 260));
       if (cancelled) return;
       hiddenVid.src = media.localUrl!;
 
@@ -308,7 +368,7 @@ export function LocalVideoTimelineEditor({
       const actualDur =
         Number.isFinite(hiddenVid.duration) && hiddenVid.duration > 0
           ? hiddenVid.duration
-          : sourceDuration;
+          : sourceDurationRef.current;
       const canvas = document.createElement("canvas");
       const cw = 96;
       const ch = 56;
@@ -334,7 +394,7 @@ export function LocalVideoTimelineEditor({
         try {
           ctx.drawImage(hiddenVid, 0, 0, cw, ch);
           frames.push(canvas.toDataURL("image/jpeg", 0.55));
-          if (frames.length % 4 === 0 || frames.length === targetCount) {
+          if (frames.length % 3 === 0 || frames.length === targetCount) {
             setThumbnails([...frames]);
           }
         } catch {
@@ -343,19 +403,13 @@ export function LocalVideoTimelineEditor({
       }
     };
 
-    captureFrames().finally(() => {
-      hiddenVid.onloadeddata = null;
-      hiddenVid.onerror = null;
-      hiddenVid.removeAttribute("src");
-    });
+    captureFrames().finally(releaseHiddenVid);
 
     return () => {
       cancelled = true;
-      hiddenVid.onloadeddata = null;
-      hiddenVid.onerror = null;
-      hiddenVid.removeAttribute("src");
+      releaseHiddenVid();
     };
-  }, [media.localUrl, sourceDuration]);
+  }, [media.localUrl]);
 
   // Coalesce rapid drag seeks so the HTML5 video decoder never stalls on queued seeks
   const scheduleSourcePreviewSeek = useCallback(
@@ -399,18 +453,19 @@ export function LocalVideoTimelineEditor({
     const tick = () => {
       const vid = videoRef.current;
       const segs = segmentsRef.current;
-      if (vid && segs.length > 0 && !vid.paused && !vid.seeking) {
+      if (vid && segs.length > 0 && !vid.paused && !vid.seeking && vid.readyState >= 1) {
         const idx = Math.min(activePlaybackIdxRef.current, segs.length - 1);
         const seg = segs[idx];
         const srcT = vid.currentTime;
         const now = performance.now();
 
-        if (srcT < seg.startSec - 0.18) {
+        if (srcT < seg.startSec - 0.18 && now >= seekSettleUntilRef.current) {
           if (now - lastSeekFixAtRef.current > 500) {
             lastSeekFixAtRef.current = now;
+            seekSettleUntilRef.current = now + 650;
             vid.currentTime = seg.startSec;
           }
-        } else if (srcT >= seg.endSec - 0.03) {
+        } else if (srcT >= seg.endSec - 0.03 && now >= seekSettleUntilRef.current) {
           if (idx + 1 < segs.length) {
             const nextIdx = idx + 1;
             const nextSeg = segs[nextIdx];
@@ -418,6 +473,7 @@ export function LocalVideoTimelineEditor({
             // Only seek when there is an actual cut gap; contiguous splits flow smoothly
             if (Math.abs(nextSeg.startSec - srcT) > 0.18) {
               lastSeekFixAtRef.current = now;
+              seekSettleUntilRef.current = now + 650;
               vid.currentTime = nextSeg.startSec;
             }
             setCutTime(nextSeg.cutStart);
@@ -480,6 +536,26 @@ export function LocalVideoTimelineEditor({
 
       const { segIndex, sourceSec } = mapCutTimeToSource(startCut);
       activePlaybackIdxRef.current = segIndex;
+      setCutTime(startCut);
+
+      // Recover automatically if browser evicted background/idle video decoder
+      if (
+        vid.error ||
+        vid.networkState === HTMLMediaElement.NETWORK_NO_SOURCE ||
+        vid.networkState === HTMLMediaElement.NETWORK_EMPTY
+      ) {
+        reloadAttemptedRef.current = true;
+        pendingSeekSecRef.current = sourceSec;
+        pendingPlayRef.current = true;
+        playAttemptPendingRef.current = false;
+        setIsPlaying(true);
+        try {
+          vid.load();
+        } catch {
+          // ignore
+        }
+        return;
+      }
 
       if (vid.readyState >= 1) {
         const actualDur =
@@ -487,18 +563,24 @@ export function LocalVideoTimelineEditor({
         const clamped = Math.max(0, Math.min(Math.max(0, actualDur - 0.05), sourceSec));
         pendingSeekSecRef.current = null;
         if (Math.abs(vid.currentTime - clamped) > 0.08) {
+          seekSettleUntilRef.current = performance.now() + 650;
           vid.currentTime = clamped;
+        } else {
+          seekSettleUntilRef.current = 0;
         }
       } else {
         pendingSeekSecRef.current = sourceSec;
       }
-      setCutTime(startCut);
 
+      pendingPlayRef.current = true;
+      playAttemptPendingRef.current = true;
       const playPromise = vid.play();
+      setIsPlaying(true);
       if (playPromise && typeof playPromise.then === "function") {
-        setIsPlaying(true);
         playPromise
           .then(() => {
+            playAttemptPendingRef.current = false;
+            pendingPlayRef.current = false;
             if (!isTabActiveRef.current) {
               vid.pause();
               setIsPlaying(false);
@@ -506,16 +588,37 @@ export function LocalVideoTimelineEditor({
             }
             setIsPlaying(!vid.paused);
           })
-          .catch(() => {
+          .catch((err: unknown) => {
+            playAttemptPendingRef.current = false;
             if (!isTabActiveRef.current) {
+              pendingPlayRef.current = false;
               setIsPlaying(false);
               return;
             }
+            const errName = err instanceof DOMException ? err.name : "";
+            if (errName === "AbortError") {
+              pendingPlayRef.current = true;
+              return;
+            }
+            if (vid.error && !reloadAttemptedRef.current) {
+              reloadAttemptedRef.current = true;
+              pendingSeekSecRef.current = sourceSec;
+              pendingPlayRef.current = true;
+              try {
+                vid.load();
+                return;
+              } catch {
+                // fall through
+              }
+            }
             if (!vid.muted) {
               vid.muted = true;
+              playAttemptPendingRef.current = true;
               vid
                 .play()
                 .then(() => {
+                  playAttemptPendingRef.current = false;
+                  pendingPlayRef.current = false;
                   if (!isTabActiveRef.current) {
                     vid.pause();
                     setIsPlaying(false);
@@ -523,16 +626,26 @@ export function LocalVideoTimelineEditor({
                   }
                   setIsPlaying(!vid.paused);
                 })
-                .catch(() => {
+                .catch((err2: unknown) => {
+                  playAttemptPendingRef.current = false;
+                  const err2Name = err2 instanceof DOMException ? err2.name : "";
+                  if (err2Name === "AbortError" && isTabActiveRef.current) {
+                    pendingPlayRef.current = true;
+                    return;
+                  }
+                  pendingPlayRef.current = false;
                   setIsPlaying(false);
                   setPlayError("Tap the video to play or check the video format.");
                 });
             } else {
+              pendingPlayRef.current = false;
               setIsPlaying(false);
               setPlayError("Could not play this video file.");
             }
           });
       } else {
+        playAttemptPendingRef.current = false;
+        pendingPlayRef.current = false;
         if (!isTabActiveRef.current) {
           vid.pause();
           setIsPlaying(false);
@@ -548,13 +661,94 @@ export function LocalVideoTimelineEditor({
     if (!isTabActiveRef.current) return;
     const vid = videoRef.current;
     if (!vid || segmentsRef.current.length === 0) return;
-    if (vid.paused || vid.ended) {
+    if (vid.paused || vid.ended || vid.error) {
       playFromCutTime();
     } else {
+      pendingPlayRef.current = false;
+      playAttemptPendingRef.current = false;
       vid.pause();
       setIsPlaying(false);
     }
   }, [playFromCutTime]);
+
+  const applyPendingSeekAndPlay = useCallback((vidEl: HTMLVideoElement) => {
+    const next = pendingSeekSecRef.current;
+    if (next !== null && vidEl.readyState >= 1) {
+      const d = vidEl.duration;
+      const maxSeek = Number.isFinite(d) && d > 0 ? Math.max(0, d - 0.02) : next + 1;
+      const clamped = Math.max(0, Math.min(maxSeek, next));
+      pendingSeekSecRef.current = null;
+      if (Math.abs(vidEl.currentTime - clamped) > 0.04) {
+        seekSettleUntilRef.current = performance.now() + 650;
+        vidEl.currentTime = clamped;
+      }
+    }
+    if (pendingPlayRef.current && isTabActiveRef.current && vidEl.paused && vidEl.readyState >= 1) {
+      pendingPlayRef.current = false;
+      playAttemptPendingRef.current = true;
+      vidEl
+        .play()
+        .then(() => {
+          playAttemptPendingRef.current = false;
+          if (!isTabActiveRef.current) {
+            vidEl.pause();
+            setIsPlaying(false);
+            return;
+          }
+          setIsPlaying(!vidEl.paused);
+        })
+        .catch((err: unknown) => {
+          playAttemptPendingRef.current = false;
+          if (!isTabActiveRef.current) {
+            setIsPlaying(false);
+            return;
+          }
+          const errName = err instanceof DOMException ? err.name : "";
+          if (errName === "AbortError") {
+            pendingPlayRef.current = true;
+            return;
+          }
+          if (vidEl.error && !reloadAttemptedRef.current) {
+            reloadAttemptedRef.current = true;
+            pendingPlayRef.current = true;
+            try {
+              vidEl.load();
+              return;
+            } catch {
+              // fall through
+            }
+          }
+          if (!vidEl.muted) {
+            vidEl.muted = true;
+            playAttemptPendingRef.current = true;
+            vidEl
+              .play()
+              .then(() => {
+                playAttemptPendingRef.current = false;
+                if (!isTabActiveRef.current) {
+                  vidEl.pause();
+                  setIsPlaying(false);
+                  return;
+                }
+                setIsPlaying(!vidEl.paused);
+              })
+              .catch((err2: unknown) => {
+                playAttemptPendingRef.current = false;
+                const err2Name = err2 instanceof DOMException ? err2.name : "";
+                if (err2Name === "AbortError" && isTabActiveRef.current) {
+                  pendingPlayRef.current = true;
+                  return;
+                }
+                setIsPlaying(false);
+                setPlayError("Tap the video to play or check the video format.");
+              });
+          } else {
+            setIsPlaying(false);
+            setPlayError("Could not play this video file.");
+          }
+        });
+    }
+  }, []);
 
   const applyScenesMutation = useCallback(
     (nextScenes: SceneSelection[], recordUndo = true) => {
@@ -776,15 +970,20 @@ export function LocalVideoTimelineEditor({
         if (ev.cancelable) ev.preventDefault();
       }
     };
+    const onWinBlur = () => {
+      pointerUpHandlerRef.current({} as PointerEvent);
+    };
     window.addEventListener("pointermove", onWinMove, { passive: false });
     window.addEventListener("pointerup", onWinEnd);
     window.addEventListener("pointercancel", onWinEnd);
     window.addEventListener("touchmove", onWinTouchMove, { passive: false });
+    window.addEventListener("blur", onWinBlur);
     windowDragCleanupRef.current = () => {
       window.removeEventListener("pointermove", onWinMove);
       window.removeEventListener("pointerup", onWinEnd);
       window.removeEventListener("pointercancel", onWinEnd);
       window.removeEventListener("touchmove", onWinTouchMove);
+      window.removeEventListener("blur", onWinBlur);
     };
   }, []);
 
@@ -1149,110 +1348,120 @@ export function LocalVideoTimelineEditor({
     };
   }, []);
 
+  const videoViewportNode = (
+    <div
+      onClick={togglePlay}
+      className={`relative w-full rounded-lg overflow-hidden bg-[#07080a] border border-[#dde2e9] dark:border-[#242a34] cursor-pointer group ${
+        mobileStageTarget ? "h-full" : "max-w-xl mx-auto aspect-video"
+      }`}
+    >
+      {media.localUrl ? (
+        <video
+          key={media.localUrl}
+          ref={videoRef}
+          src={media.localUrl}
+          preload={isTabActive ? "auto" : "metadata"}
+          playsInline
+          onLoadedData={() => setPlayError(null)}
+          onLoadedMetadata={(e) => {
+            setPlayError(null);
+            const vidEl = e.currentTarget;
+            const d = vidEl.duration;
+            if (Number.isFinite(d) && d > 0) {
+              setSourceDuration(d);
+              onDetectedDuration?.(roundTenth(d));
+              // Sync full-video initial clip endSec to exact metadata duration if untouched
+              if (
+                scenes.length === 1 &&
+                scenes[0].startSec === 0 &&
+                Math.abs(scenes[0].endSec - (media.durationSec || d)) < 0.25 &&
+                Math.abs(scenes[0].endSec - roundTenth(d)) > 0.05
+              ) {
+                onUpdateScene(scenes[0].id, 0, roundTenth(d));
+              }
+            }
+            applyPendingSeekAndPlay(vidEl);
+          }}
+          onCanPlay={(e) => {
+            setPlayError(null);
+            applyPendingSeekAndPlay(e.currentTarget);
+          }}
+          onEnded={() => {
+            pendingPlayRef.current = false;
+            playAttemptPendingRef.current = false;
+            setIsPlaying(false);
+          }}
+          onSeeked={(e) => {
+            seekSettleUntilRef.current = 0;
+            applyPendingSeekAndPlay(e.currentTarget);
+          }}
+          onPlay={(e) => {
+            setPlayError(null);
+            reloadAttemptedRef.current = false;
+            playAttemptPendingRef.current = false;
+            pendingPlayRef.current = false;
+            e.currentTarget.preservesPitch = true;
+            e.currentTarget.playbackRate = 1;
+            setIsPlaying(true);
+          }}
+          onPause={(e) => {
+            const v = e.currentTarget;
+            if (v.seeking || v.ended || playAttemptPendingRef.current || pendingPlayRef.current) {
+              return;
+            }
+            setIsPlaying(false);
+          }}
+          onError={(e) => {
+            playAttemptPendingRef.current = false;
+            const v = e.currentTarget;
+            if (!reloadAttemptedRef.current && media.localUrl && pendingPlayRef.current) {
+              reloadAttemptedRef.current = true;
+              try {
+                v.load();
+                return;
+              } catch {
+                // fall through
+              }
+            }
+            pendingPlayRef.current = false;
+            setIsPlaying(false);
+            setPlayError("Could not load or play this local video file.");
+          }}
+          className="w-full h-full object-contain bg-black"
+        />
+      ) : (
+        <div className="w-full h-full flex items-center justify-center p-4 text-center">
+          <p className="text-xs text-neutral-300">
+            Local video is not linked. Link or re-upload the video file to preview.
+          </p>
+        </div>
+      )}
+
+      {!isPlaying && media.localUrl && (
+        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/15 group-hover:bg-black/25 transition-colors">
+          <div className="w-12 h-12 rounded-full bg-black/70 text-white flex items-center justify-center backdrop-blur-xs">
+            <Play className="w-5 h-5 ml-0.5" />
+          </div>
+          {playError && (
+            <span className="px-2.5 py-1 rounded-md bg-black/80 text-white text-[11px]">
+              {playError}
+            </span>
+          )}
+        </div>
+      )}
+
+      {dragBadge && (
+        <div className="pointer-events-none absolute bottom-3 left-1/2 -translate-x-1/2 px-2.5 py-1 rounded-md bg-black/80 text-white text-xs font-mono-tabular">
+          {dragBadge.label}: {formatTimePrecise(dragBadge.sec)}
+        </div>
+      )}
+    </div>
+  );
+
   return (
     <div className="flex flex-col gap-3.5">
       {/* Live Synced Video Viewport */}
-      <div
-        onClick={togglePlay}
-        className="relative w-full aspect-video rounded-lg overflow-hidden bg-[#07080a] border border-[#dde2e9] dark:border-[#242a34] cursor-pointer group"
-      >
-        {media.localUrl ? (
-          <video
-            key={media.localUrl}
-            ref={videoRef}
-            src={media.localUrl}
-            preload="auto"
-            playsInline
-            onLoadedData={() => setPlayError(null)}
-            onLoadedMetadata={(e) => {
-              setPlayError(null);
-              const vidEl = e.currentTarget;
-              const d = vidEl.duration;
-              if (Number.isFinite(d) && d > 0) {
-                setSourceDuration(d);
-                onDetectedDuration?.(roundTenth(d));
-                // Sync full-video initial clip endSec to exact metadata duration if untouched
-                if (
-                  scenes.length === 1 &&
-                  scenes[0].startSec === 0 &&
-                  Math.abs(scenes[0].endSec - (media.durationSec || d)) < 0.25 &&
-                  Math.abs(scenes[0].endSec - roundTenth(d)) > 0.05
-                ) {
-                  onUpdateScene(scenes[0].id, 0, roundTenth(d));
-                }
-              }
-              if (pendingSeekSecRef.current !== null) {
-                const maxSeek =
-                  Number.isFinite(d) && d > 0 ? Math.max(0, d - 0.02) : pendingSeekSecRef.current;
-                const target = Math.max(0, Math.min(maxSeek, pendingSeekSecRef.current));
-                pendingSeekSecRef.current = null;
-                if (Math.abs(vidEl.currentTime - target) > 0.04) {
-                  vidEl.currentTime = target;
-                }
-              }
-            }}
-            onCanPlay={(e) => {
-              setPlayError(null);
-              const vidEl = e.currentTarget;
-              if (pendingSeekSecRef.current !== null) {
-                const d = vidEl.duration;
-                const maxSeek =
-                  Number.isFinite(d) && d > 0 ? Math.max(0, d - 0.02) : pendingSeekSecRef.current;
-                const target = Math.max(0, Math.min(maxSeek, pendingSeekSecRef.current));
-                pendingSeekSecRef.current = null;
-                if (Math.abs(vidEl.currentTime - target) > 0.04) {
-                  vidEl.currentTime = target;
-                }
-              }
-            }}
-            onEnded={() => setIsPlaying(false)}
-            onSeeked={(e) => {
-              const next = pendingSeekSecRef.current;
-              if (next !== null && Math.abs(e.currentTarget.currentTime - next) > 0.04) {
-                pendingSeekSecRef.current = null;
-                e.currentTarget.currentTime = next;
-              }
-            }}
-            onPlay={(e) => {
-              setPlayError(null);
-              e.currentTarget.preservesPitch = true;
-              e.currentTarget.playbackRate = 1;
-              setIsPlaying(true);
-            }}
-            onPause={() => setIsPlaying(false)}
-            onError={() => {
-              setIsPlaying(false);
-              setPlayError("Could not load or play this local video file.");
-            }}
-            className="w-full h-full object-contain bg-black"
-          />
-        ) : (
-          <div className="w-full h-full flex items-center justify-center p-4 text-center">
-            <p className="text-xs text-neutral-300">
-              Local video is not linked. Link or re-upload the video file to preview.
-            </p>
-          </div>
-        )}
-
-        {!isPlaying && media.localUrl && (
-          <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/15 group-hover:bg-black/25 transition-colors">
-            <div className="w-12 h-12 rounded-full bg-black/70 text-white flex items-center justify-center backdrop-blur-xs">
-              <Play className="w-5 h-5 ml-0.5" />
-            </div>
-            {playError && (
-              <span className="px-2.5 py-1 rounded-md bg-black/80 text-white text-[11px]">
-                {playError}
-              </span>
-            )}
-          </div>
-        )}
-
-        {dragBadge && (
-          <div className="pointer-events-none absolute bottom-3 left-1/2 -translate-x-1/2 px-2.5 py-1 rounded-md bg-black/80 text-white text-xs font-mono-tabular">
-            {dragBadge.label}: {formatTimePrecise(dragBadge.sec)}
-          </div>
-        )}
-      </div>
+      {mobileStageTarget ? createPortal(videoViewportNode, mobileStageTarget) : videoViewportNode}
 
       {/* Transport & Split / Delete Cut Controls */}
       <div className="flex flex-wrap items-center justify-between gap-2 px-0.5">
@@ -1541,7 +1750,7 @@ export function LocalVideoTimelineEditor({
         {segments.length === 0 ? (
           <div className="p-5 text-center space-y-2">
             <p className="text-xs text-[#525d6d] dark:text-[#8b95a5]">
-              All clips were deleted. Restore the full video to split and keep the scenes you want.
+              All clips were deleted. Restore the full video to split and keep the clips you want.
             </p>
             <button
               type="button"
@@ -1557,6 +1766,11 @@ export function LocalVideoTimelineEditor({
             {segments.map((seg, idx) => {
               const isSelected = seg.scene.id === activeSceneId;
               const dur = roundTenth(seg.clipDur);
+              const subCount = clipSubtitleCounts?.[seg.scene.id] ?? 0;
+              const hasExistingSubs = subCount > 0;
+              const isRegeneratingThis = regeneratingClipId === seg.scene.id;
+              const busyElsewhere = isProcessingAll || (Boolean(regeneratingClipId) && !isRegeneratingThis);
+
               return (
                 <div
                   key={seg.scene.id}
@@ -1564,13 +1778,13 @@ export function LocalVideoTimelineEditor({
                     setActiveSceneId(seg.scene.id);
                     seekCutTo(seg.cutStart, true);
                   }}
-                  className={`px-3 py-2 flex items-center justify-between gap-3 cursor-pointer transition-colors ${
+                  className={`px-3 py-2 flex items-center justify-between gap-2.5 cursor-pointer transition-colors ${
                     isSelected
                       ? "bg-teal-50/70 dark:bg-teal-950/30"
                       : "bg-white dark:bg-[#12151a] hover:bg-[#eceff3] dark:hover:bg-[#181c23]"
                   }`}
                 >
-                  <div className="flex items-center gap-2.5 min-w-0">
+                  <div className="flex items-center gap-2 min-w-0">
                     <span
                       className={`text-[11px] font-mono-tabular font-semibold shrink-0 ${
                         isSelected ? "text-teal-700 dark:text-teal-400" : "text-[#525d6d] dark:text-[#8b95a5]"
@@ -1578,15 +1792,65 @@ export function LocalVideoTimelineEditor({
                     >
                       {String(idx + 1).padStart(2, "0")}
                     </span>
-                    <span className="text-xs font-semibold text-[#0e1217] dark:text-[#f1f3f5]">
-                      Scene {idx + 1}
+                    <span className="text-xs font-semibold text-[#0e1217] dark:text-[#f1f3f5] whitespace-nowrap">
+                      Clip {idx + 1}
                     </span>
-                    <span className="text-xs font-mono-tabular text-[#525d6d] dark:text-[#8b95a5]">
+                    <span className="text-xs font-mono-tabular text-[#525d6d] dark:text-[#8b95a5] truncate">
                       {formatTimePrecise(seg.startSec)} – {formatTimePrecise(seg.endSec)}
                     </span>
+                    {hasExistingSubs && (
+                      <span className="text-[11px] font-mono-tabular text-teal-700 dark:text-teal-400 whitespace-nowrap shrink-0">
+                        · {subCount} sub
+                      </span>
+                    )}
                   </div>
 
-                  <div className="flex items-center gap-2 shrink-0">
+                  <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+                    {onGenerateSingleClip && (
+                      <button
+                        type="button"
+                        disabled={busyElsewhere || isRegeneratingThis}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          e.currentTarget.blur();
+                          setActiveSceneId(seg.scene.id);
+                          onGenerateSingleClip(seg.scene.id);
+                        }}
+                        title={
+                          hasExistingSubs
+                            ? `Replace subtitles for Clip ${idx + 1}`
+                            : `Generate subtitles for Clip ${idx + 1}`
+                        }
+                        aria-label={
+                          hasExistingSubs
+                            ? `Replace subtitles for Clip ${idx + 1}`
+                            : `Generate subtitles for Clip ${idx + 1}`
+                        }
+                        className="h-6 px-2 rounded-sm border border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] hover:border-teal-700/50 dark:hover:border-teal-400/50 hover:text-teal-700 dark:hover:text-teal-400 text-[11px] font-medium text-[#0e1217] dark:text-[#f1f3f5] inline-flex items-center gap-1 whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
+                      >
+                        {isRegeneratingThis ? (
+                          <>
+                            <Loader2 className="w-3 h-3 animate-spin text-teal-700 dark:text-teal-400 shrink-0" />
+                            <span className="font-mono-tabular">
+                              {typeof regeneratingClipPercent === "number"
+                                ? `${regeneratingClipPercent}%`
+                                : "..."}
+                            </span>
+                          </>
+                        ) : hasExistingSubs ? (
+                          <>
+                            <RefreshCw className="w-3 h-3 shrink-0" />
+                            <span>Replace</span>
+                          </>
+                        ) : (
+                          <>
+                            <Sparkles className="w-3 h-3 shrink-0" />
+                            <span>Generate</span>
+                          </>
+                        )}
+                      </button>
+                    )}
+
                     <button
                       type="button"
                       onClick={(e) => {
@@ -1595,8 +1859,8 @@ export function LocalVideoTimelineEditor({
                         setActiveSceneId(seg.scene.id);
                         playFromCutTime(seg.cutStart);
                       }}
-                      title={`Play Scene ${idx + 1}`}
-                      aria-label={`Play Scene ${idx + 1}`}
+                      title={`Play Clip ${idx + 1}`}
+                      aria-label={`Play Clip ${idx + 1}`}
                       className="p-1 text-[#525d6d] hover:text-teal-700 dark:text-[#8b95a5] dark:hover:text-teal-400 transition-colors cursor-pointer"
                     >
                       <Play className="w-3.5 h-3.5" />
@@ -1606,13 +1870,14 @@ export function LocalVideoTimelineEditor({
                     </span>
                     <button
                       type="button"
+                      disabled={isRegeneratingThis}
                       onClick={(e) => {
                         e.stopPropagation();
                         e.currentTarget.blur();
                         handleDeleteClip(seg.scene.id);
                       }}
-                      aria-label={`Delete scene ${idx + 1}`}
-                      className="p-1 text-[#525d6d] dark:text-[#8b95a5] hover:text-red-600 dark:hover:text-red-400 transition-colors cursor-pointer"
+                      aria-label={`Delete clip ${idx + 1}`}
+                      className="p-1 text-[#525d6d] dark:text-[#8b95a5] hover:text-red-600 dark:hover:text-red-400 disabled:opacity-40 transition-colors cursor-pointer"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>

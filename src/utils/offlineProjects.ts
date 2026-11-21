@@ -305,6 +305,7 @@ export async function captureLocalVideoThumbnail(localUrl: string): Promise<stri
       try {
         video.pause();
         video.removeAttribute("src");
+        video.load();
       } catch {
         // ignore
       }
