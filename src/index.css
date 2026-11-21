@@ -1,28 +1,42 @@
 @import "tailwindcss";
 @custom-variant dark (&:where(.dark, .dark *));
 
+@theme {
+  --color-teal-50: #eef2ff;
+  --color-teal-100: #dce5fe;
+  --color-teal-200: #b8cafc;
+  --color-teal-300: #7ca3fb;
+  --color-teal-400: #4e7ef7;
+  --color-teal-500: #355feb;
+  --color-teal-600: #264cd6;
+  --color-teal-700: #1c3db8;
+  --color-teal-800: #152f94;
+  --color-teal-900: #102370;
+  --color-teal-950: #091442;
+}
+
 :root {
-  --studio-canvas: #f5f6f8;
+  --studio-canvas: #f3f5fc;
   --studio-surface: #ffffff;
-  --studio-recessed: #eceff3;
-  --studio-hover: #e2e6ec;
-  --studio-border: #dde2e9;
-  --studio-ink: #0e1217;
-  --studio-muted: #525d6d;
-  --studio-accent: #0f766e;
-  --studio-matte: #e6e9ef;
+  --studio-recessed: #e7ecf8;
+  --studio-hover: #dce3f4;
+  --studio-border: #d2dcf0;
+  --studio-ink: #0c1026;
+  --studio-muted: #4d597d;
+  --studio-accent: #1c3db8;
+  --studio-matte: #dfe5f4;
 }
 
 .dark {
-  --studio-canvas: #0b0d10;
-  --studio-surface: #12151a;
-  --studio-recessed: #181c23;
-  --studio-hover: #202630;
-  --studio-border: #242a34;
-  --studio-ink: #f1f3f5;
-  --studio-muted: #8b95a5;
-  --studio-accent: #2dd4bf;
-  --studio-matte: #07080a;
+  --studio-canvas: #070814;
+  --studio-surface: #0d1022;
+  --studio-recessed: #141933;
+  --studio-hover: #1d2447;
+  --studio-border: #21284c;
+  --studio-ink: #f3f5fc;
+  --studio-muted: #919ec4;
+  --studio-accent: #4e7ef7;
+  --studio-matte: #04050e;
   color-scheme: dark;
 }
 
@@ -84,17 +98,17 @@
   background: transparent;
 }
 .studio-scrollbar::-webkit-scrollbar-thumb {
-  background: rgba(82, 93, 109, 0.28);
+  background: rgba(77, 89, 125, 0.28);
   border-radius: 3px;
 }
 .studio-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: rgba(82, 93, 109, 0.45);
+  background: rgba(77, 89, 125, 0.45);
 }
 .dark .studio-scrollbar::-webkit-scrollbar-thumb {
-  background: rgba(139, 149, 165, 0.24);
+  background: rgba(145, 158, 196, 0.24);
 }
 .dark .studio-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: rgba(139, 149, 165, 0.42);
+  background: rgba(145, 158, 196, 0.42);
 }
 
 /* Hide scrollbars cleanly inside the 9:16 subtitle list stage & compact horizontal rails */

@@ -356,7 +356,7 @@ export function YouTubePreviewPanel({
   if (!media || media.sourceType !== "youtube" || !media.videoId) {
     return (
       <div className="w-full">
-        <div className="w-full aspect-video rounded-lg border border-[#dde2e9] dark:border-[#242a34] bg-[#eceff3] dark:bg-[#07080a] flex flex-col items-center justify-center text-center p-6 gap-2.5 text-[#525d6d] dark:text-[#8b95a5]">
+        <div className="w-full aspect-video rounded-lg border border-[#d2dcf0] dark:border-[#21284c] bg-[#e7ecf8] dark:bg-[#04050e] flex flex-col items-center justify-center text-center p-6 gap-2.5 text-[#4d597d] dark:text-[#919ec4]">
           {isSearching ? (
             <>
               <Loader2 className="w-5 h-5 animate-spin text-teal-700 dark:text-teal-400" />
@@ -378,7 +378,7 @@ export function YouTubePreviewPanel({
   return (
     <div className="w-full flex flex-col gap-2.5">
       {/* 16:9 YouTube Theater Stage */}
-      <div className="relative w-full aspect-video rounded-lg overflow-hidden bg-[#07080a] border border-[#dde2e9] dark:border-[#242a34] shadow-sm">
+      <div className="relative w-full aspect-video rounded-lg overflow-hidden bg-[#04050e] border border-[#d2dcf0] dark:border-[#21284c] shadow-sm">
         <div ref={ytHostRef} className="w-full h-full" />
         {ytError && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-4 bg-black/85 text-center">
@@ -387,7 +387,7 @@ export function YouTubePreviewPanel({
               <button
                 type="button"
                 onClick={handleNext}
-                className="h-8 px-3.5 rounded-md bg-teal-700 hover:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 text-white dark:text-[#061412] text-xs font-semibold transition-colors cursor-pointer"
+                className="h-8 px-3.5 rounded-md bg-teal-700 hover:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 text-white dark:text-[#060918] text-xs font-semibold transition-colors cursor-pointer"
               >
                 Skip to Next Video
               </button>
@@ -399,25 +399,25 @@ export function YouTubePreviewPanel({
       {/* Compact Title + Inline Icon Stepper & Copy Action */}
       <div className="flex flex-col gap-1 min-w-0">
         <div className="flex items-start justify-between gap-3">
-          <h2 className="font-display text-sm sm:text-[15px] font-semibold text-[#0e1217] dark:text-[#f1f3f5] leading-snug line-clamp-2 min-w-0 flex-1">
+          <h2 className="font-display text-sm sm:text-[15px] font-semibold text-[#0c1026] dark:text-[#f3f5fc] leading-snug line-clamp-2 min-w-0 flex-1">
             {media.title}
           </h2>
 
           <div className="flex items-center gap-1.5 shrink-0">
             {videos.length > 0 && (
-              <div className="h-7 inline-flex items-center rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] overflow-hidden">
+              <div className="h-7 inline-flex items-center rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] overflow-hidden">
                 <button
                   type="button"
                   onClick={handlePrevious}
                   disabled={!canPrev}
                   title="Previous video"
                   aria-label="Previous YouTube video"
-                  className="h-full w-7 flex items-center justify-center text-[#0e1217] dark:text-[#f1f3f5] hover:bg-[#f5f6f8] dark:hover:bg-[#181c23] disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors"
+                  className="h-full w-7 flex items-center justify-center text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#f3f5fc] dark:hover:bg-[#141933] disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors"
                 >
                   <ChevronLeft className="w-3.5 h-3.5" />
                 </button>
                 {currentIndex >= 0 && (
-                  <span className="px-1.5 text-[11px] font-mono-tabular text-[#525d6d] dark:text-[#8b95a5] select-none">
+                  <span className="px-1.5 text-[11px] font-mono-tabular text-[#4d597d] dark:text-[#919ec4] select-none">
                     {currentIndex + 1}/{videos.length}
                   </span>
                 )}
@@ -427,7 +427,7 @@ export function YouTubePreviewPanel({
                   disabled={!canNext || isLoadingMore}
                   title="Next video"
                   aria-label="Next YouTube video"
-                  className="h-full w-7 flex items-center justify-center text-[#0e1217] dark:text-[#f1f3f5] hover:bg-[#f5f6f8] dark:hover:bg-[#181c23] disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors"
+                  className="h-full w-7 flex items-center justify-center text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#f3f5fc] dark:hover:bg-[#141933] disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors"
                 >
                   {isLoadingMore && pendingNextAfterLoadRef.current ? (
                     <Loader2 className="w-3 h-3 animate-spin" />
@@ -446,8 +446,8 @@ export function YouTubePreviewPanel({
                 aria-label="Copy YouTube link"
                 className={`h-7 w-7 rounded-md flex items-center justify-center shrink-0 cursor-pointer transition-colors border ${
                   copiedLink
-                    ? "bg-teal-700 text-white border-teal-700 dark:bg-teal-400 dark:text-[#061412] dark:border-teal-400"
-                    : "border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] hover:bg-[#f5f6f8] dark:hover:bg-[#181c23] text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5]"
+                    ? "bg-teal-700 text-white border-teal-700 dark:bg-teal-400 dark:text-[#060918] dark:border-teal-400"
+                    : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:bg-[#f3f5fc] dark:hover:bg-[#141933] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
                 }`}
               >
                 {copiedLink ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
@@ -456,7 +456,7 @@ export function YouTubePreviewPanel({
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-[#525d6d] dark:text-[#8b95a5]">
+        <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-[#4d597d] dark:text-[#919ec4]">
           <span className="truncate max-w-[240px]">{media.channel}</span>
           {matchedVideo?.durationText && (
             <>

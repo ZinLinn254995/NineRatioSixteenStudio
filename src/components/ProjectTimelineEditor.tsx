@@ -1281,17 +1281,17 @@ export function ProjectTimelineEditor({
   if (!project) {
     if (dockMode) {
       return (
-        <div className="border-t border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] overflow-hidden">
+        <div className="border-t border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] overflow-hidden">
           <div className="px-4 py-2.5 flex items-center justify-between gap-3">
             <div className="flex items-center gap-2.5 min-w-0">
               <div className="w-7 h-7 rounded-md bg-teal-50 dark:bg-teal-950/60 border border-teal-200/70 dark:border-teal-500/25 flex items-center justify-center text-teal-700 dark:text-teal-400 shrink-0">
                 <Film className="w-3.5 h-3.5" />
               </div>
               <div className="min-w-0">
-                <p className="text-xs font-semibold text-[#0e1217] dark:text-[#f1f3f5] truncate">
+                <p className="text-xs font-semibold text-[#0c1026] dark:text-[#f3f5fc] truncate">
                   Timeline Dock
                 </p>
-                <p className="text-[11px] text-[#525d6d] dark:text-[#8b95a5] truncate">
+                <p className="text-[11px] text-[#4d597d] dark:text-[#919ec4] truncate">
                   Upload a video and generate subtitles in Upload &amp; Cut to unlock the multi-track timeline.
                 </p>
               </div>
@@ -1302,7 +1302,7 @@ export function ProjectTimelineEditor({
                 <button
                   type="button"
                   onClick={onGoToScenes}
-                  className="h-8 px-3.5 rounded-md bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#061412] text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors"
+                  className="h-8 px-3.5 rounded-md bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors"
                 >
                   <span>Upload &amp; Cut</span>
                 </button>
@@ -1312,7 +1312,7 @@ export function ProjectTimelineEditor({
                   type="button"
                   onClick={onToggleCollapse}
                   aria-label={isCollapsed ? "Expand timeline dock" : "Collapse timeline dock"}
-                  className="h-8 w-8 rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] text-[#525d6d] dark:text-[#8b95a5] flex items-center justify-center cursor-pointer transition-colors"
+                  className="h-8 w-8 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[#4d597d] dark:text-[#919ec4] flex items-center justify-center cursor-pointer transition-colors"
                 >
                   {isCollapsed ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
                 </button>
@@ -1325,15 +1325,15 @@ export function ProjectTimelineEditor({
 
     return (
       <div className="flex flex-col gap-4 pb-6">
-        <div className="w-full aspect-video rounded-lg border border-dashed border-[#c9d1dc] dark:border-[#2e3644] bg-white dark:bg-[#12151a] flex flex-col items-center justify-center text-center p-6 gap-3">
+        <div className="w-full aspect-video rounded-lg border border-dashed border-[#bcc9e6] dark:border-[#2e3644] bg-white dark:bg-[#0d1022] flex flex-col items-center justify-center text-center p-6 gap-3">
           <div className="w-10 h-10 rounded-lg bg-teal-50 dark:bg-teal-950/60 border border-teal-200/70 dark:border-teal-500/25 flex items-center justify-center text-teal-700 dark:text-teal-400">
             <Film className="w-5 h-5" />
           </div>
           <div className="space-y-1 max-w-sm">
-            <p className="font-display text-sm font-semibold text-[#0e1217] dark:text-[#f1f3f5]">
+            <p className="font-display text-sm font-semibold text-[#0c1026] dark:text-[#f3f5fc]">
               No video
             </p>
-            <p className="text-xs text-[#525d6d] dark:text-[#8b95a5] leading-relaxed">
+            <p className="text-xs text-[#4d597d] dark:text-[#919ec4] leading-relaxed">
               Generate subtitles first to edit your 9:16 video on the timeline before exporting.
             </p>
           </div>
@@ -1341,7 +1341,7 @@ export function ProjectTimelineEditor({
             <button
               type="button"
               onClick={onGoToScenes}
-              className="mt-1 h-9 px-4 rounded-md bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#061412] text-xs font-semibold flex items-center gap-2 whitespace-nowrap cursor-pointer transition-colors"
+              className="mt-1 h-9 px-4 rounded-md bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] text-xs font-semibold flex items-center gap-2 whitespace-nowrap cursor-pointer transition-colors"
             >
               <span>Upload &amp; Cut</span>
             </button>
@@ -1355,18 +1355,18 @@ export function ProjectTimelineEditor({
     <div
       className={
         dockMode
-          ? "border-t border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] overflow-hidden flex flex-col"
+          ? "border-t border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] overflow-hidden flex flex-col"
           : "flex flex-col gap-3.5 pb-6"
       }
     >
       {/* Generated 9:16 Video Summary Header (Standard Mode) */}
       {!dockMode && (
-        <div className="px-3 py-2 border-b border-[#dde2e9] dark:border-[#242a34] flex items-center justify-between gap-3">
+        <div className="px-3 py-2 border-b border-[#d2dcf0] dark:border-[#21284c] flex items-center justify-between gap-3">
           <div className="min-w-0 flex-1">
-            <p className="text-xs font-semibold text-[#0e1217] dark:text-[#f1f3f5] truncate">
+            <p className="text-xs font-semibold text-[#0c1026] dark:text-[#f3f5fc] truncate">
               {project.title}
             </p>
-            <p className="text-[11px] font-mono-tabular text-[#525d6d] dark:text-[#8b95a5]">
+            <p className="text-[11px] font-mono-tabular text-[#4d597d] dark:text-[#919ec4]">
               9:16 Subtitle Video · {segments.length} {segments.length === 1 ? "clip" : "clips"} ·{" "}
               {roundTenth(totalCutDuration)}s
             </p>
@@ -1378,8 +1378,8 @@ export function ProjectTimelineEditor({
       <div
         className={
           dockMode
-            ? `px-4 py-1.5 flex flex-wrap items-center justify-between gap-2 bg-[#f5f6f8] dark:bg-[#12151a] ${
-                !isCollapsed || showDockScenes ? "border-b border-[#dde2e9] dark:border-[#242a34]" : ""
+            ? `px-4 py-1.5 flex flex-wrap items-center justify-between gap-2 bg-[#f3f5fc] dark:bg-[#0d1022] ${
+                !isCollapsed || showDockScenes ? "border-b border-[#d2dcf0] dark:border-[#21284c]" : ""
               }`
             : "flex flex-wrap items-center justify-between gap-2 px-0.5"
         }
@@ -1398,21 +1398,21 @@ export function ProjectTimelineEditor({
             }}
             disabled={segments.length === 0}
             aria-label={isPlaying ? "Pause video" : "Play video"}
-            className="h-7 w-7 rounded-md bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#061412] flex items-center justify-center disabled:opacity-40 cursor-pointer shrink-0 transition-colors"
+            className="h-7 w-7 rounded-md bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] flex items-center justify-center disabled:opacity-40 cursor-pointer shrink-0 transition-colors"
           >
             {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5 ml-0.5" />}
           </button>
 
-          <span className="text-xs font-mono-tabular text-[#0e1217] dark:text-[#f1f3f5] shrink-0">
+          <span className="text-xs font-mono-tabular text-[#0c1026] dark:text-[#f3f5fc] shrink-0">
             <span ref={timeReadoutRef}>{formatTimePrecise(cutTime)}</span>
-            <span className="text-[#525d6d] dark:text-[#8b95a5]">
+            <span className="text-[#4d597d] dark:text-[#919ec4]">
               {" "}
               / {formatTimePrecise(totalCutDuration)}
             </span>
           </span>
 
           {dockMode && (
-            <span className="hidden xl:inline text-[11px] text-[#525d6d] dark:text-[#8b95a5] truncate max-w-[260px]">
+            <span className="hidden xl:inline text-[11px] text-[#4d597d] dark:text-[#919ec4] truncate max-w-[260px]">
               · {project.title}
             </span>
           )}
@@ -1427,7 +1427,7 @@ export function ProjectTimelineEditor({
             }}
             disabled={!canSplitAtPlayhead}
             title="Split clip at center playhead"
-            className="h-7 px-2.5 rounded-md bg-teal-700 text-white hover:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#061412] disabled:opacity-40 disabled:cursor-not-allowed text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors"
+            className="h-7 px-2.5 rounded-md bg-teal-700 text-white hover:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] disabled:opacity-40 disabled:cursor-not-allowed text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors"
           >
             <Scissors className="w-3.5 h-3.5" />
             <span>Split</span>
@@ -1441,7 +1441,7 @@ export function ProjectTimelineEditor({
             }}
             disabled={!targetClipForDelete}
             title="Delete selected clip"
-            className="h-7 px-2.5 rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#181c23] hover:bg-red-50 hover:text-red-600 hover:border-red-200 dark:hover:bg-red-950/30 dark:hover:text-red-400 dark:hover:border-red-900 text-xs font-medium text-[#0e1217] dark:text-[#f1f3f5] flex items-center gap-1.5 whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
+            className="h-7 px-2.5 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] hover:bg-red-50 hover:text-red-600 hover:border-red-200 dark:hover:bg-red-950/30 dark:hover:text-red-400 dark:hover:border-red-900 text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center gap-1.5 whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
           >
             <Trash2 className="w-3.5 h-3.5" />
             <span>Delete</span>
@@ -1456,7 +1456,7 @@ export function ProjectTimelineEditor({
             disabled={undoStack.length === 0}
             title="Undo last edit"
             aria-label="Undo last edit"
-            className="h-7 px-2 rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#181c23] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] text-xs font-medium text-[#0e1217] dark:text-[#f1f3f5] flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
+            className="h-7 px-2 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
           >
             <Undo2 className="w-3.5 h-3.5" />
           </button>
@@ -1469,12 +1469,12 @@ export function ProjectTimelineEditor({
             }}
             title="Reset timeline edits"
             aria-label="Reset timeline edits"
-            className="h-7 px-2 rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#181c23] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] text-xs font-medium text-[#0e1217] dark:text-[#f1f3f5] flex items-center gap-1 cursor-pointer transition-colors"
+            className="h-7 px-2 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center gap-1 cursor-pointer transition-colors"
           >
             <RotateCcw className="w-3.5 h-3.5" />
           </button>
 
-          <div className="inline-flex items-center border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#181c23] rounded-md overflow-hidden ml-0.5">
+          <div className="inline-flex items-center border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] rounded-md overflow-hidden ml-0.5">
             <button
               type="button"
               onClick={(e) => {
@@ -1482,7 +1482,7 @@ export function ProjectTimelineEditor({
                 setPxPerSec((z) => clampZoom(Math.round(z * 0.75)));
               }}
               aria-label="Zoom out timeline"
-              className="h-7 w-7 flex items-center justify-center text-[#0e1217] dark:text-[#f1f3f5] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] cursor-pointer transition-colors"
+              className="h-7 w-7 flex items-center justify-center text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] cursor-pointer transition-colors"
             >
               <ZoomOut className="w-3.5 h-3.5" />
             </button>
@@ -1493,7 +1493,7 @@ export function ProjectTimelineEditor({
                 setPxPerSec((z) => clampZoom(Math.round(z * 1.35)));
               }}
               aria-label="Zoom in timeline"
-              className="h-7 w-7 flex items-center justify-center border-l border-[#dde2e9] dark:border-[#242a34] text-[#0e1217] dark:text-[#f1f3f5] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] cursor-pointer transition-colors"
+              className="h-7 w-7 flex items-center justify-center border-l border-[#d2dcf0] dark:border-[#21284c] text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] cursor-pointer transition-colors"
             >
               <ZoomIn className="w-3.5 h-3.5" />
             </button>
@@ -1507,7 +1507,7 @@ export function ProjectTimelineEditor({
               className={`h-7 px-2.5 rounded-md border text-xs font-medium flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors ${
                 showDockScenes
                   ? "border-teal-600/70 bg-teal-50 text-teal-800 dark:border-teal-400/70 dark:bg-teal-950/60 dark:text-teal-200"
-                  : "border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#181c23] text-[#0e1217] dark:text-[#f1f3f5] hover:bg-[#eceff3] dark:hover:bg-[#1e242e]"
+                  : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142]"
               }`}
             >
               <List className="w-3.5 h-3.5" />
@@ -1521,7 +1521,7 @@ export function ProjectTimelineEditor({
               onClick={onToggleCollapse}
               title={isCollapsed ? "Expand timeline dock" : "Collapse timeline dock"}
               aria-label={isCollapsed ? "Expand timeline dock" : "Collapse timeline dock"}
-              className="h-7 w-7 rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#181c23] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] text-[#525d6d] dark:text-[#8b95a5] flex items-center justify-center cursor-pointer transition-colors"
+              className="h-7 w-7 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[#4d597d] dark:text-[#919ec4] flex items-center justify-center cursor-pointer transition-colors"
             >
               {isCollapsed ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
             </button>
@@ -1534,16 +1534,16 @@ export function ProjectTimelineEditor({
         <div
           ref={viewportRef}
           onPointerDown={handlePointerDownViewport}
-          className={`relative overflow-hidden select-none touch-none [&_*]:touch-none cursor-grab active:cursor-grabbing bg-[#eceff3] dark:bg-[#090b0e] ${
+          className={`relative overflow-hidden select-none touch-none [&_*]:touch-none cursor-grab active:cursor-grabbing bg-[#e7ecf8] dark:bg-[#050712] ${
             dockMode
               ? "h-48"
-              : "h-64 rounded-lg border border-[#dde2e9] dark:border-[#242a34]"
+              : "h-64 rounded-lg border border-[#d2dcf0] dark:border-[#21284c]"
           }`}
         >
         {/* Full-Width Stationary Ruler Bar Background */}
         <div
           aria-hidden="true"
-          className="pointer-events-none absolute inset-x-0 top-0 h-6 border-b border-[#dde2e9] dark:border-[#242a34] bg-white/95 dark:bg-[#12151a]/95"
+          className="pointer-events-none absolute inset-x-0 top-0 h-6 border-b border-[#d2dcf0] dark:border-[#21284c] bg-white/95 dark:bg-[#0d1022]/95"
         />
 
         {/* Moving Timeline Content Track */}
@@ -1563,10 +1563,10 @@ export function ProjectTimelineEditor({
                 style={{ left: `${s * pxPerSec}px` }}
                 className="absolute top-0 bottom-0 flex flex-col justify-end pointer-events-none"
               >
-                <span className="text-[10px] font-mono-tabular text-[#525d6d] dark:text-[#8b95a5] pl-1 leading-none pb-1">
+                <span className="text-[10px] font-mono-tabular text-[#4d597d] dark:text-[#919ec4] pl-1 leading-none pb-1">
                   {formatRulerTick(s)}
                 </span>
-                <div className="w-px h-1.5 bg-[#c9d1dc] dark:bg-[#323a48]" />
+                <div className="w-px h-1.5 bg-[#bcc9e6] dark:bg-[#2f3866]" />
               </div>
             ))}
           </div>
@@ -1669,7 +1669,7 @@ export function ProjectTimelineEditor({
                         aria-valuemax={seg.endSec}
                         aria-valuenow={seg.startSec}
                         onPointerDown={(e) => handlePointerDownTrimHandle(e, "trim-start", seg)}
-                        className="absolute left-0 inset-y-0 w-3.5 bg-teal-700 dark:bg-teal-400 text-white dark:text-[#061412] flex items-center justify-center cursor-ew-resize touch-none z-20"
+                        className="absolute left-0 inset-y-0 w-3.5 bg-teal-700 dark:bg-teal-400 text-white dark:text-[#060918] flex items-center justify-center cursor-ew-resize touch-none z-20"
                       >
                         <div className="w-0.5 h-5 rounded-full bg-current opacity-95" />
                       </div>
@@ -1680,7 +1680,7 @@ export function ProjectTimelineEditor({
                         aria-valuemax={sourceDuration}
                         aria-valuenow={seg.endSec}
                         onPointerDown={(e) => handlePointerDownTrimHandle(e, "trim-end", seg)}
-                        className="absolute right-0 inset-y-0 w-3.5 bg-teal-700 dark:bg-teal-400 text-white dark:text-[#061412] flex items-center justify-center cursor-ew-resize touch-none z-20"
+                        className="absolute right-0 inset-y-0 w-3.5 bg-teal-700 dark:bg-teal-400 text-white dark:text-[#060918] flex items-center justify-center cursor-ew-resize touch-none z-20"
                       >
                         <div className="w-0.5 h-5 rounded-full bg-current opacity-95" />
                       </div>
@@ -1714,22 +1714,22 @@ export function ProjectTimelineEditor({
                     style={{ left: `${leftPx}px`, width: `${widthPx}px` }}
                     className={`absolute inset-y-0 transition-colors ${
                       isEdgeAligned
-                        ? "bg-amber-400/30 dark:bg-amber-400/24"
-                        : "bg-amber-400/18 dark:bg-amber-400/12"
+                        ? "bg-amber-600/22 dark:bg-amber-500/20"
+                        : "bg-amber-600/12 dark:bg-amber-500/10"
                     }`}
                   >
                     <div
                       className={`absolute inset-y-0 left-0 w-[1.5px] ${
                         alignedLeft
-                          ? "bg-amber-500 dark:bg-amber-300 shadow-[0_0_6px_rgba(245,158,11,0.75)]"
-                          : "bg-amber-500/45 dark:bg-amber-400/40"
+                          ? "bg-amber-700/85 dark:bg-amber-400/85"
+                          : "bg-amber-700/40 dark:bg-amber-500/35"
                       }`}
                     />
                     <div
                       className={`absolute inset-y-0 right-0 w-[1.5px] ${
                         alignedRight
-                          ? "bg-amber-500 dark:bg-amber-300 shadow-[0_0_6px_rgba(245,158,11,0.75)]"
-                          : "bg-amber-500/45 dark:bg-amber-400/40"
+                          ? "bg-amber-700/85 dark:bg-amber-400/85"
+                          : "bg-amber-700/40 dark:bg-amber-500/35"
                       }`}
                     />
                   </div>
@@ -1745,7 +1745,7 @@ export function ProjectTimelineEditor({
                     <div
                       key={`sr-bar-${srIdx}-${sr.cutStart.toFixed(2)}`}
                       style={{ left: `${leftPx}px`, width: `${widthPx}px` }}
-                      className="absolute inset-y-0 rounded-[3px] bg-amber-400/85 dark:bg-amber-400/80 border border-amber-600/70 dark:border-amber-300/70"
+                      className="absolute inset-y-0 rounded-[3px] bg-amber-600/45 dark:bg-amber-500/40 border border-amber-800/45 dark:border-amber-400/45"
                     />
                   );
                 })}
@@ -1782,18 +1782,18 @@ export function ProjectTimelineEditor({
                   title={`#${subIdx + 1} (${formatTimePrecise(startTime)} – ${formatTimePrecise(endTime)}): ${sub.burmese || sub.thaiPhonetic}`}
                   className={`absolute top-0 h-10 rounded-md overflow-hidden flex items-center transition-shadow ${
                     isSelected
-                      ? "bg-emerald-600 dark:bg-emerald-500 text-white px-4 z-10 shadow-sm cursor-grab active:cursor-grabbing touch-none"
+                      ? "bg-[#1c3db8] dark:bg-[#264cd6] text-white px-4 z-10 shadow-sm cursor-grab active:cursor-grabbing touch-none"
                       : isAtPlayhead
-                        ? "bg-emerald-100/95 dark:bg-emerald-950/90 text-emerald-950 dark:text-emerald-100 px-2 ring-1 ring-emerald-500/80 dark:ring-emerald-400/80 cursor-pointer"
-                        : "bg-white/95 dark:bg-[#181c23]/95 text-[#0e1217] dark:text-[#f1f3f5] px-2 ring-1 ring-[#c9d1dc] dark:ring-[#323a48] hover:ring-emerald-400 cursor-pointer"
+                        ? "bg-[#e6ecfc] dark:bg-[#101c45] text-[#142d87] dark:text-[#a8c3fa] px-2 ring-1 ring-[#264cd6]/70 dark:ring-[#4e7ef7]/60 cursor-pointer"
+                        : "bg-white/95 dark:bg-[#141933]/95 text-[#0c1026] dark:text-[#f3f5fc] px-2 ring-1 ring-[#bcc9e6] dark:ring-[#2f3866] hover:ring-[#264cd6]/60 cursor-pointer"
                   }`}
                 >
                   <div className="pointer-events-none flex items-center gap-1.5 min-w-0 w-full">
                     <span
                       className={`text-[10px] font-mono-tabular font-bold shrink-0 ${
                         isSelected
-                          ? "text-emerald-100"
-                          : "text-emerald-700 dark:text-emerald-400"
+                          ? "text-[#d5e2fc]"
+                          : "text-[#1c3db8] dark:text-[#7ca3fb]"
                       }`}
                     >
                       S{subIdx + 1}
@@ -1807,11 +1807,11 @@ export function ProjectTimelineEditor({
                     <>
                       <div
                         aria-hidden="true"
-                        className="pointer-events-none absolute top-0 left-3 right-3 h-[2px] bg-emerald-300 dark:bg-emerald-200 z-20"
+                        className="pointer-events-none absolute top-0 left-3 right-3 h-[2px] bg-[#89aef9] dark:bg-[#93b5fa]/85 z-20"
                       />
                       <div
                         aria-hidden="true"
-                        className="pointer-events-none absolute bottom-0 left-3 right-3 h-[2px] bg-emerald-300 dark:bg-emerald-200 z-20"
+                        className="pointer-events-none absolute bottom-0 left-3 right-3 h-[2px] bg-[#89aef9] dark:bg-[#93b5fa]/85 z-20"
                       />
                       <div
                         role="slider"
@@ -1822,9 +1822,9 @@ export function ProjectTimelineEditor({
                         onPointerDown={(e) =>
                           handlePointerDownSubInteraction(e, "sub-trim-start", sub, subIdx)
                         }
-                        className="absolute left-0 inset-y-0 w-3 bg-emerald-700 dark:bg-emerald-400 text-white flex items-center justify-center cursor-ew-resize touch-none z-20"
+                        className="absolute left-0 inset-y-0 w-3 bg-[#132b85] dark:bg-[#4e7ef7] text-white dark:text-[#060918] flex items-center justify-center cursor-ew-resize touch-none z-20"
                       >
-                        <div className="w-0.5 h-4 rounded-full bg-white/95" />
+                        <div className="w-0.5 h-4 rounded-full bg-current opacity-90" />
                       </div>
                       <div
                         role="slider"
@@ -1835,9 +1835,9 @@ export function ProjectTimelineEditor({
                         onPointerDown={(e) =>
                           handlePointerDownSubInteraction(e, "sub-trim-end", sub, subIdx)
                         }
-                        className="absolute right-0 inset-y-0 w-3 bg-emerald-700 dark:bg-emerald-400 text-white flex items-center justify-center cursor-ew-resize touch-none z-20"
+                        className="absolute right-0 inset-y-0 w-3 bg-[#132b85] dark:bg-[#4e7ef7] text-white dark:text-[#060918] flex items-center justify-center cursor-ew-resize touch-none z-20"
                       >
-                        <div className="w-0.5 h-4 rounded-full bg-white/95" />
+                        <div className="w-0.5 h-4 rounded-full bg-current opacity-90" />
                       </div>
                     </>
                   )}
@@ -1849,7 +1849,7 @@ export function ProjectTimelineEditor({
           {/* Dedicated Open Scroll Space Below Clips & Subtitles */}
           <div
             aria-hidden="true"
-            className="h-14 mt-2 border-t border-dashed border-[#c9d1dc] dark:border-[#2a313e]"
+            className="h-14 mt-2 border-t border-dashed border-[#bcc9e6] dark:border-[#21284c]"
           />
         </div>
 
@@ -1859,12 +1859,12 @@ export function ProjectTimelineEditor({
           className="pointer-events-none absolute inset-y-0 left-1/2 -translate-x-1/2 z-30 flex flex-col items-center"
         >
           <div className="w-3 h-3 rounded-b-sm bg-teal-700 dark:bg-teal-400 shadow-sm" />
-          <div className="w-[2px] flex-1 bg-teal-700 dark:bg-teal-400 shadow-[0_0_6px_rgba(15,118,110,0.45)]" />
+          <div className="w-[2px] flex-1 bg-teal-700 dark:bg-teal-400 shadow-[0_0_5px_rgba(28,61,184,0.38)]" />
         </div>
 
         {/* Live Trim Timestamp Badge */}
         {dragBadge && (
-          <div className="pointer-events-none absolute top-2 right-2.5 z-30 px-2 py-0.5 rounded bg-[#0b0d10]/90 text-white text-[11px] font-mono-tabular shadow">
+          <div className="pointer-events-none absolute top-2 right-2.5 z-30 px-2 py-0.5 rounded bg-[#070814]/90 text-white text-[11px] font-mono-tabular shadow">
             {dragBadge.label}: {formatTimePrecise(dragBadge.sec)}
           </div>
         )}
@@ -1877,26 +1877,26 @@ export function ProjectTimelineEditor({
       <div
         className={
           dockMode
-            ? "border-t border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] max-h-36 overflow-y-auto studio-scrollbar"
-            : "border-y border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] overflow-hidden"
+            ? "border-t border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] max-h-36 overflow-y-auto studio-scrollbar"
+            : "border-y border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] overflow-hidden"
         }
       >
         {segments.length === 0 ? (
           <div className="p-4 text-center space-y-2">
-            <p className="text-xs text-[#525d6d] dark:text-[#8b95a5]">
+            <p className="text-xs text-[#4d597d] dark:text-[#919ec4]">
               All clips were deleted. Restore the original clips to split and keep the parts you want.
             </p>
             <button
               type="button"
               onClick={handleRestoreOriginal}
-              className="h-8 px-3 rounded-md bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#061412] text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer transition-colors"
+              className="h-8 px-3 rounded-md bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer transition-colors"
             >
               <RotateCcw className="w-3.5 h-3.5" />
               <span>Restore Original Clips</span>
             </button>
           </div>
         ) : (
-          <div className="divide-y divide-[#dde2e9] dark:divide-[#242a34]">
+          <div className="divide-y divide-[#d2dcf0] dark:divide-[#21284c]">
             {segments.map((seg, idx) => {
               const isSelected = seg.sceneId === activeSceneId;
               const dur = roundTenth(seg.clipDur);
@@ -1911,21 +1911,21 @@ export function ProjectTimelineEditor({
                   className={`px-3.5 py-2 flex items-center justify-between gap-3 cursor-pointer transition-colors ${
                     isSelected
                       ? "bg-teal-50/70 dark:bg-teal-950/30"
-                      : "bg-white dark:bg-[#12151a] hover:bg-[#eceff3] dark:hover:bg-[#181c23]"
+                      : "bg-white dark:bg-[#0d1022] hover:bg-[#e7ecf8] dark:hover:bg-[#141933]"
                   }`}
                 >
                   <div className="flex items-center gap-2.5 min-w-0">
                     <span
                       className={`text-[11px] font-mono-tabular font-semibold shrink-0 ${
-                        isSelected ? "text-teal-700 dark:text-teal-400" : "text-[#525d6d] dark:text-[#8b95a5]"
+                        isSelected ? "text-teal-700 dark:text-teal-400" : "text-[#4d597d] dark:text-[#919ec4]"
                       }`}
                     >
                       {String(idx + 1).padStart(2, "0")}
                     </span>
-                    <span className="text-xs font-semibold text-[#0e1217] dark:text-[#f1f3f5]">
+                    <span className="text-xs font-semibold text-[#0c1026] dark:text-[#f3f5fc]">
                       Clip {idx + 1}
                     </span>
-                    <span className="text-xs font-mono-tabular text-[#525d6d] dark:text-[#8b95a5]">
+                    <span className="text-xs font-mono-tabular text-[#4d597d] dark:text-[#919ec4]">
                       {formatTimePrecise(seg.startSec)} – {formatTimePrecise(seg.endSec)}
                     </span>
                   </div>
@@ -1941,11 +1941,11 @@ export function ProjectTimelineEditor({
                       }}
                       title={`Play Clip ${idx + 1}`}
                       aria-label={`Play Clip ${idx + 1}`}
-                      className="p-1 text-[#525d6d] hover:text-teal-700 dark:text-[#8b95a5] dark:hover:text-teal-400 transition-colors cursor-pointer"
+                      className="p-1 text-[#4d597d] hover:text-teal-700 dark:text-[#919ec4] dark:hover:text-teal-400 transition-colors cursor-pointer"
                     >
                       <Play className="w-3.5 h-3.5" />
                     </button>
-                    <span className="text-xs font-mono-tabular font-medium text-[#0e1217] dark:text-[#f1f3f5]">
+                    <span className="text-xs font-mono-tabular font-medium text-[#0c1026] dark:text-[#f3f5fc]">
                       {dur}s
                     </span>
                     <button
@@ -1956,7 +1956,7 @@ export function ProjectTimelineEditor({
                         handleDeleteClip(seg.sceneId);
                       }}
                       aria-label={`Delete clip ${idx + 1}`}
-                      className="p-1 text-[#525d6d] dark:text-[#8b95a5] hover:text-red-600 dark:hover:text-red-400 transition-colors cursor-pointer"
+                      className="p-1 text-[#4d597d] dark:text-[#919ec4] hover:text-red-600 dark:hover:text-red-400 transition-colors cursor-pointer"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>

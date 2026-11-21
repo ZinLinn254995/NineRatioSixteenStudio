@@ -25,7 +25,7 @@ export const DEFAULT_VIDEO_EDIT: VideoEditSettings = {
   translationTone: "casual",
   subtitleFontScale: "md",
   subtitleTheme: "auto",
-  subtitleHighlightColor: "amber",
+  subtitleHighlightColor: "indigo",
   showWordGloss: true,
   showBurmeseLine: true,
 };

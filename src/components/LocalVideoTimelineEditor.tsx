@@ -1351,7 +1351,7 @@ export function LocalVideoTimelineEditor({
   const videoViewportNode = (
     <div
       onClick={togglePlay}
-      className={`relative w-full rounded-lg overflow-hidden bg-[#07080a] border border-[#dde2e9] dark:border-[#242a34] cursor-pointer group ${
+      className={`relative w-full rounded-lg overflow-hidden bg-[#04050e] border border-[#d2dcf0] dark:border-[#21284c] cursor-pointer group ${
         mobileStageTarget ? "h-full" : "max-w-xl mx-auto aspect-video"
       }`}
     >
@@ -1474,14 +1474,14 @@ export function LocalVideoTimelineEditor({
             }}
             disabled={segments.length === 0}
             aria-label={isPlaying ? "Pause video" : "Play video"}
-            className="h-8 w-8 rounded-md bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#061412] flex items-center justify-center disabled:opacity-40 cursor-pointer shrink-0 transition-colors"
+            className="h-8 w-8 rounded-md bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] flex items-center justify-center disabled:opacity-40 cursor-pointer shrink-0 transition-colors"
           >
             {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5 ml-0.5" />}
           </button>
 
-          <span className="text-xs font-mono-tabular text-[#0e1217] dark:text-[#f1f3f5]">
+          <span className="text-xs font-mono-tabular text-[#0c1026] dark:text-[#f3f5fc]">
             {formatTimePrecise(cutTime)}
-            <span className="text-[#525d6d] dark:text-[#8b95a5]">
+            <span className="text-[#4d597d] dark:text-[#919ec4]">
               {" "}
               / {formatTimePrecise(totalCutDuration)}
             </span>
@@ -1497,7 +1497,7 @@ export function LocalVideoTimelineEditor({
             }}
             disabled={!canSplitAtPlayhead}
             title="Split clip at center playhead"
-            className="h-8 px-2.5 rounded-md bg-teal-700 text-white hover:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#061412] disabled:opacity-40 disabled:cursor-not-allowed text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors"
+            className="h-8 px-2.5 rounded-md bg-teal-700 text-white hover:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] disabled:opacity-40 disabled:cursor-not-allowed text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors"
           >
             <Scissors className="w-3.5 h-3.5" />
             <span>Split</span>
@@ -1511,7 +1511,7 @@ export function LocalVideoTimelineEditor({
             }}
             disabled={!targetClipForDelete}
             title="Delete selected clip"
-            className="h-8 px-2.5 rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#181c23] hover:bg-red-50 hover:text-red-600 hover:border-red-200 dark:hover:bg-red-950/30 dark:hover:text-red-400 dark:hover:border-red-900 text-xs font-medium text-[#0e1217] dark:text-[#f1f3f5] flex items-center gap-1.5 whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
+            className="h-8 px-2.5 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] hover:bg-red-50 hover:text-red-600 hover:border-red-200 dark:hover:bg-red-950/30 dark:hover:text-red-400 dark:hover:border-red-900 text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center gap-1.5 whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
           >
             <Trash2 className="w-3.5 h-3.5" />
             <span>Delete</span>
@@ -1526,7 +1526,7 @@ export function LocalVideoTimelineEditor({
             disabled={undoStack.length === 0}
             title="Undo last edit"
             aria-label="Undo last edit"
-            className="h-8 px-2 rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#181c23] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] text-xs font-medium text-[#0e1217] dark:text-[#f1f3f5] flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
+            className="h-8 px-2 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
           >
             <Undo2 className="w-3.5 h-3.5" />
           </button>
@@ -1539,12 +1539,12 @@ export function LocalVideoTimelineEditor({
             }}
             title="Reset to full video"
             aria-label="Reset to full video"
-            className="h-8 px-2 rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#181c23] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] text-xs font-medium text-[#0e1217] dark:text-[#f1f3f5] flex items-center gap-1 cursor-pointer transition-colors"
+            className="h-8 px-2 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center gap-1 cursor-pointer transition-colors"
           >
             <RotateCcw className="w-3.5 h-3.5" />
           </button>
 
-          <div className="inline-flex items-center border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#181c23] rounded-md overflow-hidden ml-0.5">
+          <div className="inline-flex items-center border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] rounded-md overflow-hidden ml-0.5">
             <button
               type="button"
               onClick={(e) => {
@@ -1552,7 +1552,7 @@ export function LocalVideoTimelineEditor({
                 setPxPerSec((z) => clampZoom(Math.round(z * 0.75)));
               }}
               aria-label="Zoom out timeline"
-              className="h-8 w-7 flex items-center justify-center text-[#0e1217] dark:text-[#f1f3f5] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] cursor-pointer transition-colors"
+              className="h-8 w-7 flex items-center justify-center text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] cursor-pointer transition-colors"
             >
               <ZoomOut className="w-3.5 h-3.5" />
             </button>
@@ -1563,7 +1563,7 @@ export function LocalVideoTimelineEditor({
                 setPxPerSec((z) => clampZoom(Math.round(z * 1.35)));
               }}
               aria-label="Zoom in timeline"
-              className="h-8 w-7 flex items-center justify-center border-l border-[#dde2e9] dark:border-[#242a34] text-[#0e1217] dark:text-[#f1f3f5] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] cursor-pointer transition-colors"
+              className="h-8 w-7 flex items-center justify-center border-l border-[#d2dcf0] dark:border-[#21284c] text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] cursor-pointer transition-colors"
             >
               <ZoomIn className="w-3.5 h-3.5" />
             </button>
@@ -1575,12 +1575,12 @@ export function LocalVideoTimelineEditor({
       <div
         ref={viewportRef}
         onPointerDown={handlePointerDownViewport}
-        className="relative h-48 rounded-lg border border-[#dde2e9] dark:border-[#242a34] bg-[#eceff3] dark:bg-[#090b0e] overflow-hidden select-none touch-none [&_*]:touch-none cursor-grab active:cursor-grabbing"
+        className="relative h-48 rounded-lg border border-[#d2dcf0] dark:border-[#21284c] bg-[#e7ecf8] dark:bg-[#050712] overflow-hidden select-none touch-none [&_*]:touch-none cursor-grab active:cursor-grabbing"
       >
         {/* Full-Width Stationary Ruler Bar Background */}
         <div
           aria-hidden="true"
-          className="pointer-events-none absolute inset-x-0 top-0 h-6 border-b border-[#dde2e9] dark:border-[#242a34] bg-white/95 dark:bg-[#12151a]/95"
+          className="pointer-events-none absolute inset-x-0 top-0 h-6 border-b border-[#d2dcf0] dark:border-[#21284c] bg-white/95 dark:bg-[#0d1022]/95"
         />
 
         {/* Moving Timeline Content Track */}
@@ -1599,10 +1599,10 @@ export function LocalVideoTimelineEditor({
                 style={{ left: `${s * pxPerSec}px` }}
                 className="absolute top-0 bottom-0 flex flex-col justify-end pointer-events-none"
               >
-                <span className="text-[10px] font-mono-tabular text-[#525d6d] dark:text-[#8b95a5] pl-1 leading-none pb-1">
+                <span className="text-[10px] font-mono-tabular text-[#4d597d] dark:text-[#919ec4] pl-1 leading-none pb-1">
                   {formatRulerTick(s)}
                 </span>
-                <div className="w-px h-1.5 bg-[#c9d1dc] dark:bg-[#323a48]" />
+                <div className="w-px h-1.5 bg-[#bcc9e6] dark:bg-[#2f3866]" />
               </div>
             ))}
           </div>
@@ -1705,7 +1705,7 @@ export function LocalVideoTimelineEditor({
                         aria-valuemax={seg.endSec}
                         aria-valuenow={seg.startSec}
                         onPointerDown={(e) => handlePointerDownTrimHandle(e, "trim-start", seg)}
-                        className="absolute left-0 inset-y-0 w-3.5 bg-teal-700 dark:bg-teal-400 text-white dark:text-[#061412] flex items-center justify-center cursor-ew-resize touch-none z-20"
+                        className="absolute left-0 inset-y-0 w-3.5 bg-teal-700 dark:bg-teal-400 text-white dark:text-[#060918] flex items-center justify-center cursor-ew-resize touch-none z-20"
                       >
                         <div className="w-0.5 h-5 rounded-full bg-current opacity-95" />
                       </div>
@@ -1716,7 +1716,7 @@ export function LocalVideoTimelineEditor({
                         aria-valuemax={sourceDuration}
                         aria-valuenow={seg.endSec}
                         onPointerDown={(e) => handlePointerDownTrimHandle(e, "trim-end", seg)}
-                        className="absolute right-0 inset-y-0 w-3.5 bg-teal-700 dark:bg-teal-400 text-white dark:text-[#061412] flex items-center justify-center cursor-ew-resize touch-none z-20"
+                        className="absolute right-0 inset-y-0 w-3.5 bg-teal-700 dark:bg-teal-400 text-white dark:text-[#060918] flex items-center justify-center cursor-ew-resize touch-none z-20"
                       >
                         <div className="w-0.5 h-5 rounded-full bg-current opacity-95" />
                       </div>
@@ -1730,7 +1730,7 @@ export function LocalVideoTimelineEditor({
           {/* Dedicated One-Clip-Height Open Scroll Space Below Clips */}
           <div
             aria-hidden="true"
-            className="h-20 mt-2 border-t border-dashed border-[#c9d1dc] dark:border-[#2a313e]"
+            className="h-20 mt-2 border-t border-dashed border-[#bcc9e6] dark:border-[#2a313e]"
           />
         </div>
 
@@ -1746,23 +1746,23 @@ export function LocalVideoTimelineEditor({
       </div>
 
       {/* Kept Scenes Summary List */}
-      <div className="border-y border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] overflow-hidden">
+      <div className="border-y border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] overflow-hidden">
         {segments.length === 0 ? (
           <div className="p-5 text-center space-y-2">
-            <p className="text-xs text-[#525d6d] dark:text-[#8b95a5]">
+            <p className="text-xs text-[#4d597d] dark:text-[#919ec4]">
               All clips were deleted. Restore the full video to split and keep the clips you want.
             </p>
             <button
               type="button"
               onClick={handleRestoreFullVideo}
-              className="h-8 px-3 rounded-md bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#061412] text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer transition-colors"
+              className="h-8 px-3 rounded-md bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer transition-colors"
             >
               <RotateCcw className="w-3.5 h-3.5" />
               <span>Restore Full Video</span>
             </button>
           </div>
         ) : (
-          <div className="divide-y divide-[#dde2e9] dark:divide-[#242a34]">
+          <div className="divide-y divide-[#d2dcf0] dark:divide-[#21284c]">
             {segments.map((seg, idx) => {
               const isSelected = seg.scene.id === activeSceneId;
               const dur = roundTenth(seg.clipDur);
@@ -1781,21 +1781,21 @@ export function LocalVideoTimelineEditor({
                   className={`px-3 py-2 flex items-center justify-between gap-2.5 cursor-pointer transition-colors ${
                     isSelected
                       ? "bg-teal-50/70 dark:bg-teal-950/30"
-                      : "bg-white dark:bg-[#12151a] hover:bg-[#eceff3] dark:hover:bg-[#181c23]"
+                      : "bg-white dark:bg-[#0d1022] hover:bg-[#e7ecf8] dark:hover:bg-[#141933]"
                   }`}
                 >
                   <div className="flex items-center gap-2 min-w-0">
                     <span
                       className={`text-[11px] font-mono-tabular font-semibold shrink-0 ${
-                        isSelected ? "text-teal-700 dark:text-teal-400" : "text-[#525d6d] dark:text-[#8b95a5]"
+                        isSelected ? "text-teal-700 dark:text-teal-400" : "text-[#4d597d] dark:text-[#919ec4]"
                       }`}
                     >
                       {String(idx + 1).padStart(2, "0")}
                     </span>
-                    <span className="text-xs font-semibold text-[#0e1217] dark:text-[#f1f3f5] whitespace-nowrap">
+                    <span className="text-xs font-semibold text-[#0c1026] dark:text-[#f3f5fc] whitespace-nowrap">
                       Clip {idx + 1}
                     </span>
-                    <span className="text-xs font-mono-tabular text-[#525d6d] dark:text-[#8b95a5] truncate">
+                    <span className="text-xs font-mono-tabular text-[#4d597d] dark:text-[#919ec4] truncate">
                       {formatTimePrecise(seg.startSec)} – {formatTimePrecise(seg.endSec)}
                     </span>
                     {hasExistingSubs && (
@@ -1826,7 +1826,7 @@ export function LocalVideoTimelineEditor({
                             ? `Replace subtitles for Clip ${idx + 1}`
                             : `Generate subtitles for Clip ${idx + 1}`
                         }
-                        className="h-6 px-2 rounded-sm border border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] hover:border-teal-700/50 dark:hover:border-teal-400/50 hover:text-teal-700 dark:hover:text-teal-400 text-[11px] font-medium text-[#0e1217] dark:text-[#f1f3f5] inline-flex items-center gap-1 whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
+                        className="h-6 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] hover:border-teal-700/50 dark:hover:border-teal-400/50 hover:text-teal-700 dark:hover:text-teal-400 text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] inline-flex items-center gap-1 whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
                       >
                         {isRegeneratingThis ? (
                           <>
@@ -1861,11 +1861,11 @@ export function LocalVideoTimelineEditor({
                       }}
                       title={`Play Clip ${idx + 1}`}
                       aria-label={`Play Clip ${idx + 1}`}
-                      className="p-1 text-[#525d6d] hover:text-teal-700 dark:text-[#8b95a5] dark:hover:text-teal-400 transition-colors cursor-pointer"
+                      className="p-1 text-[#4d597d] hover:text-teal-700 dark:text-[#919ec4] dark:hover:text-teal-400 transition-colors cursor-pointer"
                     >
                       <Play className="w-3.5 h-3.5" />
                     </button>
-                    <span className="text-xs font-mono-tabular font-medium text-[#0e1217] dark:text-[#f1f3f5]">
+                    <span className="text-xs font-mono-tabular font-medium text-[#0c1026] dark:text-[#f3f5fc]">
                       {dur}s
                     </span>
                     <button
@@ -1877,7 +1877,7 @@ export function LocalVideoTimelineEditor({
                         handleDeleteClip(seg.scene.id);
                       }}
                       aria-label={`Delete clip ${idx + 1}`}
-                      className="p-1 text-[#525d6d] dark:text-[#8b95a5] hover:text-red-600 dark:hover:text-red-400 disabled:opacity-40 transition-colors cursor-pointer"
+                      className="p-1 text-[#4d597d] dark:text-[#919ec4] hover:text-red-600 dark:hover:text-red-400 disabled:opacity-40 transition-colors cursor-pointer"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>

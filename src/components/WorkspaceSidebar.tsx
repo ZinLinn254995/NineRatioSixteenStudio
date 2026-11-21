@@ -682,7 +682,7 @@ export function WorkspaceSidebar({
           ref={mobileStageWrapperRef}
           className={
             isStudioView
-              ? "bg-[#e6e9ef] dark:bg-[#07080a] shrink-0"
+              ? "bg-[#dfe5f4] dark:bg-[#04050e] shrink-0"
               : "hidden"
           }
         >
@@ -730,17 +730,17 @@ export function WorkspaceSidebar({
                 onTouchStart={handleClipsDragTouchStart}
                 onDoubleClick={handleClipsDragDoubleClick}
                 onKeyDown={handleClipsDragKeyDown}
-                className="relative group w-full h-6 shrink-0 flex items-center justify-center cursor-ns-resize touch-none select-none border-b border-[#dde2e9] dark:border-[#242a34] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-700 dark:focus-visible:ring-teal-400"
+                className="relative group w-full h-6 shrink-0 flex items-center justify-center cursor-ns-resize touch-none select-none border-b border-[#d2dcf0] dark:border-[#21284c] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-700 dark:focus-visible:ring-teal-400"
               >
                 <span
                   className={`h-1 rounded-full transition-all ${
                     isClipsResizing
                       ? "w-16 bg-teal-700 dark:bg-teal-400"
-                      : "w-10 bg-[#b8c2d0] dark:bg-[#323a48] group-hover:w-14 group-hover:bg-teal-700/80 dark:group-hover:bg-teal-400/80"
+                      : "w-10 bg-[#b8c2d0] dark:bg-[#2f3866] group-hover:w-14 group-hover:bg-teal-700/80 dark:group-hover:bg-teal-400/80"
                   }`}
                 />
                 {isClipsResizing && (
-                  <span className="pointer-events-none absolute -top-6 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded bg-teal-700 text-white dark:bg-teal-400 dark:text-[#061412] text-[10px] font-mono-tabular font-semibold whitespace-nowrap shadow-sm">
+                  <span className="pointer-events-none absolute -top-6 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded bg-teal-700 text-white dark:bg-teal-400 dark:text-[#060918] text-[10px] font-mono-tabular font-semibold whitespace-nowrap shadow-sm">
                     {clipsScaleLabel} · {Math.round(clampedClipsScale * 100)}%
                   </span>
                 )}
@@ -767,7 +767,7 @@ export function WorkspaceSidebar({
           }
         >
           {isProcessing && (
-            <div className="px-3.5 py-2.5 rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] flex items-center justify-between gap-3 text-xs sm:text-sm text-[#0e1217] dark:text-[#f1f3f5]">
+            <div className="px-3.5 py-2.5 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] flex items-center justify-between gap-3 text-xs sm:text-sm text-[#0c1026] dark:text-[#f3f5fc]">
               <div className="flex items-center gap-2.5 min-w-0">
                 <Loader2 className="w-4 h-4 animate-spin text-teal-700 dark:text-teal-400 shrink-0" />
                 <span className="truncate">Transcribing spoken dialogue in your selected clips...</span>
@@ -799,7 +799,7 @@ export function WorkspaceSidebar({
                   {isSearching ? (
                     <Loader2 className="w-4 h-4 animate-spin text-teal-700 dark:text-teal-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                   ) : (
-                    <Search className="w-4 h-4 text-[#525d6d] dark:text-[#8b95a5] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <Search className="w-4 h-4 text-[#4d597d] dark:text-[#919ec4] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                   )}
                   <input
                     type="search"
@@ -810,14 +810,14 @@ export function WorkspaceSidebar({
                     aria-label="Search YouTube videos or paste URL"
                     className={`w-full h-9 pl-9 ${
                       searchInput ? "pr-9" : "pr-3"
-                    } text-[13px] rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] text-[#0e1217] dark:text-[#f1f3f5] placeholder:text-[#525d6d]/75 dark:placeholder:text-[#8b95a5]/75 focus:outline-none focus:border-teal-700 dark:focus:border-teal-400 transition-colors [&::-webkit-search-cancel-button]:hidden`}
+                    } text-[13px] rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#0c1026] dark:text-[#f3f5fc] placeholder:text-[#4d597d]/75 dark:placeholder:text-[#919ec4]/75 focus:outline-none focus:border-teal-700 dark:focus:border-teal-400 transition-colors [&::-webkit-search-cancel-button]:hidden`}
                   />
                   {searchInput && (
                     <button
                       type="button"
                       onClick={onClearSearch}
                       aria-label="Clear search"
-                      className="w-7 h-7 rounded flex items-center justify-center text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-white absolute right-1 top-1/2 -translate-y-1/2 cursor-pointer"
+                      className="w-7 h-7 rounded flex items-center justify-center text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-white absolute right-1 top-1/2 -translate-y-1/2 cursor-pointer"
                     >
                       <X className="w-3.5 h-3.5" />
                     </button>
@@ -832,8 +832,8 @@ export function WorkspaceSidebar({
                       isSearching ? "opacity-50 cursor-not-allowed" : "cursor-pointer"
                     } ${
                       thaiOnly
-                        ? "text-[#0e1217] dark:text-[#f1f3f5]"
-                        : "text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5]"
+                        ? "text-[#0c1026] dark:text-[#f3f5fc]"
+                        : "text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
                     }`}
                   >
                     <input
@@ -847,8 +847,8 @@ export function WorkspaceSidebar({
                       aria-hidden="true"
                       className={`w-4 h-4 rounded-[3px] border flex items-center justify-center transition-colors ${
                         thaiOnly
-                          ? "bg-teal-700 border-teal-700 text-white dark:bg-teal-400 dark:border-teal-400 dark:text-[#061412]"
-                          : "bg-white dark:bg-[#12151a] border-[#b8c2d0] dark:border-[#3b4554]"
+                          ? "bg-teal-700 border-teal-700 text-white dark:bg-teal-400 dark:border-teal-400 dark:text-[#060918]"
+                          : "bg-white dark:bg-[#0d1022] border-[#b8c2d0] dark:border-[#3b4554]"
                       }`}
                     >
                       {thaiOnly && <Check className="w-3 h-3 stroke-[2.75]" />}
@@ -860,7 +860,7 @@ export function WorkspaceSidebar({
                     <div
                       role="group"
                       aria-label="Reuse license filter"
-                      className="h-9 inline-flex items-center p-0.5 rounded-md bg-[#eceff3] dark:bg-[#181c23] border border-[#dde2e9] dark:border-[#242a34] shrink-0"
+                      className="h-9 inline-flex items-center p-0.5 rounded-md bg-[#e7ecf8] dark:bg-[#141933] border border-[#d2dcf0] dark:border-[#21284c] shrink-0"
                     >
                       {(
                         [
@@ -877,8 +877,8 @@ export function WorkspaceSidebar({
                             onClick={() => onChangeLicenseFilter(opt.id)}
                             className={`h-full px-2.5 text-xs font-medium rounded-sm whitespace-nowrap shrink-0 transition-colors cursor-pointer flex items-center ${
                               selected
-                                ? "bg-white dark:bg-[#12151a] text-teal-700 dark:text-teal-400 font-semibold shadow-xs"
-                                : "text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5]"
+                                ? "bg-white dark:bg-[#0d1022] text-teal-700 dark:text-teal-400 font-semibold shadow-xs"
+                                : "text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
                             }`}
                           >
                             {opt.label}
@@ -891,7 +891,7 @@ export function WorkspaceSidebar({
                       <button
                         type="button"
                         onClick={onResetToRecommended}
-                        className="h-9 px-3 rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] hover:bg-[#eceff3] dark:hover:bg-[#181c23] text-xs font-medium text-teal-700 dark:text-teal-400 whitespace-nowrap shrink-0 cursor-pointer transition-colors"
+                        className="h-9 px-3 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] text-xs font-medium text-teal-700 dark:text-teal-400 whitespace-nowrap shrink-0 cursor-pointer transition-colors"
                       >
                         Recommended
                       </button>
@@ -903,7 +903,7 @@ export function WorkspaceSidebar({
                           disabled={isSearching}
                           title="Refresh recommended videos"
                           aria-label="Refresh recommended videos"
-                          className="h-9 w-9 rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] hover:bg-[#eceff3] dark:hover:bg-[#181c23] text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5] flex items-center justify-center shrink-0 cursor-pointer disabled:opacity-40 transition-colors"
+                          className="h-9 w-9 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] flex items-center justify-center shrink-0 cursor-pointer disabled:opacity-40 transition-colors"
                         >
                           <RefreshCw className={`w-3.5 h-3.5 ${isSearching ? "animate-spin" : ""}`} />
                         </button>
@@ -934,8 +934,8 @@ export function WorkspaceSidebar({
 
                 {/* Right / Bottom: Clean Flat Hairline-Divided Feed Catalog */}
                 <div className="lg:col-span-5 flex flex-col gap-2 min-w-0">
-                  <div className="flex items-center justify-between text-[11px] text-[#525d6d] dark:text-[#8b95a5]">
-                    <span className="font-display font-semibold uppercase tracking-wider text-[#0e1217] dark:text-[#f1f3f5] truncate">
+                  <div className="flex items-center justify-between text-[11px] text-[#4d597d] dark:text-[#919ec4]">
+                    <span className="font-display font-semibold uppercase tracking-wider text-[#0c1026] dark:text-[#f3f5fc] truncate">
                       {activeQuery ? `Results · “${activeQuery}”` : "Recommended"}
                     </span>
                     {videos.length > 0 && !isSearching && (
@@ -952,22 +952,22 @@ export function WorkspaceSidebar({
                   )}
 
                   {isSearching ? (
-                    <div className="rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] divide-y divide-[#dde2e9] dark:divide-[#242a34] overflow-hidden">
+                    <div className="rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] divide-y divide-[#d2dcf0] dark:divide-[#21284c] overflow-hidden">
                       {Array.from({ length: 6 }).map((_, i) => (
                         <div
                           key={i}
                           className="p-2.5 flex flex-col sm:flex-row gap-3 animate-pulse"
                         >
-                          <div className="aspect-video w-full sm:w-32 sm:shrink-0 rounded-sm bg-[#eceff3] dark:bg-[#181c23]" />
+                          <div className="aspect-video w-full sm:w-32 sm:shrink-0 rounded-sm bg-[#e7ecf8] dark:bg-[#141933]" />
                           <div className="flex-1 py-1 space-y-2">
-                            <div className="h-3.5 bg-[#eceff3] dark:bg-[#181c23] rounded w-5/6" />
-                            <div className="h-3 bg-[#eceff3] dark:bg-[#181c23] rounded w-1/2" />
+                            <div className="h-3.5 bg-[#e7ecf8] dark:bg-[#141933] rounded w-5/6" />
+                            <div className="h-3 bg-[#e7ecf8] dark:bg-[#141933] rounded w-1/2" />
                           </div>
                         </div>
                       ))}
                     </div>
                   ) : videos.length === 0 ? (
-                    <div className="py-10 flex flex-col items-center justify-center text-center text-[#525d6d] dark:text-[#8b95a5] rounded-md border border-dashed border-[#c9d1dc] dark:border-[#2e3644] bg-white dark:bg-[#12151a] p-6">
+                    <div className="py-10 flex flex-col items-center justify-center text-center text-[#4d597d] dark:text-[#919ec4] rounded-md border border-dashed border-[#bcc9e6] dark:border-[#2e3644] bg-white dark:bg-[#0d1022] p-6">
                       <Film className="w-5 h-5 mb-2 opacity-60" />
                       <p className="text-xs sm:text-sm">
                         {thaiOnly
@@ -999,7 +999,7 @@ export function WorkspaceSidebar({
                     </div>
                   ) : (
                     <>
-                      <div className="rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] divide-y divide-[#dde2e9] dark:divide-[#242a34] overflow-hidden">
+                      <div className="rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] divide-y divide-[#d2dcf0] dark:divide-[#21284c] overflow-hidden">
                         {videos.map((v) => {
                           const isSelected = selectedVideoId === v.videoId;
                           return (
@@ -1010,26 +1010,26 @@ export function WorkspaceSidebar({
                               className={`group w-full text-left p-2.5 transition-colors cursor-pointer flex flex-col sm:flex-row gap-2.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-700 dark:focus-visible:ring-teal-400 border-l-2 ${
                                 isSelected
                                   ? "border-l-teal-700 dark:border-l-teal-400 bg-teal-50/50 dark:bg-teal-950/30"
-                                  : "border-l-transparent hover:bg-[#f5f6f8] dark:hover:bg-[#181c23]"
+                                  : "border-l-transparent hover:bg-[#f3f5fc] dark:hover:bg-[#141933]"
                               }`}
                             >
-                              <div className="relative w-full sm:w-32 aspect-video rounded-sm bg-[#eceff3] dark:bg-[#181c23] overflow-hidden shrink-0">
+                              <div className="relative w-full sm:w-32 aspect-video rounded-sm bg-[#e7ecf8] dark:bg-[#141933] overflow-hidden shrink-0">
                                 <img
                                   src={v.thumbnail}
                                   alt={v.title}
                                   referrerPolicy="no-referrer"
                                   className="w-full h-full object-cover group-hover:scale-[1.02] transition-transform duration-200"
                                 />
-                                <span className="absolute bottom-1 right-1 px-1 py-0.5 rounded-xs bg-[#07080a]/90 text-white text-[10px] font-mono-tabular">
+                                <span className="absolute bottom-1 right-1 px-1 py-0.5 rounded-xs bg-[#04050e]/90 text-white text-[10px] font-mono-tabular">
                                   {v.durationText}
                                 </span>
                               </div>
 
                               <div className="flex-1 min-w-0 flex flex-col justify-between py-0.5">
-                                <p className="text-xs font-semibold text-[#0e1217] dark:text-[#f1f3f5] line-clamp-2 leading-snug">
+                                <p className="text-xs font-semibold text-[#0c1026] dark:text-[#f3f5fc] line-clamp-2 leading-snug">
                                   {v.title}
                                 </p>
-                                <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-[#525d6d] dark:text-[#8b95a5]">
+                                <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-[#4d597d] dark:text-[#919ec4]">
                                   <span className="truncate max-w-[150px]">{v.channel}</span>
                                   {v.viewCountText && (
                                     <>
@@ -1065,7 +1065,7 @@ export function WorkspaceSidebar({
                             type="button"
                             onClick={onLoadMoreVideos}
                             disabled={isLoadingMore}
-                            className="h-8 px-3.5 rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] hover:bg-[#eceff3] dark:hover:bg-[#181c23] text-xs font-medium text-[#0e1217] dark:text-[#f1f3f5] flex items-center gap-2 whitespace-nowrap cursor-pointer disabled:opacity-50 transition-colors"
+                            className="h-8 px-3.5 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center gap-2 whitespace-nowrap cursor-pointer disabled:opacity-50 transition-colors"
                           >
                             {isLoadingMore ? (
                               <>
@@ -1108,12 +1108,12 @@ export function WorkspaceSidebar({
       <div
         className={
           isStudioView
-            ? "flex-1 min-h-0 flex flex-col bg-white dark:bg-[#12151a] overflow-hidden"
+            ? "flex-1 min-h-0 flex flex-col bg-white dark:bg-[#0d1022] overflow-hidden"
             : "hidden"
         }
       >
           {/* Single Edge-to-Edge Studio Underline Tab Bar */}
-          <div className="h-10 shrink-0 px-3.5 border-b border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8]/70 dark:bg-[#0b0d10]/70 flex items-center justify-between gap-2">
+          <div className="h-10 shrink-0 px-3.5 border-b border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc]/70 dark:bg-[#070814]/70 flex items-center justify-between gap-2">
             <div
               role="tablist"
               aria-label="Studio workspace groups"
@@ -1137,10 +1137,10 @@ export function WorkspaceSidebar({
                     }}
                     className={`relative h-full border-b-2 text-xs whitespace-nowrap shrink-0 flex items-center gap-1.5 transition-colors ${
                       isDisabled
-                        ? "border-transparent text-[#525d6d]/45 dark:text-[#8b95a5]/40 font-medium opacity-45 cursor-not-allowed"
+                        ? "border-transparent text-[#4d597d]/45 dark:text-[#919ec4]/40 font-medium opacity-45 cursor-not-allowed"
                         : active
-                          ? "border-teal-700 dark:border-teal-400 text-[#0e1217] dark:text-[#f1f3f5] font-semibold cursor-pointer"
-                          : "border-transparent text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5] font-medium cursor-pointer"
+                          ? "border-teal-700 dark:border-teal-400 text-[#0c1026] dark:text-[#f3f5fc] font-semibold cursor-pointer"
+                          : "border-transparent text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] font-medium cursor-pointer"
                     }`}
                   >
                     <Icon
@@ -1183,7 +1183,7 @@ export function WorkspaceSidebar({
                       });
                       onChangeVoiceSettings({ ...DEFAULT_VOICE_SETTINGS });
                     }}
-                    className="text-[11px] font-medium text-[#525d6d] dark:text-[#8b95a5] hover:text-teal-700 dark:hover:text-teal-400 flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer transition-colors"
+                    className="text-[11px] font-medium text-[#4d597d] dark:text-[#919ec4] hover:text-teal-700 dark:hover:text-teal-400 flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer transition-colors"
                   >
                     <RotateCcw className="w-3 h-3" />
                     <span className="hidden sm:inline">Reset All</span>
@@ -1191,7 +1191,7 @@ export function WorkspaceSidebar({
                 )}
 
               {project && (
-                <span className="text-[11px] text-[#525d6d] dark:text-[#8b95a5] font-mono-tabular whitespace-nowrap">
+                <span className="text-[11px] text-[#4d597d] dark:text-[#919ec4] font-mono-tabular whitespace-nowrap">
                   {project.scenes.length} · {studioHeaderDuration}s
                 </span>
               )}
@@ -1220,7 +1220,7 @@ export function WorkspaceSidebar({
               const currentRank = rankMap[stage] ?? 0;
 
               return (
-                <div className="px-3.5 py-2.5 border-b border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] space-y-2 text-xs text-[#0e1217] dark:text-[#f1f3f5]">
+                <div className="px-3.5 py-2.5 border-b border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] space-y-2 text-xs text-[#0c1026] dark:text-[#f3f5fc]">
                   <div className="flex items-center justify-between gap-3">
                     <div className="flex items-center gap-2.5 min-w-0">
                       <Loader2 className="w-3.5 h-3.5 animate-spin text-teal-700 dark:text-teal-400 shrink-0" />
@@ -1243,7 +1243,7 @@ export function WorkspaceSidebar({
                     </div>
                   </div>
 
-                  <div className="w-full h-1 rounded-full bg-[#dde2e9] dark:bg-[#242a34] overflow-hidden">
+                  <div className="w-full h-1 rounded-full bg-[#d2dcf0] dark:bg-[#21284c] overflow-hidden">
                     <div
                       className="h-full bg-teal-700 dark:bg-teal-400 transition-[width] duration-300"
                       style={{ width: `${Math.max(4, percent)}%` }}
@@ -1256,7 +1256,7 @@ export function WorkspaceSidebar({
                         <span className="text-teal-700 dark:text-teal-400 font-semibold">
                           Uploading
                         </span>
-                        <span className="text-[#8b95a5]">→</span>
+                        <span className="text-[#919ec4]">→</span>
                       </>
                     )}
                     {steps.map((step, sIdx) => {
@@ -1264,14 +1264,14 @@ export function WorkspaceSidebar({
                       const active = currentRank === sIdx;
                       return (
                         <span key={step.id} className="inline-flex items-center gap-1.5">
-                          {sIdx > 0 && <span className="text-[#8b95a5]">→</span>}
+                          {sIdx > 0 && <span className="text-[#919ec4]">→</span>}
                           <span
                             className={
                               active
                                 ? "text-teal-700 dark:text-teal-400 font-semibold"
                                 : done
                                   ? "text-emerald-700 dark:text-emerald-400"
-                                  : "text-[#525d6d] dark:text-[#8b95a5]"
+                                  : "text-[#4d597d] dark:text-[#919ec4]"
                             }
                           >
                             {done ? `✓ ${step.text}` : step.text}
@@ -1346,17 +1346,17 @@ export function WorkspaceSidebar({
                   <Captions className="w-4 h-4" />
                 </div>
                 <div className="space-y-1 max-w-sm mx-auto">
-                  <p className="font-display text-sm font-semibold text-[#0e1217] dark:text-[#f1f3f5]">
+                  <p className="font-display text-sm font-semibold text-[#0c1026] dark:text-[#f3f5fc]">
                     No generated captions yet
                   </p>
-                  <p className="text-xs text-[#525d6d] dark:text-[#8b95a5] leading-relaxed">
+                  <p className="text-xs text-[#4d597d] dark:text-[#919ec4] leading-relaxed">
                     Upload a video, cut the clips you want, and generate subtitles in Upload &amp; Cut to edit Thai phonetics, Burmese translations, and styling.
                   </p>
                 </div>
                 <button
                   type="button"
                   onClick={() => onChangeStudioSection("clips")}
-                  className="h-8 px-3.5 rounded-md bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#061412] text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer transition-colors"
+                  className="h-8 px-3.5 rounded-md bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer transition-colors"
                 >
                   <span>Upload &amp; Cut</span>
                 </button>
@@ -1366,7 +1366,7 @@ export function WorkspaceSidebar({
             {studioSection === "captions" && project && (
               <div className="flex flex-col">
                 {/* Compact Scenes Jump + Undo/Redo + Add Row */}
-                <div className="px-3.5 py-2 border-b border-[#dde2e9] dark:border-[#242a34] flex flex-wrap items-center justify-between gap-2">
+                <div className="px-3.5 py-2 border-b border-[#d2dcf0] dark:border-[#21284c] flex flex-wrap items-center justify-between gap-2">
                   <div className="flex flex-wrap gap-1">
                     {project.scenes.map((sc, idx) => {
                       let sceneCutStart = 0;
@@ -1384,8 +1384,8 @@ export function WorkspaceSidebar({
                           onClick={() => onSeek(sceneCutStart)}
                           className={`px-2 py-1 rounded-sm text-[11px] font-mono-tabular border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                             isSceneActive
-                              ? "bg-teal-700 text-white border-teal-700 dark:bg-teal-400 dark:text-[#061412] dark:border-teal-400 font-semibold"
-                              : "bg-[#f5f6f8] dark:bg-[#181c23] text-[#0e1217] dark:text-[#f1f3f5] border-[#dde2e9] dark:border-[#242a34] hover:border-[#c3ccd9] dark:hover:border-[#323a48]"
+                              ? "bg-teal-700 text-white border-teal-700 dark:bg-teal-400 dark:text-[#060918] dark:border-teal-400 font-semibold"
+                              : "bg-[#f3f5fc] dark:bg-[#141933] text-[#0c1026] dark:text-[#f3f5fc] border-[#d2dcf0] dark:border-[#21284c] hover:border-[#b4c2e3] dark:hover:border-[#2f3866]"
                           }`}
                         >
                           {idx + 1}. {formatRangeSec(sc.startSec)}–{formatRangeSec(sc.endSec)}
@@ -1395,14 +1395,14 @@ export function WorkspaceSidebar({
                   </div>
 
                   <div className="flex items-center gap-1.5 shrink-0">
-                    <div className="inline-flex items-center border border-[#dde2e9] dark:border-[#242a34] rounded-sm overflow-hidden bg-white dark:bg-[#181c23]">
+                    <div className="inline-flex items-center border border-[#d2dcf0] dark:border-[#21284c] rounded-sm overflow-hidden bg-white dark:bg-[#141933]">
                       <button
                         type="button"
                         disabled={!canUndoSubtitles || !onUndoSubtitles}
                         onClick={onUndoSubtitles}
                         title="Undo subtitle edit (Ctrl+Z)"
                         aria-label="Undo subtitle edit"
-                        className="h-7 px-2 flex items-center gap-1 text-[11px] font-medium text-[#0e1217] dark:text-[#f1f3f5] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors whitespace-nowrap"
+                        className="h-7 px-2 flex items-center gap-1 text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors whitespace-nowrap"
                       >
                         <Undo2 className="w-3 h-3" />
                         <span>Undo</span>
@@ -1413,7 +1413,7 @@ export function WorkspaceSidebar({
                         onClick={onRedoSubtitles}
                         title="Redo subtitle edit (Ctrl+Shift+Z)"
                         aria-label="Redo subtitle edit"
-                        className="h-7 px-2 flex items-center gap-1 text-[11px] font-medium border-l border-[#dde2e9] dark:border-[#242a34] text-[#0e1217] dark:text-[#f1f3f5] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors whitespace-nowrap"
+                        className="h-7 px-2 flex items-center gap-1 text-[11px] font-medium border-l border-[#d2dcf0] dark:border-[#21284c] text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors whitespace-nowrap"
                       >
                         <Redo2 className="w-3 h-3" />
                         <span>Redo</span>
@@ -1423,7 +1423,7 @@ export function WorkspaceSidebar({
                     <button
                       type="button"
                       onClick={() => (showAddSub ? setShowAddSub(false) : openAddSubtitleForm())}
-                      className="h-7 px-2.5 rounded-sm bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#061412] text-[11px] font-semibold flex items-center gap-1 whitespace-nowrap shrink-0 transition-colors cursor-pointer"
+                      className="h-7 px-2.5 rounded-sm bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] text-[11px] font-semibold flex items-center gap-1 whitespace-nowrap shrink-0 transition-colors cursor-pointer"
                     >
                       {showAddSub ? <X className="w-3 h-3" /> : <Plus className="w-3 h-3" />}
                       <span>{showAddSub ? "Close" : "Add"}</span>
@@ -1432,17 +1432,17 @@ export function WorkspaceSidebar({
                 </div>
 
                 {/* Flat Hairline Captions Controls Bar (Zero Nested Card Container) */}
-                <div className="px-3.5 py-2 border-b border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8]/60 dark:bg-[#0b0d10]/50 space-y-2">
+                <div className="px-3.5 py-2 border-b border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc]/60 dark:bg-[#070814]/50 space-y-2">
                   {/* Line 1: Tone & Thai Script Toggle */}
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex flex-wrap items-center gap-1.5">
-                      <span className="text-[11px] font-medium text-[#525d6d] dark:text-[#8b95a5] whitespace-nowrap">
+                      <span className="text-[11px] font-medium text-[#4d597d] dark:text-[#919ec4] whitespace-nowrap">
                         Tone
                       </span>
                       <div
                         role="group"
                         aria-label="Translation tone"
-                        className="inline-flex items-center p-0.5 rounded-sm bg-[#eceff3] dark:bg-[#181c23] border border-[#dde2e9] dark:border-[#242a34]"
+                        className="inline-flex items-center p-0.5 rounded-sm bg-[#e7ecf8] dark:bg-[#141933] border border-[#d2dcf0] dark:border-[#21284c]"
                       >
                         {SUBTITLE_TONE_OPTIONS.map((opt) => {
                           const active = editSettings.translationTone === opt.id;
@@ -1458,8 +1458,8 @@ export function WorkspaceSidebar({
                               }
                               className={`px-2 py-0.5 rounded-xs text-[11px] font-medium whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
                                 active
-                                  ? "bg-white dark:bg-[#12151a] text-teal-700 dark:text-teal-400 font-semibold shadow-xs"
-                                  : "text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5]"
+                                  ? "bg-white dark:bg-[#0d1022] text-teal-700 dark:text-teal-400 font-semibold shadow-xs"
+                                  : "text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
                               }`}
                             >
                               {opt.label}
@@ -1494,7 +1494,7 @@ export function WorkspaceSidebar({
                             disabled={isResyncingTimings}
                             onClick={() => onRetranslateAll(editSettings.translationTone)}
                             title="Re-translate all subtitles using selected tone"
-                            className="h-6 px-2 rounded-sm border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] hover:border-teal-600/60 dark:hover:border-teal-400/60 hover:text-teal-700 dark:hover:text-teal-400 text-[11px] font-medium text-[#0e1217] dark:text-[#f1f3f5] flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50 transition-colors"
+                            className="h-6 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:border-teal-600/60 dark:hover:border-teal-400/60 hover:text-teal-700 dark:hover:text-teal-400 text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50 transition-colors"
                           >
                             <Sparkles className="w-3 h-3" />
                             <span>Apply</span>
@@ -1517,7 +1517,7 @@ export function WorkspaceSidebar({
                       className={`h-6 px-2 rounded-sm border text-[11px] font-medium flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
                         editSettings.showThaiScript
                           ? "border-teal-600/70 bg-teal-50/80 text-teal-800 dark:border-teal-400/70 dark:bg-teal-950/50 dark:text-teal-200"
-                          : "border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5]"
+                          : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
                       }`}
                     >
                       <span>Thai Script</span>
@@ -1526,7 +1526,7 @@ export function WorkspaceSidebar({
                         className={`w-5 h-3 rounded-full p-0.5 transition-colors flex items-center ${
                           editSettings.showThaiScript
                             ? "bg-teal-700 dark:bg-teal-400 justify-end"
-                            : "bg-[#c9d1dc] dark:bg-[#2e3644] justify-start"
+                            : "bg-[#bcc9e6] dark:bg-[#2e3644] justify-start"
                         }`}
                       >
                         <span className="w-2 h-2 rounded-full bg-white shadow-xs" />
@@ -1566,7 +1566,7 @@ export function WorkspaceSidebar({
                                 type="button"
                                 onClick={() => onShiftAllSubtitles(delta)}
                                 title={`Shift all subtitles by ${delta > 0 ? `+${delta}` : delta}s`}
-                                className="h-6 px-1.5 rounded-sm border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] text-[10px] font-mono-tabular font-medium text-[#0e1217] dark:text-[#f1f3f5] cursor-pointer whitespace-nowrap transition-colors"
+                                className="h-6 px-1.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[10px] font-mono-tabular font-medium text-[#0c1026] dark:text-[#f3f5fc] cursor-pointer whitespace-nowrap transition-colors"
                               >
                                 {delta > 0 ? `+${delta}s` : `${delta}s`}
                               </button>
@@ -1576,7 +1576,7 @@ export function WorkspaceSidebar({
                                 type="button"
                                 onClick={onAutoFixSubtitleTimings}
                                 title="Automatically fix overlaps, flicker gaps, and out-of-range subtitle timings"
-                                className="h-6 px-2 rounded-sm border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] hover:border-teal-600/70 hover:text-teal-700 dark:hover:border-teal-400/70 dark:hover:text-teal-400 text-[11px] font-medium text-[#0e1217] dark:text-[#f1f3f5] flex items-center gap-1 cursor-pointer whitespace-nowrap transition-colors"
+                                className="h-6 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:border-teal-600/70 hover:text-teal-700 dark:hover:border-teal-400/70 dark:hover:text-teal-400 text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center gap-1 cursor-pointer whitespace-nowrap transition-colors"
                               >
                                 <Wand2 className="w-3 h-3" />
                                 <span>Fix</span>
@@ -1625,7 +1625,7 @@ export function WorkspaceSidebar({
                               className={`h-6 px-2 rounded-sm border text-[11px] font-medium flex items-center gap-1 cursor-pointer whitespace-nowrap transition-colors ${
                                 showSubSearch || subSearchQuery.trim()
                                   ? "border-teal-600/80 bg-teal-50/80 text-teal-800 dark:border-teal-400/80 dark:bg-teal-950/60 dark:text-teal-200"
-                                  : "border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] text-[#0e1217] dark:text-[#f1f3f5] hover:bg-[#eceff3] dark:hover:bg-[#1e242e]"
+                                  : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142]"
                               }`}
                             >
                               <Search className="w-3 h-3" />
@@ -1639,7 +1639,7 @@ export function WorkspaceSidebar({
                               className={`h-6 px-2 rounded-sm border text-[11px] font-medium flex items-center gap-1 cursor-pointer whitespace-nowrap transition-colors ${
                                 showSubStyle || subStyleCustomized
                                   ? "border-teal-600/80 bg-teal-50/80 text-teal-800 dark:border-teal-400/80 dark:bg-teal-950/60 dark:text-teal-200"
-                                  : "border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] text-[#0e1217] dark:text-[#f1f3f5] hover:bg-[#eceff3] dark:hover:bg-[#1e242e]"
+                                  : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142]"
                               }`}
                             >
                               <Palette className="w-3 h-3" />
@@ -1650,7 +1650,7 @@ export function WorkspaceSidebar({
                               type="button"
                               onClick={jumpToActiveSubtitle}
                               title="Scroll to currently active subtitle at playhead"
-                              className="h-6 px-2 rounded-sm border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] text-[11px] font-medium text-[#0e1217] dark:text-[#f1f3f5] flex items-center gap-1 cursor-pointer whitespace-nowrap transition-colors"
+                              className="h-6 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center gap-1 cursor-pointer whitespace-nowrap transition-colors"
                             >
                               <LocateFixed className="w-3 h-3" />
                               <span>Jump</span>
@@ -1661,7 +1661,7 @@ export function WorkspaceSidebar({
                                 type="button"
                                 onClick={() => setShowExportMenu((v) => !v)}
                                 title="Export SRT / VTT / Study Sheet"
-                                className="h-6 px-2 rounded-sm border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] text-[11px] font-medium text-[#0e1217] dark:text-[#f1f3f5] flex items-center gap-1 cursor-pointer whitespace-nowrap transition-colors"
+                                className="h-6 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center gap-1 cursor-pointer whitespace-nowrap transition-colors"
                               >
                                 {copiedTranscript ? (
                                   <>
@@ -1677,7 +1677,7 @@ export function WorkspaceSidebar({
                               </button>
 
                               {showExportMenu && (
-                                <div className="absolute right-0 mt-1 w-44 rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] shadow-lg p-1 z-30 space-y-0.5">
+                                <div className="absolute right-0 mt-1 w-44 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] shadow-lg p-1 z-30 space-y-0.5">
                                   <button
                                     type="button"
                                     onClick={() => {
@@ -1688,9 +1688,9 @@ export function WorkspaceSidebar({
                                       );
                                       setShowExportMenu(false);
                                     }}
-                                    className="w-full px-2.5 py-1.5 rounded-sm text-left text-xs font-medium text-[#0e1217] dark:text-[#f1f3f5] hover:bg-[#eceff3] dark:hover:bg-[#181c23] flex items-center gap-2 cursor-pointer"
+                                    className="w-full px-2.5 py-1.5 rounded-sm text-left text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] flex items-center gap-2 cursor-pointer"
                                   >
-                                    <FileText className="w-3.5 h-3.5 text-[#525d6d] dark:text-[#8b95a5]" />
+                                    <FileText className="w-3.5 h-3.5 text-[#4d597d] dark:text-[#919ec4]" />
                                     <span>Download .SRT</span>
                                   </button>
                                   <button
@@ -1703,9 +1703,9 @@ export function WorkspaceSidebar({
                                       );
                                       setShowExportMenu(false);
                                     }}
-                                    className="w-full px-2.5 py-1.5 rounded-sm text-left text-xs font-medium text-[#0e1217] dark:text-[#f1f3f5] hover:bg-[#eceff3] dark:hover:bg-[#181c23] flex items-center gap-2 cursor-pointer"
+                                    className="w-full px-2.5 py-1.5 rounded-sm text-left text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] flex items-center gap-2 cursor-pointer"
                                   >
-                                    <FileText className="w-3.5 h-3.5 text-[#525d6d] dark:text-[#8b95a5]" />
+                                    <FileText className="w-3.5 h-3.5 text-[#4d597d] dark:text-[#919ec4]" />
                                     <span>Download .VTT</span>
                                   </button>
                                   <button
@@ -1718,12 +1718,12 @@ export function WorkspaceSidebar({
                                       );
                                       setShowExportMenu(false);
                                     }}
-                                    className="w-full px-2.5 py-1.5 rounded-sm text-left text-xs font-medium text-[#0e1217] dark:text-[#f1f3f5] hover:bg-[#eceff3] dark:hover:bg-[#181c23] flex items-center gap-2 cursor-pointer"
+                                    className="w-full px-2.5 py-1.5 rounded-sm text-left text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] flex items-center gap-2 cursor-pointer"
                                   >
-                                    <BookOpen className="w-3.5 h-3.5 text-[#525d6d] dark:text-[#8b95a5]" />
+                                    <BookOpen className="w-3.5 h-3.5 text-[#4d597d] dark:text-[#919ec4]" />
                                     <span>Study Sheet .TXT</span>
                                   </button>
-                                  <div className="my-1 border-t border-[#dde2e9] dark:border-[#242a34]" />
+                                  <div className="my-1 border-t border-[#d2dcf0] dark:border-[#21284c]" />
                                   <button
                                     type="button"
                                     onClick={async () => {
@@ -1738,9 +1738,9 @@ export function WorkspaceSidebar({
                                       }
                                       setShowExportMenu(false);
                                     }}
-                                    className="w-full px-2.5 py-1.5 rounded-sm text-left text-xs font-medium text-[#0e1217] dark:text-[#f1f3f5] hover:bg-[#eceff3] dark:hover:bg-[#181c23] flex items-center gap-2 cursor-pointer"
+                                    className="w-full px-2.5 py-1.5 rounded-sm text-left text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] flex items-center gap-2 cursor-pointer"
                                   >
-                                    <Copy className="w-3.5 h-3.5 text-[#525d6d] dark:text-[#8b95a5]" />
+                                    <Copy className="w-3.5 h-3.5 text-[#4d597d] dark:text-[#919ec4]" />
                                     <span>Copy Transcript</span>
                                   </button>
                                 </div>
@@ -1751,24 +1751,24 @@ export function WorkspaceSidebar({
 
                         {/* Inline Search & Find/Replace Drawer */}
                         {showSubSearch && (
-                          <div className="pt-2 border-t border-[#dde2e9] dark:border-[#242a34] space-y-1.5">
+                          <div className="pt-2 border-t border-[#d2dcf0] dark:border-[#21284c] space-y-1.5">
                             <div className="flex items-center gap-1.5">
                               <div className="relative flex-1 min-w-0">
-                                <Search className="w-3.5 h-3.5 text-[#525d6d] dark:text-[#8b95a5] absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" />
+                                <Search className="w-3.5 h-3.5 text-[#4d597d] dark:text-[#919ec4] absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" />
                                 <input
                                   type="text"
                                   value={subSearchQuery}
                                   onChange={(e) => setSubSearchQuery(e.target.value)}
                                   placeholder="Filter or find in phonetic, Thai, Burmese..."
                                   aria-label="Search subtitles"
-                                  className="w-full h-7 pl-7 pr-6 rounded-sm border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#181c23] text-xs text-[#0e1217] dark:text-[#f1f3f5] placeholder:text-[#525d6d] dark:placeholder:text-[#8b95a5] focus:outline-none focus:border-teal-700 dark:focus:border-teal-400"
+                                  className="w-full h-7 pl-7 pr-6 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] text-xs text-[#0c1026] dark:text-[#f3f5fc] placeholder:text-[#4d597d] dark:placeholder:text-[#919ec4] focus:outline-none focus:border-teal-700 dark:focus:border-teal-400"
                                 />
                                 {subSearchQuery && (
                                   <button
                                     type="button"
                                     onClick={() => setSubSearchQuery("")}
                                     aria-label="Clear search"
-                                    className="absolute right-1.5 top-1/2 -translate-y-1/2 p-0.5 text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5] cursor-pointer"
+                                    className="absolute right-1.5 top-1/2 -translate-y-1/2 p-0.5 text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] cursor-pointer"
                                   >
                                     <X className="w-3 h-3" />
                                   </button>
@@ -1781,7 +1781,7 @@ export function WorkspaceSidebar({
                                 className={`h-7 px-2 rounded-sm border text-[11px] font-medium flex items-center gap-1 cursor-pointer whitespace-nowrap transition-colors ${
                                   showReplaceRow
                                     ? "border-teal-600/80 bg-teal-50 text-teal-800 dark:border-teal-400/80 dark:bg-teal-950/60 dark:text-teal-200"
-                                    : "border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#181c23] text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5]"
+                                    : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
                                 }`}
                               >
                                 <Replace className="w-3 h-3" />
@@ -1797,7 +1797,7 @@ export function WorkspaceSidebar({
                                   onChange={(e) => setSubReplaceText(e.target.value)}
                                   placeholder="Replace with..."
                                   aria-label="Replacement text"
-                                  className="flex-1 min-w-[130px] h-7 px-2 rounded-sm border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#181c23] text-xs text-[#0e1217] dark:text-[#f1f3f5] placeholder:text-[#525d6d] dark:placeholder:text-[#8b95a5] focus:outline-none focus:border-teal-700 dark:focus:border-teal-400"
+                                  className="flex-1 min-w-[130px] h-7 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] text-xs text-[#0c1026] dark:text-[#f3f5fc] placeholder:text-[#4d597d] dark:placeholder:text-[#919ec4] focus:outline-none focus:border-teal-700 dark:focus:border-teal-400"
                                 />
                                 <select
                                   value={subReplaceField}
@@ -1807,7 +1807,7 @@ export function WorkspaceSidebar({
                                     )
                                   }
                                   aria-label="Target field for replace"
-                                  className="h-7 px-2 rounded-sm border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#181c23] text-[11px] text-[#0e1217] dark:text-[#f1f3f5] cursor-pointer"
+                                  className="h-7 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] text-[11px] text-[#0c1026] dark:text-[#f3f5fc] cursor-pointer"
                                 >
                                   <option value="all">All Fields</option>
                                   <option value="burmese">Burmese</option>
@@ -1829,7 +1829,7 @@ export function WorkspaceSidebar({
                                         : "No matches found"
                                     );
                                   }}
-                                  className="h-7 px-2.5 rounded-sm bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#061412] text-[11px] font-semibold disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap transition-colors"
+                                  className="h-7 px-2.5 rounded-sm bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] text-[11px] font-semibold disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap transition-colors"
                                 >
                                   Replace All
                                 </button>
@@ -1845,13 +1845,13 @@ export function WorkspaceSidebar({
 
                         {/* Inline Subtitle Style Drawer */}
                         {showSubStyle && (
-                          <div className="pt-2 border-t border-[#dde2e9] dark:border-[#242a34] space-y-2">
+                          <div className="pt-2 border-t border-[#d2dcf0] dark:border-[#21284c] space-y-2">
                             <div className="flex flex-wrap items-center justify-between gap-2">
                               <div className="flex flex-wrap items-center gap-1.5">
-                                <span className="text-[11px] font-medium text-[#525d6d] dark:text-[#8b95a5]">
+                                <span className="text-[11px] font-medium text-[#4d597d] dark:text-[#919ec4]">
                                   Theme
                                 </span>
-                                <div className="inline-flex items-center p-0.5 rounded-sm bg-white dark:bg-[#181c23] border border-[#dde2e9] dark:border-[#242a34]">
+                                <div className="inline-flex items-center p-0.5 rounded-sm bg-white dark:bg-[#141933] border border-[#d2dcf0] dark:border-[#21284c]">
                                   {(
                                     [
                                       { id: "auto", label: "Auto" },
@@ -1868,8 +1868,8 @@ export function WorkspaceSidebar({
                                       }
                                       className={`px-2 py-0.5 rounded-xs text-[11px] font-medium cursor-pointer transition-colors ${
                                         editSettings.subtitleTheme === t.id
-                                          ? "bg-[#eceff3] dark:bg-[#242a34] text-teal-700 dark:text-teal-400 font-semibold"
-                                          : "text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5]"
+                                          ? "bg-[#e7ecf8] dark:bg-[#21284c] text-teal-700 dark:text-teal-400 font-semibold"
+                                          : "text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
                                       }`}
                                     >
                                       {t.label}
@@ -1879,10 +1879,10 @@ export function WorkspaceSidebar({
                               </div>
 
                               <div className="flex items-center gap-1.5">
-                                <span className="text-[11px] font-medium text-[#525d6d] dark:text-[#8b95a5]">
+                                <span className="text-[11px] font-medium text-[#4d597d] dark:text-[#919ec4]">
                                   Size
                                 </span>
-                                <div className="inline-flex items-center p-0.5 rounded-sm bg-white dark:bg-[#181c23] border border-[#dde2e9] dark:border-[#242a34]">
+                                <div className="inline-flex items-center p-0.5 rounded-sm bg-white dark:bg-[#141933] border border-[#d2dcf0] dark:border-[#21284c]">
                                   {(
                                     [
                                       { id: "sm", label: "S" },
@@ -1901,8 +1901,8 @@ export function WorkspaceSidebar({
                                       }
                                       className={`px-2 py-0.5 rounded-xs text-[11px] font-semibold cursor-pointer transition-colors ${
                                         editSettings.subtitleFontScale === sz.id
-                                          ? "bg-[#eceff3] dark:bg-[#242a34] text-teal-700 dark:text-teal-400"
-                                          : "text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5]"
+                                          ? "bg-[#e7ecf8] dark:bg-[#21284c] text-teal-700 dark:text-teal-400"
+                                          : "text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
                                       }`}
                                     >
                                       {sz.label}
@@ -1914,15 +1914,15 @@ export function WorkspaceSidebar({
 
                             <div className="flex flex-wrap items-center justify-between gap-2">
                               <div className="flex items-center gap-1.5">
-                                <span className="text-[11px] font-medium text-[#525d6d] dark:text-[#8b95a5] mr-0.5">
+                                <span className="text-[11px] font-medium text-[#4d597d] dark:text-[#919ec4] mr-0.5">
                                   Highlight
                                 </span>
                                 {(
                                   [
-                                    { id: "amber", swatch: "bg-amber-300", label: "Amber" },
-                                    { id: "emerald", swatch: "bg-emerald-300", label: "Emerald" },
-                                    { id: "indigo", swatch: "bg-indigo-500", label: "Indigo" },
-                                    { id: "rose", swatch: "bg-rose-300", label: "Rose" },
+                                    { id: "indigo", swatch: "bg-[#1c3db8]", label: "Blue" },
+                                    { id: "rose", swatch: "bg-[#8b2574]", label: "Orchid" },
+                                    { id: "amber", swatch: "bg-[#b86310]", label: "Amber" },
+                                    { id: "emerald", swatch: "bg-[#0f7d5d]", label: "Emerald" },
                                   ] as { id: SubtitleHighlightColor; swatch: string; label: string }[]
                                 ).map((c) => {
                                   const selected = editSettings.subtitleHighlightColor === c.id;
@@ -1940,7 +1940,7 @@ export function WorkspaceSidebar({
                                       }
                                       className={`w-4 h-4 rounded-full ${c.swatch} cursor-pointer transition-transform ${
                                         selected
-                                          ? "ring-2 ring-offset-1 ring-teal-700 dark:ring-teal-400 dark:ring-offset-[#12151a] scale-110"
+                                          ? "ring-2 ring-offset-1 ring-teal-700 dark:ring-teal-400 dark:ring-offset-[#0d1022] scale-110"
                                           : "opacity-75 hover:opacity-100"
                                       }`}
                                     />
@@ -1962,7 +1962,7 @@ export function WorkspaceSidebar({
                                   className={`h-6 px-2 rounded-sm border text-[11px] font-medium cursor-pointer transition-colors ${
                                     editSettings.showWordGloss
                                       ? "border-teal-600/80 bg-teal-50/80 text-teal-800 dark:border-teal-400/80 dark:bg-teal-950/60 dark:text-teal-200"
-                                      : "border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#181c23] text-[#525d6d] dark:text-[#8b95a5]"
+                                      : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] text-[#4d597d] dark:text-[#919ec4]"
                                   }`}
                                 >
                                   Word Gloss
@@ -1980,7 +1980,7 @@ export function WorkspaceSidebar({
                                   className={`h-6 px-2 rounded-sm border text-[11px] font-medium cursor-pointer transition-colors ${
                                     editSettings.showBurmeseLine
                                       ? "border-teal-600/80 bg-teal-50/80 text-teal-800 dark:border-teal-400/80 dark:bg-teal-950/60 dark:text-teal-200"
-                                      : "border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#181c23] text-[#525d6d] dark:text-[#8b95a5]"
+                                      : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] text-[#4d597d] dark:text-[#919ec4]"
                                   }`}
                                 >
                                   Burmese
@@ -1999,7 +1999,7 @@ export function WorkspaceSidebar({
                                         showBurmeseLine: DEFAULT_VIDEO_EDIT.showBurmeseLine,
                                       })
                                     }
-                                    className="h-6 px-1.5 rounded-sm text-[11px] font-medium text-[#525d6d] dark:text-[#8b95a5] hover:text-teal-700 dark:hover:text-teal-400 underline cursor-pointer"
+                                    className="h-6 px-1.5 rounded-sm text-[11px] font-medium text-[#4d597d] dark:text-[#919ec4] hover:text-teal-700 dark:hover:text-teal-400 underline cursor-pointer"
                                   >
                                     Reset
                                   </button>
@@ -2031,14 +2031,14 @@ export function WorkspaceSidebar({
                       setNewSubPhonetic("");
                       setNewSubBurmese("");
                     }}
-                    className="px-3.5 py-3 border-b border-[#dde2e9] dark:border-[#242a34] bg-[#eceff3]/60 dark:bg-[#181c23] space-y-2"
+                    className="px-3.5 py-3 border-b border-[#d2dcf0] dark:border-[#21284c] bg-[#e7ecf8]/60 dark:bg-[#141933] space-y-2"
                   >
                     <div className="flex flex-wrap items-center justify-between gap-2">
-                      <span className="font-display text-xs font-semibold text-[#0e1217] dark:text-[#f1f3f5]">
+                      <span className="font-display text-xs font-semibold text-[#0c1026] dark:text-[#f3f5fc]">
                         New Subtitle
                       </span>
                       <div className="flex items-center gap-1.5 text-xs">
-                        <label className="flex items-center gap-1 text-[#525d6d] dark:text-[#8b95a5]">
+                        <label className="flex items-center gap-1 text-[#4d597d] dark:text-[#919ec4]">
                           <span>Start</span>
                           <input
                             type="number"
@@ -2047,10 +2047,10 @@ export function WorkspaceSidebar({
                             max={project.targetDurationSec}
                             value={newSubStart}
                             onChange={(e) => setNewSubStart(e.target.value)}
-                            className="w-16 h-6 px-1.5 rounded-sm border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] text-[#0e1217] dark:text-[#f1f3f5] font-mono-tabular text-xs"
+                            className="w-16 h-6 px-1.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#0c1026] dark:text-[#f3f5fc] font-mono-tabular text-xs"
                           />
                         </label>
-                        <label className="flex items-center gap-1 text-[#525d6d] dark:text-[#8b95a5]">
+                        <label className="flex items-center gap-1 text-[#4d597d] dark:text-[#919ec4]">
                           <span>End</span>
                           <input
                             type="number"
@@ -2059,7 +2059,7 @@ export function WorkspaceSidebar({
                             max={project.targetDurationSec}
                             value={newSubEnd}
                             onChange={(e) => setNewSubEnd(e.target.value)}
-                            className="w-16 h-6 px-1.5 rounded-sm border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] text-[#0e1217] dark:text-[#f1f3f5] font-mono-tabular text-xs"
+                            className="w-16 h-6 px-1.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#0c1026] dark:text-[#f3f5fc] font-mono-tabular text-xs"
                           />
                         </label>
                         <button
@@ -2070,7 +2070,7 @@ export function WorkspaceSidebar({
                             setNewSubStart(s.toFixed(1));
                             setNewSubEnd(Math.min(maxDur, s + 2.5).toFixed(1));
                           }}
-                          className="h-6 px-2 rounded-sm border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] text-[11px] font-medium text-[#0e1217] dark:text-[#f1f3f5] cursor-pointer whitespace-nowrap transition-colors"
+                          className="h-6 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] cursor-pointer whitespace-nowrap transition-colors"
                         >
                           Use playhead
                         </button>
@@ -2083,7 +2083,7 @@ export function WorkspaceSidebar({
                       onChange={(e) => setNewSubPhonetic(e.target.value)}
                       placeholder="Thai phonetic (e.g. Sa-wat-dee khrap)"
                       aria-label="New Thai phonetic subtitle"
-                      className="w-full h-8 px-2.5 rounded-sm border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] text-xs font-medium text-[#0e1217] dark:text-[#f1f3f5] placeholder:text-[#525d6d] dark:placeholder:text-[#8b95a5] focus:outline-none focus:border-teal-700 dark:focus:border-teal-400"
+                      className="w-full h-8 px-2.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] placeholder:text-[#4d597d] dark:placeholder:text-[#919ec4] focus:outline-none focus:border-teal-700 dark:focus:border-teal-400"
                     />
 
                     <input
@@ -2092,21 +2092,21 @@ export function WorkspaceSidebar({
                       onChange={(e) => setNewSubBurmese(e.target.value)}
                       placeholder="မြန်မာဘာသာပြန်..."
                       aria-label="New Burmese translation subtitle"
-                      className="w-full h-8 px-2.5 rounded-sm border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] font-myanmar text-xs text-[#0e1217] dark:text-[#f1f3f5] placeholder:text-[#525d6d] dark:placeholder:text-[#8b95a5] focus:outline-none focus:border-teal-700 dark:focus:border-teal-400"
+                      className="w-full h-8 px-2.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] font-myanmar text-xs text-[#0c1026] dark:text-[#f3f5fc] placeholder:text-[#4d597d] dark:placeholder:text-[#919ec4] focus:outline-none focus:border-teal-700 dark:focus:border-teal-400"
                     />
 
                     <div className="flex items-center justify-end gap-1.5 pt-0.5">
                       <button
                         type="button"
                         onClick={() => setShowAddSub(false)}
-                        className="h-7 px-2.5 rounded-sm border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] text-xs font-medium text-[#0e1217] dark:text-[#f1f3f5] cursor-pointer transition-colors"
+                        className="h-7 px-2.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] cursor-pointer transition-colors"
                       >
                         Cancel
                       </button>
                       <button
                         type="submit"
                         disabled={!newSubPhonetic.trim() && !newSubBurmese.trim()}
-                        className="h-7 px-3 rounded-sm bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#061412] text-xs font-semibold disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
+                        className="h-7 px-3 rounded-sm bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] text-xs font-semibold disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
                       >
                         Add
                       </button>
@@ -2133,20 +2133,20 @@ export function WorkspaceSidebar({
                 {/* Full-Bleed Hairline Subtitle Rows */}
                 {project.subtitles.length === 0 ? (
                   <div className="p-6 text-center space-y-2.5">
-                    <p className="text-xs text-[#525d6d] dark:text-[#8b95a5]">
+                    <p className="text-xs text-[#4d597d] dark:text-[#919ec4]">
                       No subtitles in this video yet.
                     </p>
                     <button
                       type="button"
                       onClick={openAddSubtitleForm}
-                      className="h-8 px-3.5 rounded-sm bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#061412] text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer transition-colors"
+                      className="h-8 px-3.5 rounded-sm bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer transition-colors"
                     >
                       <Plus className="w-3.5 h-3.5" />
                       <span>Add Subtitle</span>
                     </button>
                   </div>
                 ) : (
-                  <div className="divide-y divide-[#dde2e9] dark:divide-[#242a34] bg-white dark:bg-[#12151a]">
+                  <div className="divide-y divide-[#d2dcf0] dark:divide-[#21284c] bg-white dark:bg-[#0d1022]">
                     {(() => {
                       const activeSubId = findActiveSubtitle(project.subtitles, cutTime)?.id;
                       const needle = subSearchQuery.trim().toLowerCase();
@@ -2161,8 +2161,8 @@ export function WorkspaceSidebar({
 
                       if (visibleSubs.length === 0) {
                         return (
-                          <div className="p-6 text-center space-y-2 bg-white dark:bg-[#12151a]">
-                            <p className="text-xs text-[#525d6d] dark:text-[#8b95a5]">
+                          <div className="p-6 text-center space-y-2 bg-white dark:bg-[#0d1022]">
+                            <p className="text-xs text-[#4d597d] dark:text-[#919ec4]">
                               No subtitles match “{subSearchQuery}”.
                             </p>
                             <button
@@ -2179,14 +2179,14 @@ export function WorkspaceSidebar({
                       return (
                         <>
                           {needle && (
-                            <div className="px-3.5 py-1.5 bg-[#eceff3]/70 dark:bg-[#181c23] text-[11px] text-[#525d6d] dark:text-[#8b95a5] flex items-center justify-between">
+                            <div className="px-3.5 py-1.5 bg-[#e7ecf8]/70 dark:bg-[#141933] text-[11px] text-[#4d597d] dark:text-[#919ec4] flex items-center justify-between">
                               <span>
                                 Showing {visibleSubs.length} of {project.subtitles.length} subtitles
                               </span>
                               <button
                                 type="button"
                                 onClick={() => setSubSearchQuery("")}
-                                className="underline hover:text-[#0e1217] dark:hover:text-[#f1f3f5] cursor-pointer"
+                                className="underline hover:text-[#0c1026] dark:hover:text-[#f3f5fc] cursor-pointer"
                               >
                                 Show all
                               </button>
@@ -2214,7 +2214,7 @@ export function WorkspaceSidebar({
                                     ? "border-l-emerald-500 bg-emerald-50/45 dark:bg-emerald-950/20"
                                     : isCurrent
                                       ? "border-l-teal-700 dark:border-l-teal-400 bg-teal-50/40 dark:bg-teal-950/20"
-                                      : "border-l-transparent bg-white dark:bg-[#12151a]"
+                                      : "border-l-transparent bg-white dark:bg-[#0d1022]"
                                 }`}
                               >
                                 <div className="flex flex-wrap items-center justify-between gap-1.5 mb-1">
@@ -2225,7 +2225,7 @@ export function WorkspaceSidebar({
                                       className={`text-[11px] font-mono-tabular cursor-pointer shrink-0 transition-colors ${
                                         isCurrent
                                           ? "text-teal-700 dark:text-teal-400 font-semibold"
-                                          : "text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5]"
+                                          : "text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
                                       }`}
                                     >
                                       {(() => {
@@ -2239,7 +2239,7 @@ export function WorkspaceSidebar({
                                         )}`;
                                       })()}
                                     </button>
-                                    <span className="text-[11px] text-[#525d6d]/75 dark:text-[#8b95a5]/75 truncate">
+                                    <span className="text-[11px] text-[#4d597d]/75 dark:text-[#919ec4]/75 truncate">
                                       {sub.originalSpokenText}
                                     </span>
                                   </div>
@@ -2253,7 +2253,7 @@ export function WorkspaceSidebar({
                                       className={`h-6 px-1.5 rounded-sm flex items-center gap-1 text-[11px] font-medium border transition-colors cursor-pointer whitespace-nowrap ${
                                         isLooping
                                           ? "border-emerald-500 bg-emerald-100/90 dark:bg-emerald-950/70 text-emerald-800 dark:text-emerald-200"
-                                          : "border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5]"
+                                          : "border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
                                       }`}
                                     >
                                       {isLooping && isPlaying ? (
@@ -2281,7 +2281,7 @@ export function WorkspaceSidebar({
                                         onClick={() => onRegenerateSubtitle(sub.id, hintValue)}
                                         title="Regenerate this subtitle with AI"
                                         aria-label="Regenerate this subtitle with AI"
-                                        className="h-6 px-1.5 rounded-sm flex items-center gap-1 text-[11px] font-medium border border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] text-[#525d6d] dark:text-[#8b95a5] hover:border-teal-600/60 dark:hover:border-teal-400/60 hover:text-teal-700 dark:hover:text-teal-400 transition-colors cursor-pointer whitespace-nowrap disabled:opacity-50"
+                                        className="h-6 px-1.5 rounded-sm flex items-center gap-1 text-[11px] font-medium border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] text-[#4d597d] dark:text-[#919ec4] hover:border-teal-600/60 dark:hover:border-teal-400/60 hover:text-teal-700 dark:hover:text-teal-400 transition-colors cursor-pointer whitespace-nowrap disabled:opacity-50"
                                       >
                                         <Sparkles className="w-3 h-3" />
                                         <span>AI</span>
@@ -2297,7 +2297,7 @@ export function WorkspaceSidebar({
                                       className={`h-6 px-1.5 rounded-sm flex items-center gap-1 text-[11px] font-medium border transition-colors cursor-pointer whitespace-nowrap ${
                                         isHintOpen || hintValue.trim()
                                           ? "border-teal-600/70 dark:border-teal-400/70 bg-teal-50/80 dark:bg-teal-950/50 text-teal-800 dark:text-teal-200"
-                                          : "border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5]"
+                                          : "border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
                                       }`}
                                     >
                                       <MessageSquarePlus className="w-3 h-3" />
@@ -2314,7 +2314,7 @@ export function WorkspaceSidebar({
                                         className={`h-6 px-1.5 rounded-sm flex items-center gap-1 text-[11px] font-medium border transition-colors cursor-pointer whitespace-nowrap ${
                                           isEditingWords
                                             ? "border-teal-600/70 dark:border-teal-400/70 bg-teal-50/80 dark:bg-teal-950/50 text-teal-800 dark:text-teal-200"
-                                            : "border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5]"
+                                            : "border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
                                         }`}
                                       >
                                         <BookOpen className="w-3 h-3" />
@@ -2327,7 +2327,7 @@ export function WorkspaceSidebar({
                                       onClick={() => onSplitSubtitle(sub.id)}
                                       title="Split subtitle into two lines"
                                       aria-label="Split subtitle into two lines"
-                                      className="h-6 px-1.5 rounded-sm flex items-center gap-1 text-[11px] font-medium border border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5] disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer whitespace-nowrap"
+                                      className="h-6 px-1.5 rounded-sm flex items-center gap-1 text-[11px] font-medium border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer whitespace-nowrap"
                                     >
                                       <Scissors className="w-3 h-3" />
                                       <span>Split</span>
@@ -2338,7 +2338,7 @@ export function WorkspaceSidebar({
                                         onClick={() => onMergeSubtitleWithNext(sub.id)}
                                         title="Merge with next subtitle"
                                         aria-label="Merge with next subtitle"
-                                        className="h-6 px-1.5 rounded-sm flex items-center gap-1 text-[11px] font-medium border border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5] transition-colors cursor-pointer whitespace-nowrap"
+                                        className="h-6 px-1.5 rounded-sm flex items-center gap-1 text-[11px] font-medium border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] transition-colors cursor-pointer whitespace-nowrap"
                                       >
                                         <Merge className="w-3 h-3" />
                                         <span>Merge</span>
@@ -2359,8 +2359,8 @@ export function WorkspaceSidebar({
                                       aria-label="Edit subtitle timing"
                                       className={`w-6 h-6 rounded-sm flex items-center justify-center transition-colors cursor-pointer ${
                                         isEditingTime
-                                          ? "bg-[#eceff3] dark:bg-[#1e242e] text-teal-700 dark:text-teal-400"
-                                          : "text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5] hover:bg-[#eceff3] dark:hover:bg-[#181c23]"
+                                          ? "bg-[#e7ecf8] dark:bg-[#1a2142] text-teal-700 dark:text-teal-400"
+                                          : "text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933]"
                                       }`}
                                     >
                                       <Clock className="w-3.5 h-3.5" />
@@ -2375,7 +2375,7 @@ export function WorkspaceSidebar({
                                       }}
                                       title="Delete subtitle"
                                       aria-label="Delete subtitle"
-                                      className="w-6 h-6 rounded-sm flex items-center justify-center text-[#525d6d] dark:text-[#8b95a5] hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 transition-colors cursor-pointer"
+                                      className="w-6 h-6 rounded-sm flex items-center justify-center text-[#4d597d] dark:text-[#919ec4] hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 transition-colors cursor-pointer"
                                     >
                                       <Trash2 className="w-3.5 h-3.5" />
                                     </button>
@@ -2403,7 +2403,7 @@ export function WorkspaceSidebar({
                                               [sub.id]: preset.text,
                                             }))
                                           }
-                                          className="px-2 py-0.5 rounded-sm border border-teal-200/80 dark:border-teal-500/30 bg-white dark:bg-[#12151a] text-[10px] font-medium text-teal-800 dark:text-teal-200 hover:bg-teal-100/70 dark:hover:bg-teal-900/50 cursor-pointer whitespace-nowrap"
+                                          className="px-2 py-0.5 rounded-sm border border-teal-200/80 dark:border-teal-500/30 bg-white dark:bg-[#0d1022] text-[10px] font-medium text-teal-800 dark:text-teal-200 hover:bg-teal-100/70 dark:hover:bg-teal-900/50 cursor-pointer whitespace-nowrap"
                                         >
                                           {preset.label}
                                         </button>
@@ -2421,7 +2421,7 @@ export function WorkspaceSidebar({
                                         }
                                         placeholder="AI Hint (e.g. 'လူနာမည်ဖြစ်တယ်', 'ဗန်းစကားလိုပြန်ပေး')..."
                                         aria-label="AI regeneration hint"
-                                        className="flex-1 min-w-0 h-7 px-2 rounded-sm border border-teal-200 dark:border-teal-500/30 bg-white dark:bg-[#12151a] text-xs text-[#0e1217] dark:text-[#f1f3f5] placeholder:text-[#525d6d] dark:placeholder:text-[#8b95a5] focus:outline-none focus:border-teal-700 dark:focus:border-teal-400"
+                                        className="flex-1 min-w-0 h-7 px-2 rounded-sm border border-teal-200 dark:border-teal-500/30 bg-white dark:bg-[#0d1022] text-xs text-[#0c1026] dark:text-[#f3f5fc] placeholder:text-[#4d597d] dark:placeholder:text-[#919ec4] focus:outline-none focus:border-teal-700 dark:focus:border-teal-400"
                                       />
                                       {isRegenerating ? (
                                         <button
@@ -2436,7 +2436,7 @@ export function WorkspaceSidebar({
                                         <button
                                           type="submit"
                                           disabled={isRetranslatingAll || isResyncingTimings}
-                                          className="h-7 px-2.5 rounded-sm bg-teal-700 text-white hover:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#061412] text-[11px] font-semibold flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-60 transition-colors"
+                                          className="h-7 px-2.5 rounded-sm bg-teal-700 text-white hover:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] text-[11px] font-semibold flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-60 transition-colors"
                                         >
                                           <Sparkles className="w-3 h-3" />
                                           <span>Regenerate</span>
@@ -2447,8 +2447,8 @@ export function WorkspaceSidebar({
                                 )}
 
                                 {isEditingTime && (
-                                  <div className="mb-2 flex flex-wrap items-center gap-2 p-1.5 rounded-sm bg-[#eceff3] dark:bg-[#181c23] text-xs">
-                                    <label className="flex items-center gap-1 text-[#525d6d] dark:text-[#8b95a5]">
+                                  <div className="mb-2 flex flex-wrap items-center gap-2 p-1.5 rounded-sm bg-[#e7ecf8] dark:bg-[#141933] text-xs">
+                                    <label className="flex items-center gap-1 text-[#4d597d] dark:text-[#919ec4]">
                                       <span>Start</span>
                                       <input
                                         type="number"
@@ -2457,10 +2457,10 @@ export function WorkspaceSidebar({
                                         max={project.targetDurationSec}
                                         value={editStartVal}
                                         onChange={(e) => setEditStartVal(e.target.value)}
-                                        className="w-16 h-6 px-1.5 rounded-sm border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] text-[#0e1217] dark:text-[#f1f3f5] font-mono-tabular text-xs"
+                                        className="w-16 h-6 px-1.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#0c1026] dark:text-[#f3f5fc] font-mono-tabular text-xs"
                                       />
                                     </label>
-                                    <label className="flex items-center gap-1 text-[#525d6d] dark:text-[#8b95a5]">
+                                    <label className="flex items-center gap-1 text-[#4d597d] dark:text-[#919ec4]">
                                       <span>End</span>
                                       <input
                                         type="number"
@@ -2469,7 +2469,7 @@ export function WorkspaceSidebar({
                                         max={project.targetDurationSec}
                                         value={editEndVal}
                                         onChange={(e) => setEditEndVal(e.target.value)}
-                                        className="w-16 h-6 px-1.5 rounded-sm border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] text-[#0e1217] dark:text-[#f1f3f5] font-mono-tabular text-xs"
+                                        className="w-16 h-6 px-1.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#0c1026] dark:text-[#f3f5fc] font-mono-tabular text-xs"
                                       />
                                     </label>
                                     <div className="flex items-center gap-1">
@@ -2492,7 +2492,7 @@ export function WorkspaceSidebar({
                                             setEditEndVal(nextE.toFixed(1));
                                             onUpdateSubtitleTiming(sub.id, nextS, nextE);
                                           }}
-                                          className="h-6 px-1.5 rounded-sm border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] font-mono-tabular text-[11px] text-[#0e1217] dark:text-[#f1f3f5] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] cursor-pointer transition-colors"
+                                          className="h-6 px-1.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] font-mono-tabular text-[11px] text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] cursor-pointer transition-colors"
                                         >
                                           {delta > 0 ? `+${delta}s` : `${delta}s`}
                                         </button>
@@ -2507,7 +2507,7 @@ export function WorkspaceSidebar({
                                           }
                                           setEditingTimeId(null);
                                         }}
-                                        className="h-6 px-2 rounded-sm bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#061412] text-[11px] font-semibold flex items-center gap-1 cursor-pointer transition-colors"
+                                        className="h-6 px-2 rounded-sm bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] text-[11px] font-semibold flex items-center gap-1 cursor-pointer transition-colors"
                                       >
                                         <Check className="w-3 h-3" />
                                         <span>Apply</span>
@@ -2533,7 +2533,7 @@ export function WorkspaceSidebar({
                                   onChange={(e) => onUpdateSubtitle(sub.id, "thaiPhonetic", e.target.value)}
                                   placeholder="Thai phonetic..."
                                   aria-label="Thai in English phonetics"
-                                  className="w-full text-[13px] font-semibold text-[#0e1217] dark:text-[#f1f3f5] bg-transparent border-b border-transparent focus:border-teal-700 dark:focus:border-teal-400 focus:outline-none py-0.5"
+                                  className="w-full text-[13px] font-semibold text-[#0c1026] dark:text-[#f3f5fc] bg-transparent border-b border-transparent focus:border-teal-700 dark:focus:border-teal-400 focus:outline-none py-0.5"
                                 />
 
                                 <input
@@ -2542,26 +2542,26 @@ export function WorkspaceSidebar({
                                   onChange={(e) => onUpdateSubtitle(sub.id, "burmese", e.target.value)}
                                   placeholder="မြန်မာဘာသာပြန်..."
                                   aria-label="Burmese translation"
-                                  className="w-full font-myanmar text-[13px] text-[#525d6d] dark:text-[#8b95a5] bg-transparent border-b border-transparent focus:border-teal-700 dark:focus:border-teal-400 focus:outline-none py-0.5"
+                                  className="w-full font-myanmar text-[13px] text-[#4d597d] dark:text-[#919ec4] bg-transparent border-b border-transparent focus:border-teal-700 dark:focus:border-teal-400 focus:outline-none py-0.5"
                                 />
 
                                 {isEditingWords && sub.words.length > 0 && (
-                                  <div className="mt-2 pt-2 border-t border-[#dde2e9] dark:border-[#242a34] space-y-1.5">
-                                    <span className="block text-[11px] font-medium text-[#525d6d] dark:text-[#8b95a5]">
+                                  <div className="mt-2 pt-2 border-t border-[#d2dcf0] dark:border-[#21284c] space-y-1.5">
+                                    <span className="block text-[11px] font-medium text-[#4d597d] dark:text-[#919ec4]">
                                       Word-by-Word Burmese Gloss (9:16 Stage)
                                     </span>
                                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
                                       {sub.words.map((word, wi) => (
                                         <div
                                           key={`${sub.id}-gloss-${wi}`}
-                                          className="flex items-center gap-2 px-2 py-1 rounded-sm border border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23]"
+                                          className="flex items-center gap-2 px-2 py-1 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933]"
                                         >
                                           <div className="min-w-0 shrink-0 max-w-[45%]">
-                                            <p className="text-[11px] font-semibold text-[#0e1217] dark:text-[#f1f3f5] truncate">
+                                            <p className="text-[11px] font-semibold text-[#0c1026] dark:text-[#f3f5fc] truncate">
                                               {word.phonetic}
                                             </p>
                                             {word.thai && word.thai !== word.phonetic && (
-                                              <p className="text-[10px] text-[#525d6d] dark:text-[#8b95a5] truncate">
+                                              <p className="text-[10px] text-[#4d597d] dark:text-[#919ec4] truncate">
                                                 {word.thai}
                                               </p>
                                             )}
@@ -2574,7 +2574,7 @@ export function WorkspaceSidebar({
                                             }
                                             placeholder="အနက်..."
                                             aria-label={`Burmese gloss for ${word.phonetic}`}
-                                            className="flex-1 min-w-0 h-6 px-1.5 rounded-xs border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] font-myanmar text-[11px] text-teal-700 dark:text-teal-300 placeholder:text-[#525d6d] dark:placeholder:text-[#8b95a5] focus:outline-none focus:border-teal-700 dark:focus:border-teal-400"
+                                            className="flex-1 min-w-0 h-6 px-1.5 rounded-xs border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] font-myanmar text-[11px] text-teal-700 dark:text-teal-300 placeholder:text-[#4d597d] dark:placeholder:text-[#919ec4] focus:outline-none focus:border-teal-700 dark:focus:border-teal-400"
                                           />
                                         </div>
                                       ))}

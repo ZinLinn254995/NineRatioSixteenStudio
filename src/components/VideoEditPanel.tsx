@@ -191,7 +191,7 @@ export function VideoEditPanel({
     <div className={hideTabStrip ? "" : "space-y-3 pb-4"}>
       {/* Optional Category Switcher (hidden when WorkspaceSidebar hosts top tabs) */}
       {!hideTabStrip && (
-        <div className="flex items-center justify-between gap-2 pb-2 border-b border-[#dde2e9] dark:border-[#242a34]">
+        <div className="flex items-center justify-between gap-2 pb-2 border-b border-[#d2dcf0] dark:border-[#21284c]">
           <div
             role="tablist"
             aria-label="Edit setting categories"
@@ -209,10 +209,10 @@ export function VideoEditPanel({
                   onClick={() => setInternalSection(item.id)}
                   className={`relative px-2.5 py-1.5 text-xs font-medium rounded-sm whitespace-nowrap shrink-0 flex items-center gap-1.5 transition-colors cursor-pointer ${
                     active
-                      ? "bg-teal-700 text-white dark:bg-teal-400 dark:text-[#061412] font-semibold"
+                      ? "bg-teal-700 text-white dark:bg-teal-400 dark:text-[#060918] font-semibold"
                       : item.dirty
                         ? "text-teal-700 dark:text-teal-400 bg-teal-50/70 dark:bg-teal-950/40"
-                        : "text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5] hover:bg-[#eceff3] dark:hover:bg-[#181c23]"
+                        : "text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933]"
                   }`}
                 >
                   <Icon className="w-3.5 h-3.5 shrink-0" />
@@ -238,7 +238,7 @@ export function VideoEditPanel({
                 });
                 onChangeVoiceSettings({ ...DEFAULT_VOICE_SETTINGS });
               }}
-              className="text-xs font-medium text-[#525d6d] dark:text-[#8b95a5] hover:text-teal-700 dark:hover:text-teal-400 flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer transition-colors"
+              className="text-xs font-medium text-[#4d597d] dark:text-[#919ec4] hover:text-teal-700 dark:hover:text-teal-400 flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer transition-colors"
             >
               <RotateCcw className="w-3 h-3" />
               <span>Reset All</span>
@@ -268,22 +268,22 @@ export function VideoEditPanel({
 
       {/* Section: Unified Video & Look (Speed · Framing · Filters · Color · Pixel Shield) */}
       {section === "visual" && (
-        <div className="divide-y divide-[#dde2e9] dark:divide-[#242a34]">
+        <div className="divide-y divide-[#d2dcf0] dark:divide-[#21284c]">
           {/* 1. Playback Speed */}
           <div className="pb-3 space-y-2">
             <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-[#525d6d] dark:text-[#8b95a5]">
+              <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-[#4d597d] dark:text-[#919ec4]">
                 <Gauge className="w-3.5 h-3.5 text-teal-700 dark:text-teal-400" />
                 <span>Speed</span>
               </div>
               <div className="flex items-center gap-1.5 text-xs font-mono-tabular">
-                <span className="text-[#0e1217] dark:text-[#f1f3f5] font-semibold">
+                <span className="text-[#0c1026] dark:text-[#f3f5fc] font-semibold">
                   {isYoutube ? `${effectiveSpeed}x` : `${settings.playbackSpeed.toFixed(2)}x`}
                 </span>
                 {scaledDurationSec !== null && sourceDurationSec && (
-                  <span className="text-[#525d6d] dark:text-[#8b95a5]">
+                  <span className="text-[#4d597d] dark:text-[#919ec4]">
                     ({formatSpeedDuration(sourceDurationSec)} →{" "}
-                    <span className="text-[#0e1217] dark:text-[#f1f3f5] font-medium">
+                    <span className="text-[#0c1026] dark:text-[#f3f5fc] font-medium">
                       {formatSpeedDuration(scaledDurationSec)}
                     </span>
                     )
@@ -302,8 +302,8 @@ export function VideoEditPanel({
                     onClick={() => updateField("playbackSpeed", presetSpeed)}
                     className={`h-7 px-1 rounded-sm text-[11px] font-mono-tabular font-medium border transition-colors cursor-pointer whitespace-nowrap ${
                       active
-                        ? "bg-teal-700 text-white border-teal-700 dark:bg-teal-400 dark:text-[#061412] dark:border-teal-400 font-semibold"
-                        : "bg-[#f5f6f8] dark:bg-[#181c23] text-[#0e1217] dark:text-[#f1f3f5] border-[#dde2e9] dark:border-[#242a34] hover:border-teal-600/50 dark:hover:border-teal-400/50"
+                        ? "bg-teal-700 text-white border-teal-700 dark:bg-teal-400 dark:text-[#060918] dark:border-teal-400 font-semibold"
+                        : "bg-[#f3f5fc] dark:bg-[#141933] text-[#0c1026] dark:text-[#f3f5fc] border-[#d2dcf0] dark:border-[#21284c] hover:border-teal-600/50 dark:hover:border-teal-400/50"
                     }`}
                   >
                     {presetSpeed}x
@@ -320,24 +320,24 @@ export function VideoEditPanel({
               value={settings.playbackSpeed}
               onChange={(e) => updateField("playbackSpeed", parseFloat(e.target.value))}
               aria-label="Global video playback speed"
-              className="w-full h-1.5 rounded-full appearance-none bg-[#dde2e9] dark:bg-[#242a34] cursor-pointer"
+              className="w-full h-1.5 rounded-full appearance-none bg-[#d2dcf0] dark:bg-[#21284c] cursor-pointer"
             />
           </div>
 
           {/* 2. Framing & Transform */}
           <div className="py-3 space-y-2.5">
             <div className="flex items-center justify-between gap-2">
-              <span className="text-[11px] font-semibold uppercase tracking-wider text-[#525d6d] dark:text-[#8b95a5]">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-[#4d597d] dark:text-[#919ec4]">
                 Framing & Crop
               </span>
-              <div className="inline-flex items-center rounded-sm border border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] overflow-hidden">
+              <div className="inline-flex items-center rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] overflow-hidden">
                 <button
                   type="button"
                   onClick={() => updateField("fitMode", "cover")}
                   className={`h-6 px-2 text-[11px] font-medium flex items-center gap-1 cursor-pointer transition-colors ${
                     settings.fitMode === "cover"
-                      ? "bg-teal-700 text-white dark:bg-teal-400 dark:text-[#061412] font-semibold"
-                      : "text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5]"
+                      ? "bg-teal-700 text-white dark:bg-teal-400 dark:text-[#060918] font-semibold"
+                      : "text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
                   }`}
                 >
                   <Maximize2 className="w-2.5 h-2.5" />
@@ -346,10 +346,10 @@ export function VideoEditPanel({
                 <button
                   type="button"
                   onClick={() => updateField("fitMode", "contain")}
-                  className={`h-6 px-2 text-[11px] font-medium flex items-center gap-1 border-l border-[#dde2e9] dark:border-[#242a34] cursor-pointer transition-colors ${
+                  className={`h-6 px-2 text-[11px] font-medium flex items-center gap-1 border-l border-[#d2dcf0] dark:border-[#21284c] cursor-pointer transition-colors ${
                     settings.fitMode === "contain"
-                      ? "bg-teal-700 text-white dark:bg-teal-400 dark:text-[#061412] font-semibold"
-                      : "text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5]"
+                      ? "bg-teal-700 text-white dark:bg-teal-400 dark:text-[#060918] font-semibold"
+                      : "text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
                   }`}
                 >
                   <Minimize2 className="w-2.5 h-2.5" />
@@ -365,7 +365,7 @@ export function VideoEditPanel({
                   updateField("zoom", Math.max(0.5, Number((settings.zoom - 0.15).toFixed(2))))
                 }
                 title="Zoom Out"
-                className="h-7 px-1 rounded-sm border border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] text-[11px] font-medium text-[#0e1217] dark:text-[#f1f3f5] flex items-center justify-center gap-1 cursor-pointer whitespace-nowrap transition-colors"
+                className="h-7 px-1 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center justify-center gap-1 cursor-pointer whitespace-nowrap transition-colors"
               >
                 <ZoomOut className="w-3 h-3" />
                 <span>Out</span>
@@ -377,7 +377,7 @@ export function VideoEditPanel({
                   updateField("zoom", Math.min(2.5, Number((settings.zoom + 0.15).toFixed(2))))
                 }
                 title="Zoom In"
-                className="h-7 px-1 rounded-sm border border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] text-[11px] font-medium text-[#0e1217] dark:text-[#f1f3f5] flex items-center justify-center gap-1 cursor-pointer whitespace-nowrap transition-colors"
+                className="h-7 px-1 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center justify-center gap-1 cursor-pointer whitespace-nowrap transition-colors"
               >
                 <ZoomIn className="w-3 h-3" />
                 <span>In</span>
@@ -390,7 +390,7 @@ export function VideoEditPanel({
                   updateField("rotateDeg", next < -180 ? next + 360 : next);
                 }}
                 title="Rotate -90°"
-                className="h-7 px-1 rounded-sm border border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] text-[11px] font-medium text-[#0e1217] dark:text-[#f1f3f5] flex items-center justify-center gap-1 cursor-pointer whitespace-nowrap transition-colors"
+                className="h-7 px-1 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center justify-center gap-1 cursor-pointer whitespace-nowrap transition-colors"
               >
                 <RotateCcw className="w-3 h-3" />
                 <span>90°</span>
@@ -403,7 +403,7 @@ export function VideoEditPanel({
                   updateField("rotateDeg", next > 180 ? next - 360 : next);
                 }}
                 title="Rotate +90°"
-                className="h-7 px-1 rounded-sm border border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] text-[11px] font-medium text-[#0e1217] dark:text-[#f1f3f5] flex items-center justify-center gap-1 cursor-pointer whitespace-nowrap transition-colors"
+                className="h-7 px-1 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center justify-center gap-1 cursor-pointer whitespace-nowrap transition-colors"
               >
                 <RotateCw className="w-3 h-3" />
                 <span>90°</span>
@@ -415,8 +415,8 @@ export function VideoEditPanel({
                 title="Flip Horizontal"
                 className={`h-7 px-1 rounded-sm border text-[11px] font-medium flex items-center justify-center gap-1 cursor-pointer whitespace-nowrap transition-colors ${
                   settings.flipH
-                    ? "bg-teal-700 text-white border-teal-700 dark:bg-teal-400 dark:text-[#061412] dark:border-teal-400 font-semibold"
-                    : "border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] text-[#0e1217] dark:text-[#f1f3f5] hover:bg-[#eceff3] dark:hover:bg-[#1e242e]"
+                    ? "bg-teal-700 text-white border-teal-700 dark:bg-teal-400 dark:text-[#060918] dark:border-teal-400 font-semibold"
+                    : "border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142]"
                 }`}
               >
                 <FlipHorizontal2 className="w-3 h-3" />
@@ -429,8 +429,8 @@ export function VideoEditPanel({
                 title="Flip Vertical"
                 className={`h-7 px-1 rounded-sm border text-[11px] font-medium flex items-center justify-center gap-1 cursor-pointer whitespace-nowrap transition-colors ${
                   settings.flipV
-                    ? "bg-teal-700 text-white border-teal-700 dark:bg-teal-400 dark:text-[#061412] dark:border-teal-400 font-semibold"
-                    : "border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] text-[#0e1217] dark:text-[#f1f3f5] hover:bg-[#eceff3] dark:hover:bg-[#1e242e]"
+                    ? "bg-teal-700 text-white border-teal-700 dark:bg-teal-400 dark:text-[#060918] dark:border-teal-400 font-semibold"
+                    : "border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142]"
                 }`}
               >
                 <FlipVertical2 className="w-3 h-3" />
@@ -441,8 +441,8 @@ export function VideoEditPanel({
             <div className="grid grid-cols-2 gap-x-4 gap-y-2.5">
               <div className="space-y-1">
                 <div className="flex items-center justify-between text-xs">
-                  <span className="text-[#525d6d] dark:text-[#8b95a5]">Zoom</span>
-                  <span className="font-mono-tabular text-[#0e1217] dark:text-[#f1f3f5]">
+                  <span className="text-[#4d597d] dark:text-[#919ec4]">Zoom</span>
+                  <span className="font-mono-tabular text-[#0c1026] dark:text-[#f3f5fc]">
                     {settings.zoom.toFixed(2)}x
                   </span>
                 </div>
@@ -454,14 +454,14 @@ export function VideoEditPanel({
                   value={settings.zoom}
                   onChange={(e) => updateField("zoom", parseFloat(e.target.value))}
                   aria-label="Video zoom"
-                  className="w-full h-1.5 rounded-full appearance-none bg-[#dde2e9] dark:bg-[#242a34] cursor-pointer"
+                  className="w-full h-1.5 rounded-full appearance-none bg-[#d2dcf0] dark:bg-[#21284c] cursor-pointer"
                 />
               </div>
 
               <div className="space-y-1">
                 <div className="flex items-center justify-between text-xs">
-                  <span className="text-[#525d6d] dark:text-[#8b95a5]">Rotate</span>
-                  <span className="font-mono-tabular text-[#0e1217] dark:text-[#f1f3f5]">
+                  <span className="text-[#4d597d] dark:text-[#919ec4]">Rotate</span>
+                  <span className="font-mono-tabular text-[#0c1026] dark:text-[#f3f5fc]">
                     {settings.rotateDeg}°
                   </span>
                 </div>
@@ -473,14 +473,14 @@ export function VideoEditPanel({
                   value={settings.rotateDeg}
                   onChange={(e) => updateField("rotateDeg", parseInt(e.target.value, 10))}
                   aria-label="Video rotation"
-                  className="w-full h-1.5 rounded-full appearance-none bg-[#dde2e9] dark:bg-[#242a34] cursor-pointer"
+                  className="w-full h-1.5 rounded-full appearance-none bg-[#d2dcf0] dark:bg-[#21284c] cursor-pointer"
                 />
               </div>
 
               <div className="space-y-1">
                 <div className="flex items-center justify-between text-xs">
-                  <span className="text-[#525d6d] dark:text-[#8b95a5]">Position X</span>
-                  <span className="font-mono-tabular text-[#0e1217] dark:text-[#f1f3f5]">
+                  <span className="text-[#4d597d] dark:text-[#919ec4]">Position X</span>
+                  <span className="font-mono-tabular text-[#0c1026] dark:text-[#f3f5fc]">
                     {settings.panX}%
                   </span>
                 </div>
@@ -492,14 +492,14 @@ export function VideoEditPanel({
                   value={settings.panX}
                   onChange={(e) => updateField("panX", parseInt(e.target.value, 10))}
                   aria-label="Horizontal position"
-                  className="w-full h-1.5 rounded-full appearance-none bg-[#dde2e9] dark:bg-[#242a34] cursor-pointer"
+                  className="w-full h-1.5 rounded-full appearance-none bg-[#d2dcf0] dark:bg-[#21284c] cursor-pointer"
                 />
               </div>
 
               <div className="space-y-1">
                 <div className="flex items-center justify-between text-xs">
-                  <span className="text-[#525d6d] dark:text-[#8b95a5]">Position Y</span>
-                  <span className="font-mono-tabular text-[#0e1217] dark:text-[#f1f3f5]">
+                  <span className="text-[#4d597d] dark:text-[#919ec4]">Position Y</span>
+                  <span className="font-mono-tabular text-[#0c1026] dark:text-[#f3f5fc]">
                     {settings.panY}%
                   </span>
                 </div>
@@ -511,15 +511,15 @@ export function VideoEditPanel({
                   value={settings.panY}
                   onChange={(e) => updateField("panY", parseInt(e.target.value, 10))}
                   aria-label="Vertical position"
-                  className="w-full h-1.5 rounded-full appearance-none bg-[#dde2e9] dark:bg-[#242a34] cursor-pointer"
+                  className="w-full h-1.5 rounded-full appearance-none bg-[#d2dcf0] dark:bg-[#21284c] cursor-pointer"
                 />
               </div>
             </div>
 
             <div className="space-y-1">
               <div className="flex items-center justify-between text-xs">
-                <span className="text-[#525d6d] dark:text-[#8b95a5]">Stage Split (Video Height)</span>
-                <span className="font-mono-tabular text-[#0e1217] dark:text-[#f1f3f5]">
+                <span className="text-[#4d597d] dark:text-[#919ec4]">Stage Split (Video Height)</span>
+                <span className="font-mono-tabular text-[#0c1026] dark:text-[#f3f5fc]">
                   {settings.videoHeightPct}%
                 </span>
               </div>
@@ -531,14 +531,14 @@ export function VideoEditPanel({
                 value={settings.videoHeightPct}
                 onChange={(e) => updateField("videoHeightPct", parseInt(e.target.value, 10))}
                 aria-label="Top video height percentage"
-                className="w-full h-1.5 rounded-full appearance-none bg-[#dde2e9] dark:bg-[#242a34] cursor-pointer"
+                className="w-full h-1.5 rounded-full appearance-none bg-[#d2dcf0] dark:bg-[#21284c] cursor-pointer"
               />
             </div>
           </div>
 
           {/* 3. Look & Filter Presets */}
           <div className="py-3 space-y-2">
-            <span className="block text-[11px] font-semibold uppercase tracking-wider text-[#525d6d] dark:text-[#8b95a5]">
+            <span className="block text-[11px] font-semibold uppercase tracking-wider text-[#4d597d] dark:text-[#919ec4]">
               Filter Presets
             </span>
             <div className="grid grid-cols-4 gap-1.5">
@@ -557,8 +557,8 @@ export function VideoEditPanel({
                     }
                     className={`h-7 px-2 rounded-sm text-xs font-medium border transition-colors cursor-pointer whitespace-nowrap truncate ${
                       active
-                        ? "bg-teal-700 text-white border-teal-700 dark:bg-teal-400 dark:text-[#061412] dark:border-teal-400 font-semibold"
-                        : "bg-[#f5f6f8] dark:bg-[#181c23] text-[#0e1217] dark:text-[#f1f3f5] border-[#dde2e9] dark:border-[#242a34] hover:border-teal-600/50 dark:hover:border-teal-400/50"
+                        ? "bg-teal-700 text-white border-teal-700 dark:bg-teal-400 dark:text-[#060918] dark:border-teal-400 font-semibold"
+                        : "bg-[#f3f5fc] dark:bg-[#141933] text-[#0c1026] dark:text-[#f3f5fc] border-[#d2dcf0] dark:border-[#21284c] hover:border-teal-600/50 dark:hover:border-teal-400/50"
                     }`}
                   >
                     {preset.label}
@@ -570,15 +570,15 @@ export function VideoEditPanel({
 
           {/* 4. Color & Lens Grade */}
           <div className="py-3 space-y-2.5">
-            <span className="block text-[11px] font-semibold uppercase tracking-wider text-[#525d6d] dark:text-[#8b95a5]">
+            <span className="block text-[11px] font-semibold uppercase tracking-wider text-[#4d597d] dark:text-[#919ec4]">
               Color & Lens
             </span>
 
             <div className="grid grid-cols-2 gap-x-4 gap-y-2.5">
               <div className="space-y-1">
                 <div className="flex items-center justify-between text-xs">
-                  <span className="text-[#525d6d] dark:text-[#8b95a5]">Brightness</span>
-                  <span className="font-mono-tabular text-[#0e1217] dark:text-[#f1f3f5]">
+                  <span className="text-[#4d597d] dark:text-[#919ec4]">Brightness</span>
+                  <span className="font-mono-tabular text-[#0c1026] dark:text-[#f3f5fc]">
                     {settings.brightness}%
                   </span>
                 </div>
@@ -590,14 +590,14 @@ export function VideoEditPanel({
                   value={settings.brightness}
                   onChange={(e) => updateField("brightness", parseInt(e.target.value, 10), true)}
                   aria-label="Brightness"
-                  className="w-full h-1.5 rounded-full appearance-none bg-[#dde2e9] dark:bg-[#242a34] cursor-pointer"
+                  className="w-full h-1.5 rounded-full appearance-none bg-[#d2dcf0] dark:bg-[#21284c] cursor-pointer"
                 />
               </div>
 
               <div className="space-y-1">
                 <div className="flex items-center justify-between text-xs">
-                  <span className="text-[#525d6d] dark:text-[#8b95a5]">Contrast</span>
-                  <span className="font-mono-tabular text-[#0e1217] dark:text-[#f1f3f5]">
+                  <span className="text-[#4d597d] dark:text-[#919ec4]">Contrast</span>
+                  <span className="font-mono-tabular text-[#0c1026] dark:text-[#f3f5fc]">
                     {settings.contrast}%
                   </span>
                 </div>
@@ -609,14 +609,14 @@ export function VideoEditPanel({
                   value={settings.contrast}
                   onChange={(e) => updateField("contrast", parseInt(e.target.value, 10), true)}
                   aria-label="Contrast"
-                  className="w-full h-1.5 rounded-full appearance-none bg-[#dde2e9] dark:bg-[#242a34] cursor-pointer"
+                  className="w-full h-1.5 rounded-full appearance-none bg-[#d2dcf0] dark:bg-[#21284c] cursor-pointer"
                 />
               </div>
 
               <div className="space-y-1">
                 <div className="flex items-center justify-between text-xs">
-                  <span className="text-[#525d6d] dark:text-[#8b95a5]">Saturation</span>
-                  <span className="font-mono-tabular text-[#0e1217] dark:text-[#f1f3f5]">
+                  <span className="text-[#4d597d] dark:text-[#919ec4]">Saturation</span>
+                  <span className="font-mono-tabular text-[#0c1026] dark:text-[#f3f5fc]">
                     {settings.saturation}%
                   </span>
                 </div>
@@ -628,14 +628,14 @@ export function VideoEditPanel({
                   value={settings.saturation}
                   onChange={(e) => updateField("saturation", parseInt(e.target.value, 10), true)}
                   aria-label="Saturation"
-                  className="w-full h-1.5 rounded-full appearance-none bg-[#dde2e9] dark:bg-[#242a34] cursor-pointer"
+                  className="w-full h-1.5 rounded-full appearance-none bg-[#d2dcf0] dark:bg-[#21284c] cursor-pointer"
                 />
               </div>
 
               <div className="space-y-1">
                 <div className="flex items-center justify-between text-xs">
-                  <span className="text-[#525d6d] dark:text-[#8b95a5]">Color Hue</span>
-                  <span className="font-mono-tabular text-[#0e1217] dark:text-[#f1f3f5]">
+                  <span className="text-[#4d597d] dark:text-[#919ec4]">Color Hue</span>
+                  <span className="font-mono-tabular text-[#0c1026] dark:text-[#f3f5fc]">
                     {settings.hueDeg}°
                   </span>
                 </div>
@@ -647,14 +647,14 @@ export function VideoEditPanel({
                   value={settings.hueDeg}
                   onChange={(e) => updateField("hueDeg", parseInt(e.target.value, 10), true)}
                   aria-label="Hue rotation"
-                  className="w-full h-1.5 rounded-full appearance-none bg-[#dde2e9] dark:bg-[#242a34] cursor-pointer"
+                  className="w-full h-1.5 rounded-full appearance-none bg-[#d2dcf0] dark:bg-[#21284c] cursor-pointer"
                 />
               </div>
 
               <div className="space-y-1">
                 <div className="flex items-center justify-between text-xs">
-                  <span className="text-[#525d6d] dark:text-[#8b95a5]">Blur</span>
-                  <span className="font-mono-tabular text-[#0e1217] dark:text-[#f1f3f5]">
+                  <span className="text-[#4d597d] dark:text-[#919ec4]">Blur</span>
+                  <span className="font-mono-tabular text-[#0c1026] dark:text-[#f3f5fc]">
                     {settings.blurPx}px
                   </span>
                 </div>
@@ -666,14 +666,14 @@ export function VideoEditPanel({
                   value={settings.blurPx}
                   onChange={(e) => updateField("blurPx", parseFloat(e.target.value))}
                   aria-label="Blur"
-                  className="w-full h-1.5 rounded-full appearance-none bg-[#dde2e9] dark:bg-[#242a34] cursor-pointer"
+                  className="w-full h-1.5 rounded-full appearance-none bg-[#d2dcf0] dark:bg-[#21284c] cursor-pointer"
                 />
               </div>
 
               <div className="space-y-1">
                 <div className="flex items-center justify-between text-xs">
-                  <span className="text-[#525d6d] dark:text-[#8b95a5]">Vignette</span>
-                  <span className="font-mono-tabular text-[#0e1217] dark:text-[#f1f3f5]">
+                  <span className="text-[#4d597d] dark:text-[#919ec4]">Vignette</span>
+                  <span className="font-mono-tabular text-[#0c1026] dark:text-[#f3f5fc]">
                     {settings.vignette}%
                   </span>
                 </div>
@@ -685,7 +685,7 @@ export function VideoEditPanel({
                   value={settings.vignette}
                   onChange={(e) => updateField("vignette", parseInt(e.target.value, 10), true)}
                   aria-label="Vignette"
-                  className="w-full h-1.5 rounded-full appearance-none bg-[#dde2e9] dark:bg-[#242a34] cursor-pointer"
+                  className="w-full h-1.5 rounded-full appearance-none bg-[#d2dcf0] dark:bg-[#21284c] cursor-pointer"
                 />
               </div>
             </div>
@@ -695,11 +695,11 @@ export function VideoEditPanel({
           <div className="pt-3 space-y-2">
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
-                <div className="flex items-center gap-1.5 text-xs font-semibold text-[#0e1217] dark:text-[#f1f3f5]">
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-[#0c1026] dark:text-[#f3f5fc]">
                   <Shield className="w-3.5 h-3.5 text-teal-700 dark:text-teal-400 shrink-0" />
                   <span>Pixel Perturbations</span>
                 </div>
-                <p className="text-[11px] text-[#525d6d] dark:text-[#8b95a5] mt-0.5 leading-snug">
+                <p className="text-[11px] text-[#4d597d] dark:text-[#919ec4] mt-0.5 leading-snug">
                   Subtle RGB pixel perturbations applied to preview and MP4 export frames.
                 </p>
               </div>
@@ -712,8 +712,8 @@ export function VideoEditPanel({
                 onClick={() => updateField("adversarialNoise", !settings.adversarialNoise)}
                 className={`h-6 px-2.5 rounded-sm text-[11px] font-semibold border transition-colors cursor-pointer shrink-0 ${
                   settings.adversarialNoise
-                    ? "bg-teal-700 text-white border-teal-700 dark:bg-teal-400 dark:text-[#061412] dark:border-teal-400"
-                    : "bg-[#eceff3] dark:bg-[#181c23] text-[#525d6d] dark:text-[#8b95a5] border-[#dde2e9] dark:border-[#242a34] hover:text-[#0e1217] dark:hover:text-[#f1f3f5]"
+                    ? "bg-teal-700 text-white border-teal-700 dark:bg-teal-400 dark:text-[#060918] dark:border-teal-400"
+                    : "bg-[#e7ecf8] dark:bg-[#141933] text-[#4d597d] dark:text-[#919ec4] border-[#d2dcf0] dark:border-[#21284c] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
                 }`}
               >
                 {settings.adversarialNoise ? "ON" : "OFF"}
@@ -723,10 +723,10 @@ export function VideoEditPanel({
             {settings.adversarialNoise && (
               <div className="space-y-1 pt-1">
                 <div className="flex items-center justify-between text-xs">
-                  <span className="text-[#525d6d] dark:text-[#8b95a5]">
+                  <span className="text-[#4d597d] dark:text-[#919ec4]">
                     Perturbation Strength (ε)
                   </span>
-                  <span className="font-mono-tabular text-[#0e1217] dark:text-[#f1f3f5]">
+                  <span className="font-mono-tabular text-[#0c1026] dark:text-[#f3f5fc]">
                     ±{settings.adversarialStrength} px
                   </span>
                 </div>
@@ -740,7 +740,7 @@ export function VideoEditPanel({
                     updateField("adversarialStrength", parseInt(e.target.value, 10))
                   }
                   aria-label="Adversarial pixel perturbation strength"
-                  className="w-full h-1.5 rounded-full appearance-none bg-[#dde2e9] dark:bg-[#242a34] cursor-pointer"
+                  className="w-full h-1.5 rounded-full appearance-none bg-[#d2dcf0] dark:bg-[#21284c] cursor-pointer"
                 />
               </div>
             )}

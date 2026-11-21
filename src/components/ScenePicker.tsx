@@ -66,12 +66,12 @@ export function ScenePicker({
       <button
         type="button"
         onClick={() => uploadInputRef.current?.click()}
-        className={`group w-full rounded-lg border border-dashed border-[#c9d1dc] dark:border-[#2e3644] bg-[#eceff3]/75 dark:bg-[#0d1015] hover:border-teal-700/60 dark:hover:border-teal-400/50 hover:bg-[#e6eaf0]/85 dark:hover:bg-[#12161d] flex flex-col items-center justify-center gap-1.5 text-center cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-700 dark:focus-visible:ring-teal-400 ${
+        className={`group w-full rounded-lg border border-dashed border-[#bcc9e6] dark:border-[#2e3644] bg-[#e7ecf8]/75 dark:bg-[#0d1015] hover:border-teal-700/60 dark:hover:border-teal-400/50 hover:bg-[#e6eaf0]/85 dark:hover:bg-[#12161d] flex flex-col items-center justify-center gap-1.5 text-center cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-700 dark:focus-visible:ring-teal-400 ${
           mobileStageTarget ? "h-full p-3" : "max-w-xl mx-auto aspect-video p-6"
         }`}
       >
         <Upload className="w-5 h-5 text-teal-700 dark:text-teal-400 transition-transform duration-150 group-hover:-translate-y-0.5 shrink-0" />
-        <span className="text-xs font-medium text-[#525d6d] dark:text-[#8b95a5] group-hover:text-[#0e1217] dark:group-hover:text-[#f1f3f5] transition-colors">
+        <span className="text-xs font-medium text-[#4d597d] dark:text-[#919ec4] group-hover:text-[#0c1026] dark:group-hover:text-[#f3f5fc] transition-colors">
           Upload video
         </span>
       </button>
@@ -97,7 +97,7 @@ export function ScenePicker({
               <div
                 role="group"
                 aria-label="Translation tone"
-                className="inline-flex items-center p-0.5 rounded-md bg-[#eceff3] dark:bg-[#181c23] border border-[#dde2e9] dark:border-[#242a34]"
+                className="inline-flex items-center p-0.5 rounded-md bg-[#e7ecf8] dark:bg-[#141933] border border-[#d2dcf0] dark:border-[#21284c]"
               >
                 {TONE_OPTIONS.map((opt) => {
                   const active = translationTone === opt.id;
@@ -109,8 +109,8 @@ export function ScenePicker({
                       disabled={isProcessing}
                       className={`px-2.5 py-1 rounded text-[11px] font-medium whitespace-nowrap transition-colors cursor-pointer disabled:opacity-50 ${
                         active
-                          ? "bg-teal-700 text-white dark:bg-teal-400 dark:text-[#061412] font-semibold"
-                          : "text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5]"
+                          ? "bg-teal-700 text-white dark:bg-teal-400 dark:text-[#060918] font-semibold"
+                          : "text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
                       }`}
                     >
                       {opt.label}
@@ -122,7 +122,7 @@ export function ScenePicker({
               <button
                 type="button"
                 disabled
-                className="h-9 px-4 rounded-md bg-teal-700 dark:bg-teal-400 text-white dark:text-[#061412] text-xs font-semibold whitespace-nowrap opacity-40 cursor-not-allowed"
+                className="h-9 px-4 rounded-md bg-teal-700 dark:bg-teal-400 text-white dark:text-[#060918] text-xs font-semibold whitespace-nowrap opacity-40 cursor-not-allowed"
               >
                 Generate Subtitles
               </button>
@@ -142,19 +142,19 @@ export function ScenePicker({
 
   return (
     <div className="flex flex-col gap-4 pb-6">
-      <div className="pb-3 border-b border-[#dde2e9] dark:border-[#242a34] flex items-center justify-between gap-3">
+      <div className="pb-3 border-b border-[#d2dcf0] dark:border-[#21284c] flex items-center justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <p className="font-display text-sm font-semibold text-[#0e1217] dark:text-[#f1f3f5] truncate">
+          <p className="font-display text-sm font-semibold text-[#0c1026] dark:text-[#f3f5fc] truncate">
             {media.title}
           </p>
-          <p className="text-[11px] font-mono-tabular text-[#525d6d] dark:text-[#8b95a5] mt-0.5">
+          <p className="text-[11px] font-mono-tabular text-[#4d597d] dark:text-[#919ec4] mt-0.5">
             Local Source · {Math.round(media.durationSec)}s
           </p>
         </div>
         <button
           type="button"
           onClick={onClearVideo}
-          className="h-8 px-3 rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] hover:bg-red-50 hover:text-red-600 hover:border-red-200 dark:hover:bg-red-950/35 dark:hover:text-red-400 dark:hover:border-red-900 text-xs font-medium flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors shrink-0 text-[#0e1217] dark:text-[#f1f3f5]"
+          className="h-8 px-3 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] hover:bg-red-50 hover:text-red-600 hover:border-red-200 dark:hover:bg-red-950/35 dark:hover:text-red-400 dark:hover:border-red-900 text-xs font-medium flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors shrink-0 text-[#0c1026] dark:text-[#f3f5fc]"
         >
           <X className="w-3.5 h-3.5" />
           <span>Clear Video</span>
@@ -178,9 +178,9 @@ export function ScenePicker({
       />
 
       {/* Translation Tone & Generate Subtitles Action Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-[#dde2e9] dark:border-[#242a34]">
+      <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-[#d2dcf0] dark:border-[#21284c]">
         <div className="flex flex-wrap items-center gap-3">
-          <span className="text-xs font-mono-tabular text-[#525d6d] dark:text-[#8b95a5] whitespace-nowrap">
+          <span className="text-xs font-mono-tabular text-[#4d597d] dark:text-[#919ec4] whitespace-nowrap">
             {scenes.length} {scenes.length === 1 ? "clip" : "clips"} ·{" "}
             {`${Math.round(totalSelectedSec * 10) / 10}s`}
           </span>
@@ -188,7 +188,7 @@ export function ScenePicker({
           <div
             role="group"
             aria-label="Translation tone"
-            className="inline-flex items-center p-0.5 rounded-md bg-[#eceff3] dark:bg-[#181c23] border border-[#dde2e9] dark:border-[#242a34]"
+            className="inline-flex items-center p-0.5 rounded-md bg-[#e7ecf8] dark:bg-[#141933] border border-[#d2dcf0] dark:border-[#21284c]"
           >
             {TONE_OPTIONS.map((opt) => {
               const active = translationTone === opt.id;
@@ -200,8 +200,8 @@ export function ScenePicker({
                   disabled={isProcessing || Boolean(regeneratingClipId)}
                   className={`px-2.5 py-1 rounded text-[11px] font-medium whitespace-nowrap transition-colors cursor-pointer disabled:opacity-50 ${
                     active
-                      ? "bg-teal-700 text-white dark:bg-teal-400 dark:text-[#061412] font-semibold"
-                      : "text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5]"
+                      ? "bg-teal-700 text-white dark:bg-teal-400 dark:text-[#060918] font-semibold"
+                      : "text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
                   }`}
                 >
                   {opt.label}
@@ -215,7 +215,7 @@ export function ScenePicker({
           type="button"
           onClick={onGenerate}
           disabled={scenes.length === 0 || isProcessing || Boolean(regeneratingClipId)}
-          className="h-9 px-5 rounded-md bg-teal-700 hover:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 text-white dark:text-[#061412] text-xs font-semibold flex items-center gap-2 whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer shadow-xs"
+          className="h-9 px-5 rounded-md bg-teal-700 hover:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 text-white dark:text-[#060918] text-xs font-semibold flex items-center gap-2 whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer shadow-xs"
         >
           {isProcessing ? (
             <>

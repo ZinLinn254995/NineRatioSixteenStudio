@@ -721,7 +721,7 @@ export async function exportProjectToMp4(
                 : darkMode
                   ? "dark"
                   : "light";
-        const subHl = editSettings.subtitleHighlightColor || "amber";
+        const subHl = editSettings.subtitleHighlightColor || "indigo";
         const showWordGloss = editSettings.showWordGloss !== false;
         const showBurmeseLine = editSettings.showBurmeseLine !== false;
 
@@ -775,22 +775,29 @@ export async function exportProjectToMp4(
         const burmeseLineH = Math.round(34 * subFontScale);
         const pillFill =
           subHl === "emerald"
-            ? "#6ee7b7"
+            ? isDarkPanel
+              ? "#127d5c"
+              : "#0d7456"
             : subHl === "indigo"
-              ? "#6366f1"
+              ? isDarkPanel
+                ? "#2952d6"
+                : "#1c3db8"
               : subHl === "rose"
-                ? "#fda4af"
+                ? isDarkPanel
+                  ? "#a12f88"
+                  : "#8b2574"
                 : isDarkPanel
-                  ? "#fbbf24"
-                  : "#fde047";
-        const pillTextFill = subHl === "indigo" ? "#ffffff" : "#0f172a";
+                  ? "#cc801a"
+                  : "#b0580c";
+        const pillTextFill =
+          subHl === "amber" && isDarkPanel ? "#0f172a" : "#ffffff";
 
         const renderSubtitleOnlyFrame = (t: number) => {
-          subCtx.fillStyle = isDarkPanel ? "#0b1120" : isWarmPanel ? "#fbf7ef" : "#f8fafc";
+          subCtx.fillStyle = isDarkPanel ? "#080b1a" : isWarmPanel ? "#fbf7ef" : "#f8faff";
           subCtx.fillRect(0, 0, width, listH);
 
           // Top 1px divider separating video and subtitle panel
-          subCtx.fillStyle = isDarkPanel ? "#1e293b" : isWarmPanel ? "#e7dcc8" : "#cbd5e1";
+          subCtx.fillStyle = isDarkPanel ? "#21284c" : isWarmPanel ? "#e7dcc8" : "#d2dcf0";
           subCtx.fillRect(0, 0, width, 1);
 
           const ht = Math.min(sourceTotalDuration, t + 0.06);
@@ -813,42 +820,42 @@ export async function exportProjectToMp4(
             const isActive = ci === activeCardIdx;
             subCtx.fillStyle = isActive
               ? isDarkPanel
-                ? "#131c31"
+                ? "#12183a"
                 : isWarmPanel
                   ? "#fffdf8"
                   : "#ffffff"
               : isDarkPanel
-                ? "rgba(15, 23, 42, 0.55)"
+                ? "rgba(13, 18, 41, 0.72)"
                 : isWarmPanel
                   ? "rgba(244, 237, 224, 0.72)"
-                  : "rgba(255, 255, 255, 0.72)";
+                  : "rgba(255, 255, 255, 0.75)";
             drawRoundedRect(subCtx, 22, card.topY, width - 44, card.height, 18);
             subCtx.fill();
             subCtx.strokeStyle = isActive
               ? isDarkPanel
-                ? "rgba(99, 102, 241, 0.45)"
+                ? "rgba(78, 126, 247, 0.5)"
                 : isWarmPanel
-                  ? "#fcd34d"
-                  : "#c7d2fe"
+                  ? "#dfae52"
+                  : "#8da2ea"
               : isDarkPanel
-                ? "#1e293b"
+                ? "#1e264a"
                 : isWarmPanel
                   ? "#e5dac6"
-                  : "#e2e8f0";
+                  : "#e2e8f5";
             subCtx.lineWidth = isActive ? 1.75 : 1;
             subCtx.stroke();
 
             subCtx.fillStyle = isActive
               ? isDarkPanel
-                ? "#818cf8"
+                ? "#5b85f7"
                 : isWarmPanel
-                  ? "#d97706"
-                  : "#4f46e5"
+                  ? "#b86310"
+                  : "#1c3db8"
               : isDarkPanel
-                ? "#1e293b"
+                ? "#1e264a"
                 : isWarmPanel
                   ? "#dfd3be"
-                  : "#e2e8f0";
+                  : "#e2e8f5";
             drawRoundedRect(subCtx, 32, card.topY + 18, 5, Math.max(24, card.height - 36), 3);
             subCtx.fill();
 
@@ -881,14 +888,14 @@ export async function exportProjectToMp4(
               } else if (isActive) {
                 subCtx.fillStyle = isDarkPanel
                   ? wasSpoken
-                    ? "#a5b4fc"
+                    ? "#8cb5f5"
                     : "#cbd5e1"
                   : isWarmPanel
                     ? wasSpoken
-                      ? "#92400e"
+                      ? "#944808"
                       : "#292524"
                     : wasSpoken
-                      ? "#4338ca"
+                      ? "#1938a8"
                       : "#334155";
               } else {
                 subCtx.fillStyle = isWarmPanel ? "#78716c" : "#64748b";
@@ -900,25 +907,25 @@ export async function exportProjectToMp4(
                 subCtx.fillStyle = isSpoken
                   ? subHl === "emerald"
                     ? isDarkPanel
-                      ? "#6ee7b7"
-                      : "#047857"
+                      ? "#43b892"
+                      : "#0b664b"
                     : subHl === "indigo"
                       ? isDarkPanel
-                        ? "#a5b4fc"
-                        : "#4338ca"
+                        ? "#80a6ff"
+                        : "#1836a3"
                       : subHl === "rose"
                         ? isDarkPanel
-                          ? "#fda4af"
-                          : "#be123c"
+                          ? "#e386cf"
+                          : "#7d1e68"
                         : isDarkPanel
-                          ? "#fcd34d"
-                          : "#b45309"
+                          ? "#e5a64e"
+                          : "#9c4b08"
                   : isActive
                     ? isDarkPanel
-                      ? "#5eead4"
-                      : "#0f766e"
+                      ? "#6c97f8"
+                      : "#1c3db8"
                     : isDarkPanel
-                      ? "#475569"
+                      ? "#515e87"
                       : isWarmPanel
                         ? "#a8a29e"
                         : "#94a3b8";
@@ -947,12 +954,12 @@ export async function exportProjectToMp4(
                 const dividerY = card.burmeseStartY - 30;
                 subCtx.fillStyle = isActive
                   ? isDarkPanel
-                    ? "rgba(99, 102, 241, 0.22)"
+                    ? "rgba(78, 126, 247, 0.28)"
                     : isWarmPanel
-                      ? "#fde68a"
-                      : "#e0e7ff"
+                      ? "#ebd197"
+                      : "#d3dff8"
                   : isDarkPanel
-                    ? "#1e293b"
+                    ? "#1e264a"
                     : isWarmPanel
                       ? "#e7dcc8"
                       : "#f1f5f9";
@@ -962,12 +969,12 @@ export async function exportProjectToMp4(
               subCtx.font = `600 ${idxPx}px 'JetBrains Mono', monospace`;
               subCtx.fillStyle = isActive
                 ? isDarkPanel
-                  ? "#818cf8"
+                  ? "#5b85f7"
                   : isWarmPanel
-                    ? "#b45309"
-                    : "#6366f1"
+                    ? "#a3550b"
+                    : "#1c3db8"
                 : isDarkPanel
-                  ? "#475569"
+                  ? "#515e87"
                   : isWarmPanel
                     ? "#a8a29e"
                     : "#94a3b8";
@@ -976,8 +983,8 @@ export async function exportProjectToMp4(
               subCtx.font = `500 ${burmesePx}px 'Noto Sans Myanmar', 'Plus Jakarta Sans', sans-serif`;
               subCtx.fillStyle = isActive
                 ? isDarkPanel
-                  ? "#99f6e4"
-                  : "#115e59"
+                  ? "#99b8ff"
+                  : "#122b87"
                 : isWarmPanel
                   ? "#57534e"
                   : "#64748b";
@@ -1440,7 +1447,7 @@ export async function exportProjectToMp4(
             : darkMode
               ? "dark"
               : "light";
-    const subHl = editSettings.subtitleHighlightColor || "amber";
+    const subHl = editSettings.subtitleHighlightColor || "indigo";
     const showWordGloss = editSettings.showWordGloss !== false;
     const showBurmeseLine = editSettings.showBurmeseLine !== false;
 
@@ -1490,7 +1497,7 @@ export async function exportProjectToMp4(
       throwIfAborted(signal);
       // 1. Background (matched to active subtitle theme)
       ctx.fillStyle =
-        subTheme === "dark" ? "#0b1120" : subTheme === "warm" ? "#fbf7ef" : "#f8fafc";
+        subTheme === "dark" ? "#080b1a" : subTheme === "warm" ? "#fbf7ef" : "#f8faff";
       ctx.fillRect(0, 0, width, height);
 
       // 2. Top 9:16 Video Frame with Transform, Filter & Vignette
@@ -1620,7 +1627,7 @@ export async function exportProjectToMp4(
       if (hasSubtitles) {
         const isDarkPanel = subTheme === "dark";
         const isWarmPanel = subTheme === "warm";
-        ctx.fillStyle = isDarkPanel ? "#1e293b" : isWarmPanel ? "#e7dcc8" : "#cbd5e1";
+        ctx.fillStyle = isDarkPanel ? "#21284c" : isWarmPanel ? "#e7dcc8" : "#d2dcf0";
         ctx.fillRect(0, topVideoH, width, 1);
 
         const ht = Math.min(sourceTotalDuration, t + 0.06);
@@ -1643,15 +1650,22 @@ export async function exportProjectToMp4(
         const burmeseLineH = Math.round(34 * subFontScale);
         const pillFill =
           subHl === "emerald"
-            ? "#6ee7b7"
+            ? isDarkPanel
+              ? "#127d5c"
+              : "#0d7456"
             : subHl === "indigo"
-              ? "#6366f1"
+              ? isDarkPanel
+                ? "#2952d6"
+                : "#1c3db8"
               : subHl === "rose"
-                ? "#fda4af"
+                ? isDarkPanel
+                  ? "#a12f88"
+                  : "#8b2574"
                 : isDarkPanel
-                  ? "#fbbf24"
-                  : "#fde047";
-        const pillTextFill = subHl === "indigo" ? "#ffffff" : "#0f172a";
+                  ? "#cc801a"
+                  : "#b0580c";
+        const pillTextFill =
+          subHl === "amber" && isDarkPanel ? "#0f172a" : "#ffffff";
 
         for (let ci = 0; ci < cards.length; ci++) {
           const card = cards[ci];
@@ -1662,42 +1676,42 @@ export async function exportProjectToMp4(
 
           ctx.fillStyle = isActive
             ? isDarkPanel
-              ? "#131c31"
+              ? "#12183a"
               : isWarmPanel
                 ? "#fffdf8"
                 : "#ffffff"
             : isDarkPanel
-              ? "rgba(15, 23, 42, 0.55)"
+              ? "rgba(13, 18, 41, 0.72)"
               : isWarmPanel
                 ? "rgba(244, 237, 224, 0.72)"
-                : "rgba(255, 255, 255, 0.72)";
+                : "rgba(255, 255, 255, 0.75)";
           drawRoundedRect(ctx, 22, card.topY, width - 44, card.height, 18);
           ctx.fill();
           ctx.strokeStyle = isActive
             ? isDarkPanel
-              ? "rgba(99, 102, 241, 0.45)"
+              ? "rgba(78, 126, 247, 0.5)"
               : isWarmPanel
-                ? "#fcd34d"
-                : "#c7d2fe"
+                ? "#dfae52"
+                : "#8da2ea"
             : isDarkPanel
-              ? "#1e293b"
+              ? "#1e264a"
               : isWarmPanel
                 ? "#e5dac6"
-                : "#e2e8f0";
+                : "#e2e8f5";
           ctx.lineWidth = isActive ? 1.75 : 1;
           ctx.stroke();
 
           ctx.fillStyle = isActive
             ? isDarkPanel
-              ? "#818cf8"
+              ? "#5b85f7"
               : isWarmPanel
-                ? "#d97706"
-                : "#4f46e5"
+                ? "#b86310"
+                : "#1c3db8"
             : isDarkPanel
-              ? "#1e293b"
+              ? "#1e264a"
               : isWarmPanel
                 ? "#dfd3be"
-                : "#e2e8f0";
+                : "#e2e8f5";
           drawRoundedRect(ctx, 32, card.topY + 18, 5, Math.max(24, card.height - 36), 3);
           ctx.fill();
 
@@ -1730,14 +1744,14 @@ export async function exportProjectToMp4(
             } else if (isActive) {
               ctx.fillStyle = isDarkPanel
                 ? wasSpoken
-                  ? "#a5b4fc"
+                  ? "#8cb5f5"
                   : "#cbd5e1"
                 : isWarmPanel
                   ? wasSpoken
-                    ? "#92400e"
+                    ? "#944808"
                     : "#292524"
                   : wasSpoken
-                    ? "#4338ca"
+                    ? "#1938a8"
                     : "#334155";
             } else {
               ctx.fillStyle = isWarmPanel ? "#78716c" : "#64748b";
@@ -1749,25 +1763,25 @@ export async function exportProjectToMp4(
               ctx.fillStyle = isSpoken
                 ? subHl === "emerald"
                   ? isDarkPanel
-                    ? "#6ee7b7"
-                    : "#047857"
+                    ? "#43b892"
+                    : "#0b664b"
                   : subHl === "indigo"
                     ? isDarkPanel
-                      ? "#a5b4fc"
-                      : "#4338ca"
+                      ? "#80a6ff"
+                      : "#1836a3"
                     : subHl === "rose"
                       ? isDarkPanel
-                        ? "#fda4af"
-                        : "#be123c"
+                        ? "#e386cf"
+                        : "#7d1e68"
                       : isDarkPanel
-                        ? "#fcd34d"
-                        : "#b45309"
+                        ? "#e5a64e"
+                        : "#9c4b08"
                 : isActive
                   ? isDarkPanel
-                    ? "#5eead4"
-                    : "#0f766e"
+                    ? "#6c97f8"
+                    : "#1c3db8"
                   : isDarkPanel
-                    ? "#475569"
+                    ? "#515e87"
                     : isWarmPanel
                       ? "#a8a29e"
                       : "#94a3b8";
@@ -1796,12 +1810,12 @@ export async function exportProjectToMp4(
               const dividerY = card.burmeseStartY - 30;
               ctx.fillStyle = isActive
                 ? isDarkPanel
-                  ? "rgba(99, 102, 241, 0.22)"
+                  ? "rgba(78, 126, 247, 0.28)"
                   : isWarmPanel
-                    ? "#fde68a"
-                    : "#e0e7ff"
+                    ? "#ebd197"
+                    : "#d3dff8"
                 : isDarkPanel
-                  ? "#1e293b"
+                  ? "#1e264a"
                   : isWarmPanel
                     ? "#e7dcc8"
                     : "#f1f5f9";
@@ -1811,12 +1825,12 @@ export async function exportProjectToMp4(
             ctx.font = `600 ${idxPx}px 'JetBrains Mono', monospace`;
             ctx.fillStyle = isActive
               ? isDarkPanel
-                ? "#818cf8"
+                ? "#5b85f7"
                 : isWarmPanel
-                  ? "#b45309"
-                  : "#6366f1"
+                  ? "#a3550b"
+                  : "#1c3db8"
               : isDarkPanel
-                ? "#475569"
+                ? "#515e87"
                 : isWarmPanel
                   ? "#a8a29e"
                   : "#94a3b8";
@@ -1825,8 +1839,8 @@ export async function exportProjectToMp4(
             ctx.font = `500 ${burmesePx}px 'Noto Sans Myanmar', 'Plus Jakarta Sans', sans-serif`;
             ctx.fillStyle = isActive
               ? isDarkPanel
-                ? "#99f6e4"
-                : "#115e59"
+                ? "#99b8ff"
+                : "#122b87"
               : isWarmPanel
                 ? "#57534e"
                 : "#64748b";

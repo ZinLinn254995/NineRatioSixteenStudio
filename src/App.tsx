@@ -3053,22 +3053,24 @@ export default function App() {
   ];
 
   return (
-    <div className="h-[100dvh] w-full overflow-hidden flex flex-col lg:flex-row bg-[#f5f6f8] text-[#0e1217] dark:bg-[#0b0d10] dark:text-[#f1f3f5] transition-colors duration-150">
+    <div className="h-[100dvh] w-full overflow-hidden flex flex-col lg:flex-row bg-[#f3f5fc] text-[#0c1026] dark:bg-[#070814] dark:text-[#f3f5fc] transition-colors duration-150">
       {/* Desktop Left Primary Activity Rail (72px) */}
       <aside
         aria-label="Primary navigation"
-        className="hidden lg:flex w-[72px] shrink-0 flex-col justify-between border-r border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] py-3 px-1.5 z-20"
+        className="hidden lg:flex w-[72px] shrink-0 flex-col justify-between border-r border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] py-3 px-1.5 z-20"
       >
         <div className="flex flex-col items-center gap-3">
-          {/* Geometric 9:16 Brand Tile */}
-          <div className="w-11 h-11 rounded-lg bg-[#0e1217] dark:bg-[#f1f3f5] text-white dark:text-[#0e1217] flex flex-col items-center justify-center leading-none border border-[#dde2e9] dark:border-[#242a34] select-none shrink-0">
-            <span className="font-display font-bold text-xs tracking-tight">9:16</span>
-            <span className="text-[7px] font-semibold uppercase tracking-[0.16em] opacity-70 mt-0.5">
-              Studio
-            </span>
+          {/* Official 9:16 Studio Brand Logo */}
+          <div className="w-11 h-11 rounded-xl overflow-hidden bg-[#060714] border border-[#2a3463]/80 shadow-sm select-none shrink-0 flex items-center justify-center">
+            <img
+              src="/assets/aistudio/file_0000000057888207b493e5c3495405b3_5fff1fc9.png"
+              alt="9:16 Studio"
+              referrerPolicy="no-referrer"
+              className="w-full h-full object-cover"
+            />
           </div>
 
-          <div className="w-8 h-px bg-[#dde2e9] dark:bg-[#242a34]" />
+          <div className="w-8 h-[2px] rounded-full bg-gradient-to-r from-[#a855f7] via-[#3b82f6] to-[#0ea5e9] opacity-80" />
 
           {/* Vertical Activity Rail Buttons */}
           <nav aria-label="Workspace tabs" className="w-full flex flex-col gap-1.5">
@@ -3087,15 +3089,15 @@ export default function App() {
                   className={`relative w-full py-2.5 px-1 rounded-md flex flex-col items-center justify-center gap-1 text-[11px] font-medium transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-700 dark:focus-visible:ring-teal-400 ${
                     active
                       ? "bg-teal-50/90 dark:bg-teal-950/50 text-teal-700 dark:text-teal-400 border border-teal-200/80 dark:border-teal-500/30 font-semibold"
-                      : "text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5] hover:bg-[#eceff3]/70 dark:hover:bg-[#181c23] border border-transparent"
+                      : "text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] hover:bg-[#e7ecf8]/70 dark:hover:bg-[#141933] border border-transparent"
                   }`}
                 >
                   {item.count > 0 && (
                     <span
                       className={`absolute top-1 right-1 min-w-[15px] h-[15px] px-1 rounded-sm text-[9px] font-mono-tabular font-semibold flex items-center justify-center leading-none ${
                         active
-                          ? "bg-teal-700 text-white dark:bg-teal-400 dark:text-[#061412]"
-                          : "bg-[#eceff3] dark:bg-[#181c23] text-[#525d6d] dark:text-[#8b95a5]"
+                          ? "bg-teal-700 text-white dark:bg-teal-400 dark:text-[#060918]"
+                          : "bg-[#e7ecf8] dark:bg-[#141933] text-[#4d597d] dark:text-[#919ec4]"
                       }`}
                     >
                       {item.count}
@@ -3110,7 +3112,7 @@ export default function App() {
         </div>
 
         {/* Bottom Utility Stack: Save Offline & Theme Switch */}
-        <div className="w-full flex flex-col items-center gap-1.5 pt-2 border-t border-[#dde2e9] dark:border-[#242a34]">
+        <div className="w-full flex flex-col items-center gap-1.5 pt-2 border-t border-[#d2dcf0] dark:border-[#21284c]">
           <button
             type="button"
             onClick={() => handleSaveProject(false)}
@@ -3120,7 +3122,7 @@ export default function App() {
             className={`w-full py-2 px-1 rounded-md flex flex-col items-center justify-center gap-0.5 text-[10px] font-medium transition-colors cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-700 dark:focus-visible:ring-teal-400 ${
               justSaved
                 ? "bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-700/50"
-                : "text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5] hover:bg-[#eceff3]/70 dark:hover:bg-[#181c23]"
+                : "text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] hover:bg-[#e7ecf8]/70 dark:hover:bg-[#141933]"
             }`}
           >
             {isSavingProject ? (
@@ -3146,7 +3148,7 @@ export default function App() {
             onClick={() => setDarkMode((d) => !d)}
             aria-label={darkMode ? "Switch to Light mode" : "Switch to Dark mode"}
             title={darkMode ? "Switch to Light mode" : "Switch to Dark mode"}
-            className="w-full py-2 px-1 rounded-md flex flex-col items-center justify-center gap-0.5 text-[10px] font-medium text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5] hover:bg-[#eceff3]/70 dark:hover:bg-[#181c23] transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-700 dark:focus-visible:ring-teal-400"
+            className="w-full py-2 px-1 rounded-md flex flex-col items-center justify-center gap-0.5 text-[10px] font-medium text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] hover:bg-[#e7ecf8]/70 dark:hover:bg-[#141933] transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-700 dark:focus-visible:ring-teal-400"
           >
             {darkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
             <span>{darkMode ? "Light" : "Dark"}</span>
@@ -3157,20 +3159,25 @@ export default function App() {
       {/* Right Main Workstation Column */}
       <div className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
         {/* Ultra-Slim Top Command Bar */}
-        <header className="h-12 shrink-0 px-3 sm:px-4 border-b border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] flex items-center justify-between gap-3">
+        <header className="h-12 shrink-0 px-3 sm:px-4 border-b border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] flex items-center justify-between gap-3">
           {/* Left: Breadcrumb & Active Project Context */}
           <div className="flex items-center gap-2 min-w-0">
-            <div className="lg:hidden w-7 h-7 rounded-md bg-[#0e1217] dark:bg-[#f1f3f5] text-white dark:text-[#0e1217] flex items-center justify-center font-display font-bold text-[10px] tracking-tight shrink-0">
-              9:16
+            <div className="lg:hidden w-7 h-7 rounded-md overflow-hidden bg-[#060714] border border-[#2a3463]/80 flex items-center justify-center shrink-0">
+              <img
+                src="/assets/aistudio/file_0000000057888207b493e5c3495405b3_5fff1fc9.png"
+                alt="9:16 Studio"
+                referrerPolicy="no-referrer"
+                className="w-full h-full object-cover"
+              />
             </div>
 
             <div className="flex items-center gap-1.5 min-w-0">
-              <span className="font-display text-sm font-bold tracking-tight text-[#0e1217] dark:text-[#f1f3f5] whitespace-nowrap">
+              <span className="font-display text-sm font-bold tracking-tight text-[#0c1026] dark:text-[#f3f5fc] whitespace-nowrap">
                 9:16 Studio
               </span>
               <span
                 aria-hidden="true"
-                className="text-xs text-[#525d6d]/60 dark:text-[#8b95a5]/60 select-none"
+                className="text-xs text-[#4d597d]/60 dark:text-[#919ec4]/60 select-none"
               >
                 /
               </span>
@@ -3180,7 +3187,7 @@ export default function App() {
             </div>
 
             {activeMediaTitle && (
-              <span className="hidden md:inline-block text-xs text-[#525d6d] dark:text-[#8b95a5] truncate max-w-[200px] lg:max-w-[320px] pl-2.5 ml-1 border-l border-[#dde2e9] dark:border-[#242a34]">
+              <span className="hidden md:inline-block text-xs text-[#4d597d] dark:text-[#919ec4] truncate max-w-[200px] lg:max-w-[320px] pl-2.5 ml-1 border-l border-[#d2dcf0] dark:border-[#21284c]">
                 {activeMediaTitle}
               </span>
             )}
@@ -3189,7 +3196,7 @@ export default function App() {
           {/* Right: Quick Mobile Utilities + Dominant Export MP4 CTA */}
           <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
             {project && (
-              <span className="hidden sm:inline-block text-[11px] font-mono-tabular text-[#525d6d] dark:text-[#8b95a5] pr-2 border-r border-[#dde2e9] dark:border-[#242a34] whitespace-nowrap">
+              <span className="hidden sm:inline-block text-[11px] font-mono-tabular text-[#4d597d] dark:text-[#919ec4] pr-2 border-r border-[#d2dcf0] dark:border-[#21284c] whitespace-nowrap">
                 {project.scenes.length} {project.scenes.length === 1 ? "clip" : "clips"} ·{" "}
                 {Math.round(project.targetDurationSec)}s
               </span>
@@ -3201,7 +3208,7 @@ export default function App() {
               disabled={!canSaveCurrent || isSavingProject}
               title="Save project offline (Ctrl+S)"
               aria-label="Save project offline"
-              className="lg:hidden h-8 w-8 sm:w-auto sm:px-2.5 rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] text-xs font-medium text-[#0e1217] dark:text-[#f1f3f5] flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
+              className="lg:hidden h-8 w-8 sm:w-auto sm:px-2.5 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
             >
               {isSavingProject ? (
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -3220,7 +3227,7 @@ export default function App() {
               onClick={() => setDarkMode((d) => !d)}
               aria-label={darkMode ? "Switch to Light mode" : "Switch to Dark mode"}
               title={darkMode ? "Switch to Light mode" : "Switch to Dark mode"}
-              className="lg:hidden w-8 h-8 rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] flex items-center justify-center transition-colors cursor-pointer shrink-0"
+              className="lg:hidden w-8 h-8 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] flex items-center justify-center transition-colors cursor-pointer shrink-0"
             >
               {darkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
             </button>
@@ -3257,7 +3264,7 @@ export default function App() {
                   ? "bg-emerald-600 hover:bg-emerald-700 text-white"
                   : exportError && !exportProgress
                     ? "border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/50 text-red-700 dark:text-red-300 hover:bg-red-100 dark:hover:bg-red-900/60"
-                    : "bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#061412]"
+                    : "bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918]"
               }`}
             >
               {exportProgress ? (
@@ -3266,7 +3273,7 @@ export default function App() {
                   <span className="font-mono-tabular">{exportProgress.percent}%</span>
                   <span
                     aria-hidden="true"
-                    className="absolute bottom-0 left-0 h-[2px] bg-white/80 dark:bg-[#061412]/70 transition-[width] duration-300"
+                    className="absolute bottom-0 left-0 h-[2px] bg-white/80 dark:bg-[#060918]/70 transition-[width] duration-300"
                     style={{ width: `${Math.max(6, exportProgress.percent)}%` }}
                   />
                 </>
@@ -3442,7 +3449,7 @@ export default function App() {
 
           const hasAlerts = Boolean(processError || saveNotice);
           const alertsNode = hasAlerts ? (
-            <div className="px-3.5 py-2 border-b border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#0b0d10] space-y-2 shrink-0">
+            <div className="px-3.5 py-2 border-b border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#070814] space-y-2 shrink-0">
               {processError && (
                 <div className="px-3 py-2 rounded-md border border-red-200 dark:border-red-900/70 bg-red-50/80 dark:bg-red-950/35 text-xs text-red-700 dark:text-red-300">
                   {processError}
@@ -3450,7 +3457,7 @@ export default function App() {
               )}
 
               {saveNotice && (
-                <div className="px-3 py-2 rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] flex items-center justify-between gap-2 text-xs text-[#525d6d] dark:text-[#8b95a5]">
+                <div className="px-3 py-2 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] flex items-center justify-between gap-2 text-xs text-[#4d597d] dark:text-[#919ec4]">
                   <span>{saveNotice}</span>
                   <button
                     type="button"
@@ -3471,12 +3478,12 @@ export default function App() {
                 <div className="flex-1 min-h-0 flex flex-row overflow-hidden">
                   <section
                     style={{ width: `${stageWidthPct.toFixed(2)}%` }}
-                    className="shrink-0 min-w-[290px] max-w-[540px] flex items-center justify-center min-h-0 bg-[#e6e9ef] dark:bg-[#07080a] p-3 lg:p-4 overflow-hidden"
+                    className="shrink-0 min-w-[290px] max-w-[540px] flex items-center justify-center min-h-0 bg-[#dfe5f4] dark:bg-[#04050e] p-3 lg:p-4 overflow-hidden"
                   >
                     {stageNode}
                   </section>
 
-                  <section className="flex-1 min-w-0 min-h-0 flex flex-col border-l border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] overflow-hidden">
+                  <section className="flex-1 min-w-0 min-h-0 flex flex-col border-l border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] overflow-hidden">
                     {alertsNode}
                     {sidebarNode}
                   </section>
@@ -3523,7 +3530,7 @@ export default function App() {
         {/* Mobile / Tablet Thumb-First Bottom Navigation Bar */}
         <nav
           aria-label="Mobile navigation"
-          className="lg:hidden shrink-0 border-t border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] px-2 py-1 grid grid-cols-3 gap-1"
+          className="lg:hidden shrink-0 border-t border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] px-2 py-1 grid grid-cols-3 gap-1"
         >
           {navItems.map((item) => {
             const Icon = item.icon;
@@ -3540,7 +3547,7 @@ export default function App() {
                 className={`h-11 rounded-md flex flex-col items-center justify-center gap-0.5 text-[11px] font-medium transition-colors cursor-pointer ${
                   active
                     ? "bg-teal-50/90 dark:bg-teal-950/50 text-teal-700 dark:text-teal-400 font-semibold"
-                    : "text-[#525d6d] dark:text-[#8b95a5] hover:text-[#0e1217] dark:hover:text-[#f1f3f5]"
+                    : "text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
                 }`}
               >
                 <Icon className="w-4 h-4 shrink-0" />

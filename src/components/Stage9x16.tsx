@@ -528,13 +528,13 @@ export function Stage9x16({
         }
         className={`relative max-w-full ${
           isCompactLayout ? "" : "aspect-[9/16]"
-        } rounded-lg overflow-hidden bg-white dark:bg-[#12151a] flex flex-col shadow-md ${
+        } rounded-lg overflow-hidden bg-white dark:bg-[#0d1022] flex flex-col shadow-md ${
           isResizing || isCompactLayout ? "transition-none" : "transition-[width] duration-150"
         }`}
       >
         <div
           aria-hidden="true"
-          className="pointer-events-none absolute inset-0 rounded-lg border border-[#dde2e9] dark:border-[#242a34] z-20"
+          className="pointer-events-none absolute inset-0 rounded-lg border border-[#d2dcf0] dark:border-[#21284c] z-20"
         />
         {!project ? (
           <div
@@ -542,10 +542,10 @@ export function Stage9x16({
               compactMobile ? "p-4 lg:p-8" : "p-8"
             }`}
           >
-            <div className="w-10 h-10 lg:w-12 lg:h-12 rounded-lg border border-[#dde2e9] dark:border-[#242a34] bg-[#eceff3] dark:bg-[#181c23] flex items-center justify-center mb-2.5 lg:mb-3 text-teal-700 dark:text-teal-400">
+            <div className="w-10 h-10 lg:w-12 lg:h-12 rounded-lg border border-[#d2dcf0] dark:border-[#21284c] bg-[#e7ecf8] dark:bg-[#141933] flex items-center justify-center mb-2.5 lg:mb-3 text-teal-700 dark:text-teal-400">
               <Play className="w-4 h-4 lg:w-5 lg:h-5" />
             </div>
-            <p className="font-display text-xs lg:text-sm font-semibold text-[#0e1217] dark:text-[#f1f3f5]">
+            <p className="font-display text-xs lg:text-sm font-semibold text-[#0c1026] dark:text-[#f3f5fc]">
               9:16 Monitor
             </p>
           </div>
@@ -555,13 +555,13 @@ export function Stage9x16({
               compactMobile ? "p-4 lg:p-8" : "p-8"
             }`}
           >
-            <div className="w-10 h-10 lg:w-12 lg:h-12 rounded-lg border border-[#dde2e9] dark:border-[#242a34] bg-[#eceff3] dark:bg-[#181c23] flex items-center justify-center mb-2.5 lg:mb-3 text-teal-700 dark:text-teal-400">
+            <div className="w-10 h-10 lg:w-12 lg:h-12 rounded-lg border border-[#d2dcf0] dark:border-[#21284c] bg-[#e7ecf8] dark:bg-[#141933] flex items-center justify-center mb-2.5 lg:mb-3 text-teal-700 dark:text-teal-400">
               <Play className="w-4 h-4 lg:w-5 lg:h-5" />
             </div>
-            <p className="font-display text-xs lg:text-sm font-semibold text-[#0e1217] dark:text-[#f1f3f5]">
+            <p className="font-display text-xs lg:text-sm font-semibold text-[#0c1026] dark:text-[#f3f5fc]">
               No clips kept
             </p>
-            <p className="text-[11px] lg:text-xs text-[#525d6d] dark:text-[#8b95a5] mt-1">
+            <p className="text-[11px] lg:text-xs text-[#4d597d] dark:text-[#919ec4] mt-1">
               Click Undo or Reset in the Timeline dock to restore clips
             </p>
           </div>
@@ -603,85 +603,93 @@ export function Stage9x16({
                     ? 1.16
                     : 1;
               const theme = editSettings.subtitleTheme || "auto";
-              const hl = editSettings.subtitleHighlightColor || "amber";
+              const hl = editSettings.subtitleHighlightColor || "indigo";
               const showGloss = editSettings.showWordGloss !== false;
               const showBurmese = editSettings.showBurmeseLine !== false;
 
               const containerThemeClass =
                 theme === "light"
-                  ? "bg-[#f8fafc]"
+                  ? "bg-[#f8faff]"
                   : theme === "dark"
-                    ? "bg-[#0b1120]"
+                    ? "bg-[#080b1a]"
                     : theme === "warm"
                       ? "bg-[#fbf7ef]"
-                      : "bg-[#f8fafc] dark:bg-[#0b1120]";
+                      : "bg-[#f8faff] dark:bg-[#080b1a]";
 
               const topDividerClass =
                 theme === "light"
-                  ? "border-t border-[#cbd5e1]"
+                  ? "border-t border-[#d2dcf0]"
                   : theme === "dark"
-                    ? "border-t border-[#1e293b]"
+                    ? "border-t border-[#21284c]"
                     : theme === "warm"
                       ? "border-t border-[#e7dcc8]"
-                      : "border-t border-[#cbd5e1] dark:border-[#1e293b]";
+                      : "border-t border-[#d2dcf0] dark:border-[#21284c]";
 
               const getCardThemeClass = (isActive: boolean) => {
                 if (theme === "light") {
                   return isActive
-                    ? "bg-white border-2 border-[#c7d2fe]"
-                    : "bg-white/72 border border-[#e2e8f0] hover:border-[#c7d2fe]";
+                    ? "bg-white border-2 border-[#8da2ea]"
+                    : "bg-white/75 border border-[#e2e8f5] hover:border-[#8da2ea]";
                 }
                 if (theme === "dark") {
                   return isActive
-                    ? "bg-[#131c31] border-2 border-indigo-500/45"
-                    : "bg-slate-900/55 border border-[#1e293b] hover:border-indigo-500/35";
+                    ? "bg-[#12183a] border-2 border-[#4e7ef7]/50"
+                    : "bg-[#0d1229]/72 border border-[#1e264a] hover:border-[#4e7ef7]/35";
                 }
                 if (theme === "warm") {
                   return isActive
-                    ? "bg-[#fffdf8] border-2 border-[#fcd34d]"
-                    : "bg-[#f4ede0]/72 border border-[#e5dac6] hover:border-[#fcd34d]";
+                    ? "bg-[#fffdf8] border-2 border-[#dfae52]"
+                    : "bg-[#f4ede0]/72 border border-[#e5dac6] hover:border-[#dfae52]";
                 }
                 return isActive
-                  ? "bg-white dark:bg-[#131c31] border-2 border-[#c7d2fe] dark:border-indigo-500/45"
-                  : "bg-white/72 dark:bg-slate-900/55 border border-[#e2e8f0] dark:border-[#1e293b] hover:border-[#c7d2fe] dark:hover:border-indigo-500/35";
+                  ? "bg-white dark:bg-[#12183a] border-2 border-[#8da2ea] dark:border-[#4e7ef7]/50"
+                  : "bg-white/75 dark:bg-[#0d1229]/72 border border-[#e2e8f5] dark:border-[#1e264a] hover:border-[#8da2ea] dark:hover:border-[#4e7ef7]/35";
               };
 
               const getAccentBarClass = (isActive: boolean) => {
                 if (theme === "warm") {
-                  return isActive ? "bg-[#d97706]" : "bg-[#dfd3be]";
+                  return isActive ? "bg-[#b86310]" : "bg-[#dfd3be]";
                 }
                 if (theme === "light") {
-                  return isActive ? "bg-[#4f46e5]" : "bg-[#e2e8f0]";
+                  return isActive ? "bg-[#1c3db8]" : "bg-[#e2e8f5]";
                 }
                 if (theme === "dark") {
-                  return isActive ? "bg-[#818cf8]" : "bg-[#1e293b]";
+                  return isActive ? "bg-[#5b85f7]" : "bg-[#1e264a]";
                 }
                 return isActive
-                  ? "bg-[#4f46e5] dark:bg-[#818cf8]"
-                  : "bg-[#e2e8f0] dark:bg-[#1e293b]";
+                  ? "bg-[#1c3db8] dark:bg-[#5b85f7]"
+                  : "bg-[#e2e8f5] dark:bg-[#1e264a]";
               };
 
-              const spokenPillClass =
-                hl === "emerald"
-                  ? "bg-[#6ee7b7] text-[#0f172a]"
-                  : hl === "indigo"
-                    ? "bg-[#6366f1] text-white"
-                    : hl === "rose"
-                      ? "bg-[#fda4af] text-[#0f172a]"
-                      : theme === "dark"
-                        ? "bg-[#fbbf24] text-[#0f172a]"
-                        : theme === "light" || theme === "warm"
-                          ? "bg-[#fde047] text-[#0f172a]"
-                          : "bg-[#fde047] dark:bg-[#fbbf24] text-[#0f172a]";
+              const spokenPillClass = (() => {
+                if (hl === "emerald") {
+                  if (theme === "dark") return "bg-[#127d5c] text-[#ffffff]";
+                  if (theme === "light" || theme === "warm") return "bg-[#0d7456] text-[#ffffff]";
+                  return "bg-[#0d7456] dark:bg-[#127d5c] text-[#ffffff]";
+                }
+                if (hl === "indigo") {
+                  if (theme === "dark") return "bg-[#2952d6] text-[#ffffff]";
+                  if (theme === "light" || theme === "warm") return "bg-[#1c3db8] text-[#ffffff]";
+                  return "bg-[#1c3db8] dark:bg-[#2952d6] text-[#ffffff]";
+                }
+                if (hl === "rose") {
+                  if (theme === "dark") return "bg-[#a12f88] text-[#ffffff]";
+                  if (theme === "light" || theme === "warm") return "bg-[#8b2574] text-[#ffffff]";
+                  return "bg-[#8b2574] dark:bg-[#a12f88] text-[#ffffff]";
+                }
+                if (theme === "dark") return "bg-[#cc801a] text-[#0f172a]";
+                if (theme === "light" || theme === "warm") return "bg-[#b0580c] text-[#ffffff]";
+                return "bg-[#b0580c] dark:bg-[#cc801a] text-[#ffffff] dark:text-[#0f172a]";
+              })();
 
               const getWordClass = (isWordSpoken: boolean, isActive: boolean, wasWordSpoken: boolean) => {
                 if (isWordSpoken) return spokenPillClass;
                 if (isActive) {
                   if (wasWordSpoken) {
-                    if (theme === "dark") return "text-[#a5b4fc]";
-                    if (theme === "warm") return "text-[#92400e]";
-                    if (theme === "light") return "text-[#4338ca]";
-                    return "text-[#4338ca] dark:text-[#a5b4fc]";
+                    if (theme === "dark") return "text-[#8cb5f5]";
+                    if (theme === "warm") return "text-[#944808]";
+                    if (theme === "light") return "text-[#1938a8]";
+                    return "text-[#1938a8] dark:text-[#8cb5f5]";
                   }
                   if (theme === "dark") return "text-[#cbd5e1]";
                   if (theme === "warm") return "text-[#292524]";
@@ -695,33 +703,33 @@ export function Stage9x16({
               const getGlossClass = (isWordSpoken: boolean, isActive: boolean) => {
                 if (isWordSpoken) {
                   if (hl === "emerald") {
-                    if (theme === "dark") return "text-[#6ee7b7] font-medium";
-                    if (theme === "light" || theme === "warm") return "text-[#047857] font-medium";
-                    return "text-[#047857] dark:text-[#6ee7b7] font-medium";
+                    if (theme === "dark") return "text-[#43b892] font-medium";
+                    if (theme === "light" || theme === "warm") return "text-[#0b664b] font-medium";
+                    return "text-[#0b664b] dark:text-[#43b892] font-medium";
                   }
                   if (hl === "indigo") {
-                    if (theme === "dark") return "text-[#a5b4fc] font-medium";
-                    if (theme === "light" || theme === "warm") return "text-[#4338ca] font-medium";
-                    return "text-[#4338ca] dark:text-[#a5b4fc] font-medium";
+                    if (theme === "dark") return "text-[#80a6ff] font-medium";
+                    if (theme === "light" || theme === "warm") return "text-[#1836a3] font-medium";
+                    return "text-[#1836a3] dark:text-[#80a6ff] font-medium";
                   }
                   if (hl === "rose") {
-                    if (theme === "dark") return "text-[#fda4af] font-medium";
-                    if (theme === "light" || theme === "warm") return "text-[#be123c] font-medium";
-                    return "text-[#be123c] dark:text-[#fda4af] font-medium";
+                    if (theme === "dark") return "text-[#e386cf] font-medium";
+                    if (theme === "light" || theme === "warm") return "text-[#7d1e68] font-medium";
+                    return "text-[#7d1e68] dark:text-[#e386cf] font-medium";
                   }
-                  if (theme === "dark") return "text-[#fcd34d] font-medium";
-                  if (theme === "light" || theme === "warm") return "text-[#b45309] font-medium";
-                  return "text-[#b45309] dark:text-[#fcd34d] font-medium";
+                  if (theme === "dark") return "text-[#e5a64e] font-medium";
+                  if (theme === "light" || theme === "warm") return "text-[#9c4b08] font-medium";
+                  return "text-[#9c4b08] dark:text-[#e5a64e] font-medium";
                 }
                 if (isActive) {
-                  if (theme === "dark") return "text-[#5eead4] font-medium";
-                  if (theme === "light" || theme === "warm") return "text-[#0f766e] font-medium";
-                  return "text-[#0f766e] dark:text-[#5eead4] font-medium";
+                  if (theme === "dark") return "text-[#6c97f8] font-medium";
+                  if (theme === "light" || theme === "warm") return "text-[#1c3db8] font-medium";
+                  return "text-[#1c3db8] dark:text-[#6c97f8] font-medium";
                 }
-                if (theme === "dark") return "text-[#475569] font-medium";
+                if (theme === "dark") return "text-[#515e87] font-medium";
                 if (theme === "warm") return "text-[#a8a29e] font-medium";
                 if (theme === "light") return "text-[#94a3b8] font-medium";
-                return "text-[#94a3b8] dark:text-[#475569] font-medium";
+                return "text-[#94a3b8] dark:text-[#515e87] font-medium";
               };
 
               const getThaiScriptClass = (isActive: boolean) => {
@@ -737,37 +745,37 @@ export function Stage9x16({
 
               const getDividerClass = (isActive: boolean) => {
                 if (theme === "warm") {
-                  return isActive ? "border-[#fde68a]" : "border-[#e7dcc8]";
+                  return isActive ? "border-[#ebd197]" : "border-[#e7dcc8]";
                 }
                 if (theme === "dark") {
-                  return isActive ? "border-indigo-500/25" : "border-[#1e293b]";
+                  return isActive ? "border-[#4e7ef7]/28" : "border-[#1e264a]";
                 }
                 if (theme === "light") {
-                  return isActive ? "border-[#e0e7ff]" : "border-[#f1f5f9]";
+                  return isActive ? "border-[#d3dff8]" : "border-[#f1f5f9]";
                 }
                 return isActive
-                  ? "border-[#e0e7ff] dark:border-indigo-500/25"
-                  : "border-[#f1f5f9] dark:border-[#1e293b]";
+                  ? "border-[#d3dff8] dark:border-[#4e7ef7]/28"
+                  : "border-[#f1f5f9] dark:border-[#1e264a]";
               };
 
               const getIndexClass = (isActive: boolean) => {
                 if (isActive) {
-                  if (theme === "warm") return "text-[#b45309]";
-                  if (theme === "dark") return "text-[#818cf8]";
-                  if (theme === "light") return "text-[#6366f1]";
-                  return "text-[#6366f1] dark:text-[#818cf8]";
+                  if (theme === "warm") return "text-[#a3550b]";
+                  if (theme === "dark") return "text-[#5b85f7]";
+                  if (theme === "light") return "text-[#1c3db8]";
+                  return "text-[#1c3db8] dark:text-[#5b85f7]";
                 }
-                if (theme === "dark") return "text-[#475569]";
+                if (theme === "dark") return "text-[#515e87]";
                 if (theme === "warm") return "text-[#a8a29e]";
                 if (theme === "light") return "text-[#94a3b8]";
-                return "text-[#94a3b8] dark:text-[#475569]";
+                return "text-[#94a3b8] dark:text-[#515e87]";
               };
 
               const getBurmeseClass = (isActive: boolean) => {
                 if (isActive) {
-                  if (theme === "dark") return "text-[#99f6e4] font-medium";
-                  if (theme === "light" || theme === "warm") return "text-[#115e59] font-medium";
-                  return "text-[#115e59] dark:text-[#99f6e4] font-medium";
+                  if (theme === "dark") return "text-[#99b8ff] font-medium";
+                  if (theme === "light" || theme === "warm") return "text-[#122b87] font-medium";
+                  return "text-[#122b87] dark:text-[#99b8ff] font-medium";
                 }
                 if (theme === "warm") return "text-[#57534e] font-medium";
                 return "text-[#64748b] font-medium";
@@ -812,7 +820,7 @@ export function Stage9x16({
                             borderRadius: "18px",
                             padding: "16px 26px 20px 32px",
                           }}
-                          className={`relative w-full text-left shrink-0 overflow-hidden focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 dark:focus-visible:ring-indigo-400 ${getCardThemeClass(
+                          className={`relative w-full text-left shrink-0 overflow-hidden focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1c3db8] dark:focus-visible:ring-[#4e7ef7] ${getCardThemeClass(
                             isActive
                           )}`}
                         >
@@ -993,8 +1001,8 @@ export function Stage9x16({
                     : "border rounded-lg px-3 pt-1 pb-2"
                 } cursor-ns-resize touch-none select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-700 dark:focus-visible:ring-teal-400 ${
                   isResizing
-                    ? "border-teal-700 dark:border-teal-400 bg-teal-50/70 dark:bg-[#181c23]"
-                    : "border-[#dde2e9] dark:border-[#242a34] bg-white dark:bg-[#12151a] hover:border-[#c3ccd9] dark:hover:border-[#323a48]"
+                    ? "border-teal-700 dark:border-teal-400 bg-teal-50/70 dark:bg-[#141933]"
+                    : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:border-[#b4c2e3] dark:hover:border-[#2f3866]"
                 }`
               : "w-full border border-transparent px-0 py-0"
           }`}
@@ -1006,11 +1014,11 @@ export function Stage9x16({
                 className={`h-1 rounded-full transition-all ${
                   isResizing
                     ? "w-16 bg-teal-700 dark:bg-teal-400"
-                    : "w-10 bg-[#c9d1dc] dark:bg-[#323a48] group-hover:w-14 group-hover:bg-teal-700/70 dark:group-hover:bg-teal-400/70"
+                    : "w-10 bg-[#bcc9e6] dark:bg-[#2f3866] group-hover:w-14 group-hover:bg-teal-700/70 dark:group-hover:bg-teal-400/70"
                 }`}
               />
               {isResizing && (
-                <span className="pointer-events-none absolute -top-6 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded bg-teal-700 text-white dark:bg-teal-400 dark:text-[#061412] text-[10px] font-mono-tabular font-semibold whitespace-nowrap shadow-sm">
+                <span className="pointer-events-none absolute -top-6 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded bg-teal-700 text-white dark:bg-teal-400 dark:text-[#060918] text-[10px] font-mono-tabular font-semibold whitespace-nowrap shadow-sm">
                   {scaleLabel} · {Math.round(clampedScale * 100)}%
                 </span>
               )}
@@ -1036,7 +1044,7 @@ export function Stage9x16({
               aria-label={isPlaying ? "Pause" : "Play"}
               className={`${
                 compactMobile ? "w-8 h-8 lg:w-9 lg:h-9" : "w-9 h-9"
-              } rounded-md bg-teal-700 hover:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 text-white dark:text-[#061412] flex items-center justify-center shrink-0 transition-colors cursor-pointer`}
+              } rounded-md bg-teal-700 hover:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 text-white dark:text-[#060918] flex items-center justify-center shrink-0 transition-colors cursor-pointer`}
             >
               {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 ml-0.5" />}
             </button>
@@ -1053,9 +1061,9 @@ export function Stage9x16({
                 onTouchStart={(e) => e.stopPropagation()}
                 onChange={(e) => onSeek(parseFloat(e.target.value))}
                 aria-label="Timeline scrubber"
-                className="w-full h-1.5 rounded-full appearance-none bg-[#dde2e9] dark:bg-[#242a34] cursor-pointer"
+                className="w-full h-1.5 rounded-full appearance-none bg-[#d2dcf0] dark:bg-[#21284c] cursor-pointer"
               />
-              <div className="flex items-center justify-between text-[11px] text-[#525d6d] dark:text-[#8b95a5] font-mono-tabular">
+              <div className="flex items-center justify-between text-[11px] text-[#4d597d] dark:text-[#919ec4] font-mono-tabular">
                 <span ref={timeTextRef} className="truncate">
                   {formatSec(displayCutTime)} / {formatSec(displayTotalDuration)}
                   {Math.abs(effectiveSpeed - 1) > 0.01 ? ` (${effectiveSpeed.toFixed(2).replace(/\.00$/, "")}x)` : ""}
@@ -1074,7 +1082,7 @@ export function Stage9x16({
               aria-label={muted ? "Unmute original audio" : "Mute original audio"}
               className={`${
                 compactMobile ? "w-8 h-8 lg:w-9 lg:h-9" : "w-9 h-9"
-              } rounded-md border border-[#dde2e9] dark:border-[#242a34] bg-[#f5f6f8] dark:bg-[#181c23] hover:bg-[#eceff3] dark:hover:bg-[#1e242e] text-[#0e1217] dark:text-[#f1f3f5] flex items-center justify-center shrink-0 transition-colors cursor-pointer`}
+              } rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[#0c1026] dark:text-[#f3f5fc] flex items-center justify-center shrink-0 transition-colors cursor-pointer`}
             >
               {muted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
             </button>
@@ -1097,7 +1105,7 @@ export function Stage9x16({
             onKeyDown={handleDragKeyDown}
             className={`relative group w-full h-6 flex items-center justify-center cursor-ns-resize touch-none select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-700 dark:focus-visible:ring-teal-400 ${
               compactMobile
-                ? "border-b border-[#dde2e9] dark:border-[#242a34]"
+                ? "border-b border-[#d2dcf0] dark:border-[#21284c]"
                 : ""
             }`}
           >
@@ -1105,11 +1113,11 @@ export function Stage9x16({
               className={`h-1 rounded-full transition-all ${
                 isResizing
                   ? "w-16 bg-teal-700 dark:bg-teal-400"
-                  : "w-10 bg-[#b8c2d0] dark:bg-[#323a48] group-hover:w-14 group-hover:bg-teal-700/80 dark:group-hover:bg-teal-400/80"
+                  : "w-10 bg-[#b8c2d0] dark:bg-[#2f3866] group-hover:w-14 group-hover:bg-teal-700/80 dark:group-hover:bg-teal-400/80"
               }`}
             />
             {isResizing && (
-              <span className="pointer-events-none absolute -top-6 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded bg-teal-700 text-white dark:bg-teal-400 dark:text-[#061412] text-[10px] font-mono-tabular font-semibold whitespace-nowrap shadow-sm">
+              <span className="pointer-events-none absolute -top-6 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded bg-teal-700 text-white dark:bg-teal-400 dark:text-[#060918] text-[10px] font-mono-tabular font-semibold whitespace-nowrap shadow-sm">
                 {scaleLabel} · {Math.round(clampedScale * 100)}%
               </span>
             )}
