@@ -58,8 +58,7 @@ import {
 } from "../utils/exportSubtitles";
 
 export type WorkspaceTab =
-  | "videos"
-  | "ytPreview"
+  | "youtube"
   | "scenes"
   | "edit"
   | "script"
@@ -367,7 +366,7 @@ export function WorkspaceSidebar({
   };
 
   useEffect(() => {
-    if (activeTab !== "videos" || !hasMoreVideos || isSearching || isLoadingMore) return;
+    if (activeTab !== "youtube" || !hasMoreVideos || isSearching || isLoadingMore) return;
     const sentinel = loadMoreSentinelRef.current;
     if (!sentinel) return;
 
@@ -382,6 +381,14 @@ export function WorkspaceSidebar({
     observer.observe(sentinel);
     return () => observer.disconnect();
   }, [activeTab, hasMoreVideos, isSearching, isLoadingMore, onLoadMoreVideos]);
+
+  const handlePickYouTubeVideo = (video: YouTubeVideo) => {
+    onSelectVideo(video);
+    if (typeof window !== "undefined" && !window.matchMedia("(min-width: 1024px)").matches) {
+      scrollRootRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+    }
+  };
+
   return (
     <div className="flex flex-col h-full min-h-0">
       {/* Minimal Segmented Switch */}
@@ -389,25 +396,14 @@ export function WorkspaceSidebar({
         <div className="inline-flex items-center p-1 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 overflow-x-auto no-scrollbar max-w-full">
           <button
             type="button"
-            onClick={() => onTabChange("videos")}
+            onClick={() => onTabChange("youtube")}
             className={`px-3 py-1.5 text-xs font-medium rounded-md whitespace-nowrap transition-colors cursor-pointer ${
-              activeTab === "videos"
+              activeTab === "youtube"
                 ? "bg-white dark:bg-neutral-800 text-neutral-950 dark:text-white shadow-xs"
                 : "text-neutral-500 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-200"
             }`}
           >
-            Videos
-          </button>
-          <button
-            type="button"
-            onClick={() => onTabChange("ytPreview")}
-            className={`px-3 py-1.5 text-xs font-medium rounded-md whitespace-nowrap transition-colors cursor-pointer ${
-              activeTab === "ytPreview"
-                ? "bg-white dark:bg-neutral-800 text-neutral-950 dark:text-white shadow-xs"
-                : "text-neutral-500 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-200"
-            }`}
-          >
-            YouTube Preview
+            Explore
           </button>
           <button
             type="button"
@@ -418,7 +414,7 @@ export function WorkspaceSidebar({
                 : "text-neutral-500 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-200"
             }`}
           >
-            Watch & Scenes
+            Scenes
           </button>
           <button
             type="button"
@@ -429,7 +425,7 @@ export function WorkspaceSidebar({
                 : "text-neutral-500 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-200"
             }`}
           >
-            Edit
+            Adjust
           </button>
           <button
             type="button"
@@ -441,7 +437,7 @@ export function WorkspaceSidebar({
                 : "text-neutral-500 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-200"
             }`}
           >
-            Subtitles
+            Captions
           </button>
           <button
             type="button"
@@ -452,7 +448,7 @@ export function WorkspaceSidebar({
                 : "text-neutral-500 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-200"
             }`}
           >
-            Saved{savedProjects.length > 0 ? ` (${savedProjects.length})` : ""}
+            Projects{savedProjects.length > 0 ? ` (${savedProjects.length})` : ""}
           </button>
         </div>
 
@@ -503,252 +499,263 @@ export function WorkspaceSidebar({
           </div>
         )}
 
-        {activeTab === "videos" && (
-          <>
-            {/* Feed Header & Reuse License Filter Bar */}
-            <div className="mb-3.5 flex flex-wrap items-center justify-between gap-2.5">
-              <div className="flex items-center gap-2 min-w-0">
-                <span className="text-xs font-semibold text-neutral-900 dark:text-neutral-100 truncate">
-                  {activeQuery ? `Results for “${activeQuery}”` : "Recommended Videos"}
-                </span>
-                {videos.length > 0 && !isSearching && (
-                  <span className="text-[11px] font-mono-tabular text-neutral-500 dark:text-neutral-400 shrink-0">
-                    ({videos.length}{hasMoreVideos ? "+" : ""})
-                  </span>
-                )}
-                {activeQuery ? (
-                  <button
-                    type="button"
-                    onClick={onResetToRecommended}
-                    className="text-[11px] text-neutral-500 hover:text-neutral-950 dark:hover:text-white underline shrink-0 cursor-pointer"
-                  >
-                    Recommended
-                  </button>
-                ) : (
-                  onRefreshRecommended && (
-                    <button
-                      type="button"
-                      onClick={onRefreshRecommended}
-                      disabled={isSearching}
-                      title="Refresh recommended videos"
-                      aria-label="Refresh recommended videos"
-                      className="h-6 px-2 rounded-md border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 hover:bg-neutral-100 dark:hover:bg-neutral-900 text-[11px] font-medium text-neutral-600 dark:text-neutral-300 flex items-center gap-1 shrink-0 cursor-pointer disabled:opacity-40 transition-colors"
-                    >
-                      <RefreshCw className={`w-3 h-3 ${isSearching ? "animate-spin" : ""}`} />
-                      <span>Refresh</span>
-                    </button>
-                  )
-                )}
-              </div>
-
-              <div className="flex flex-wrap items-center gap-2 shrink-0">
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={thaiOnly}
-                  onClick={onToggleThaiOnly}
-                  disabled={isSearching}
-                  title="Show Thai-language videos only"
-                  className={`h-8 px-2.5 rounded-lg border text-[11px] font-medium flex items-center gap-2 whitespace-nowrap transition-colors cursor-pointer disabled:opacity-50 ${
-                    thaiOnly
-                      ? "border-neutral-950 bg-neutral-950 text-white dark:border-white dark:bg-white dark:text-neutral-950"
-                      : "border-neutral-200 dark:border-neutral-800 bg-neutral-100 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-300 hover:text-neutral-950 dark:hover:text-white"
-                  }`}
-                >
-                  <span>Thai Only</span>
-                  <span
-                    aria-hidden="true"
-                    className={`w-7 h-4 rounded-full p-0.5 transition-colors flex items-center ${
-                      thaiOnly
-                        ? "bg-emerald-500 justify-end"
-                        : "bg-neutral-300 dark:bg-neutral-700 justify-start"
-                    }`}
-                  >
-                    <span className="w-3 h-3 rounded-full bg-white shadow-xs" />
-                  </span>
-                </button>
-
-                <div
-                  role="group"
-                  aria-label="Reuse license filter"
-                  className="inline-flex items-center p-0.5 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 shrink-0"
-                >
-                  {(
-                    [
-                      { id: "all", label: "All Licenses" },
-                      { id: "creative_commons", label: "Creative Commons" },
-                      { id: "standard", label: "Standard" },
-                    ] as const
-                  ).map((opt) => {
-                    const selected = licenseFilter === opt.id;
-                    return (
-                      <button
-                        key={opt.id}
-                        type="button"
-                        onClick={() => onChangeLicenseFilter(opt.id)}
-                        className={`px-2.5 py-1 text-[11px] font-medium rounded-md whitespace-nowrap transition-colors cursor-pointer ${
-                          selected
-                            ? "bg-white dark:bg-neutral-800 text-neutral-950 dark:text-white shadow-xs"
-                            : "text-neutral-500 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-200"
-                        }`}
-                      >
-                        {opt.label}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
+        {activeTab === "youtube" && (
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start pb-6">
+            {/* Left / Top: Active 16:9 YouTube Preview Theater */}
+            <div className="lg:col-span-7 lg:sticky lg:top-0">
+              <YouTubePreviewPanel
+                media={youtubeMedia}
+                videos={videos}
+                hasMoreVideos={hasMoreVideos}
+                isLoadingMore={isLoadingMore}
+                isSearching={isSearching}
+                isWorkspaceVisible={isWorkspaceVisible}
+                initialSec={ytPreviewSec}
+                seekRequest={ytSeekRequest}
+                onSelectPreviewVideo={onSelectVideo}
+                onLoadMoreVideos={onLoadMoreVideos}
+                onCurrentSecChange={onYtCurrentSecChange}
+                onDetectedDuration={onDetectedYouTubeDuration}
+              />
             </div>
 
-            {searchError && (
-              <div className="p-4 rounded-xl border border-neutral-300 dark:border-neutral-700 text-sm text-neutral-800 dark:text-neutral-200 mb-4">
-                {searchError}
-              </div>
-            )}
-
-            {isSearching ? (
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-                {Array.from({ length: 8 }).map((_, i) => (
-                  <div
-                    key={i}
-                    className="rounded-xl border border-neutral-200 dark:border-neutral-800 overflow-hidden animate-pulse"
-                  >
-                    <div className="aspect-video bg-neutral-100 dark:bg-neutral-900" />
-                    <div className="p-3 space-y-2">
-                      <div className="h-4 bg-neutral-100 dark:bg-neutral-900 rounded w-4/5" />
-                      <div className="h-3 bg-neutral-100 dark:bg-neutral-900 rounded w-1/2" />
-                    </div>
+            {/* Right / Bottom: Search & Recommended Feed Catalog */}
+            <div className="lg:col-span-5 flex flex-col gap-3 min-w-0">
+              {/* Feed Header & Filter Controls */}
+              <div className="space-y-2.5 pb-2.5 border-b border-neutral-200 dark:border-neutral-800">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="text-xs font-semibold text-neutral-950 dark:text-neutral-50 truncate">
+                      {activeQuery ? `Results for “${activeQuery}”` : "Recommended"}
+                    </span>
+                    {videos.length > 0 && !isSearching && (
+                      <span className="text-[11px] font-mono-tabular text-neutral-500 dark:text-neutral-400 shrink-0">
+                        ({videos.length}{hasMoreVideos ? "+" : ""})
+                      </span>
+                    )}
                   </div>
-                ))}
-              </div>
-            ) : videos.length === 0 ? (
-              <div className="py-16 flex flex-col items-center justify-center text-center text-neutral-500 dark:text-neutral-400">
-                <Film className="w-6 h-6 mb-2 opacity-60" />
-                <p className="text-sm">
-                  {thaiOnly
-                    ? "No Thai-language videos matched this filter"
-                    : licenseFilter !== "all"
-                      ? "No videos matched this license filter"
-                      : "No YouTube videos found"}
-                </p>
-                <div className="mt-2 flex items-center gap-3">
-                  {thaiOnly && (
+
+                  {activeQuery ? (
                     <button
                       type="button"
-                      onClick={onToggleThaiOnly}
-                      className="text-xs font-medium underline text-neutral-900 dark:text-neutral-100 cursor-pointer"
+                      onClick={onResetToRecommended}
+                      className="text-xs font-medium text-neutral-600 dark:text-neutral-300 hover:text-neutral-950 dark:hover:text-white underline whitespace-nowrap shrink-0 cursor-pointer"
                     >
-                      Show all languages
+                      Recommended
                     </button>
-                  )}
-                  {licenseFilter !== "all" && (
-                    <button
-                      type="button"
-                      onClick={() => onChangeLicenseFilter("all")}
-                      className="text-xs font-medium underline text-neutral-900 dark:text-neutral-100 cursor-pointer"
-                    >
-                      Show all licenses
-                    </button>
-                  )}
-                </div>
-              </div>
-            ) : (
-              <>
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3.5 pb-4">
-                  {videos.map((v) => {
-                    const isSelected = selectedVideoId === v.videoId;
-                    return (
+                  ) : (
+                    onRefreshRecommended && (
                       <button
-                        key={v.videoId}
                         type="button"
-                        onClick={() => onSelectVideo(v)}
-                        className={`group text-left rounded-xl overflow-hidden border transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-950 dark:focus-visible:ring-white ${
-                          isSelected
-                            ? "border-neutral-950 dark:border-white bg-neutral-50 dark:bg-neutral-900"
-                            : "border-neutral-200 dark:border-neutral-800 hover:border-neutral-400 dark:hover:border-neutral-600 bg-white dark:bg-neutral-950"
-                        }`}
+                        onClick={onRefreshRecommended}
+                        disabled={isSearching}
+                        title="Refresh recommended videos"
+                        aria-label="Refresh recommended videos"
+                        className="h-8 px-2.5 rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 hover:bg-neutral-100 dark:hover:bg-neutral-900 text-xs font-medium text-neutral-700 dark:text-neutral-200 flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-40 transition-colors"
                       >
-                        <div className="relative aspect-video bg-neutral-100 dark:bg-neutral-900 overflow-hidden">
-                          <img
-                            src={v.thumbnail}
-                            alt={v.title}
-                            referrerPolicy="no-referrer"
-                            className="w-full h-full object-cover group-hover:scale-[1.02] transition-transform duration-200"
-                          />
-                          {v.license && (
-                            <span
-                              className={`absolute top-2 left-2 px-1.5 py-0.5 rounded text-[10px] font-medium backdrop-blur-xs ${
-                                v.license === "creative_commons"
-                                  ? "bg-white/90 text-neutral-950 dark:bg-neutral-950/90 dark:text-white border border-neutral-300 dark:border-neutral-700"
-                                  : "bg-black/70 text-neutral-200"
-                              }`}
-                            >
-                              {v.license === "creative_commons" ? "Creative Commons" : "Standard"}
-                            </span>
-                          )}
-                          <span className="absolute bottom-2 right-2 px-1.5 py-0.5 rounded bg-black/80 text-white text-[11px] font-mono-tabular">
-                            {v.durationText}
-                          </span>
-                        </div>
-                        <div className="p-3">
-                          <p className="text-[13px] font-semibold text-neutral-950 dark:text-neutral-50 line-clamp-2 leading-snug">
-                            {v.title}
-                          </p>
-                          <div className="mt-1.5 flex items-center gap-1.5 text-xs text-neutral-500 dark:text-neutral-400 truncate">
-                            <span className="truncate">{v.channel}</span>
-                            {v.viewCountText && (
-                              <>
-                                <span aria-hidden="true">·</span>
-                                <span className="shrink-0">{v.viewCountText}</span>
-                              </>
-                            )}
-                          </div>
-                        </div>
+                        <RefreshCw className={`w-3 h-3 ${isSearching ? "animate-spin" : ""}`} />
+                        <span>Refresh</span>
                       </button>
-                    );
-                  })}
+                    )
+                  )}
                 </div>
 
-                {/* Infinite scroll sentinel & manual Load More */}
-                {hasMoreVideos && (
-                  <div ref={loadMoreSentinelRef} className="pb-6 pt-1 flex justify-center">
-                    <button
-                      type="button"
-                      onClick={onLoadMoreVideos}
-                      disabled={isLoadingMore}
-                      className="h-9 px-4 rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 hover:bg-neutral-100 dark:hover:bg-neutral-900 text-xs font-medium flex items-center gap-2 cursor-pointer disabled:opacity-50 transition-colors"
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={thaiOnly}
+                    onClick={onToggleThaiOnly}
+                    disabled={isSearching}
+                    title="Show Thai-language videos only"
+                    className={`h-8 px-2.5 rounded-lg border text-[11px] font-medium flex items-center gap-2 whitespace-nowrap shrink-0 transition-colors cursor-pointer disabled:opacity-50 ${
+                      thaiOnly
+                        ? "border-neutral-950 bg-neutral-950 text-white dark:border-white dark:bg-white dark:text-neutral-950"
+                        : "border-neutral-200 dark:border-neutral-800 bg-neutral-100 dark:bg-neutral-900 text-neutral-600 dark:text-neutral-300 hover:text-neutral-950 dark:hover:text-white"
+                    }`}
+                  >
+                    <span>Thai Only</span>
+                    <span
+                      aria-hidden="true"
+                      className={`w-7 h-4 rounded-full p-0.5 transition-colors flex items-center ${
+                        thaiOnly
+                          ? "bg-emerald-500 justify-end"
+                          : "bg-neutral-300 dark:bg-neutral-700 justify-start"
+                      }`}
                     >
-                      {isLoadingMore ? (
-                        <>
-                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          <span>Loading more videos...</span>
-                        </>
-                      ) : (
-                        <span>Load More Videos</span>
-                      )}
-                    </button>
-                  </div>
-                )}
-              </>
-            )}
-          </>
-        )}
+                      <span className="w-3 h-3 rounded-full bg-white shadow-xs" />
+                    </span>
+                  </button>
 
-        {activeTab === "ytPreview" && (
-          <YouTubePreviewPanel
-            media={youtubeMedia}
-            videos={videos}
-            hasMoreVideos={hasMoreVideos}
-            isLoadingMore={isLoadingMore}
-            isSearching={isSearching}
-            isWorkspaceVisible={isWorkspaceVisible}
-            initialSec={ytPreviewSec}
-            seekRequest={ytSeekRequest}
-            onSelectPreviewVideo={onSelectVideo}
-            onLoadMoreVideos={onLoadMoreVideos}
-            onCurrentSecChange={onYtCurrentSecChange}
-            onDetectedDuration={onDetectedYouTubeDuration}
-          />
+                  <div
+                    role="group"
+                    aria-label="Reuse license filter"
+                    className="inline-flex items-center p-0.5 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 shrink-0"
+                  >
+                    {(
+                      [
+                        { id: "all", label: "All" },
+                        { id: "creative_commons", label: "Creative Commons" },
+                        { id: "standard", label: "Standard" },
+                      ] as const
+                    ).map((opt) => {
+                      const selected = licenseFilter === opt.id;
+                      return (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          onClick={() => onChangeLicenseFilter(opt.id)}
+                          className={`px-2.5 py-1 text-[11px] font-medium rounded-md whitespace-nowrap transition-colors cursor-pointer ${
+                            selected
+                              ? "bg-white dark:bg-neutral-800 text-neutral-950 dark:text-white shadow-xs"
+                              : "text-neutral-500 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-200"
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+
+              {searchError && (
+                <div className="p-3.5 rounded-xl border border-neutral-300 dark:border-neutral-700 text-xs text-neutral-800 dark:text-neutral-200">
+                  {searchError}
+                </div>
+              )}
+
+              {isSearching ? (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 gap-2.5">
+                  {Array.from({ length: 6 }).map((_, i) => (
+                    <div
+                      key={i}
+                      className="rounded-xl border border-neutral-200 dark:border-neutral-800 p-2 flex flex-col lg:flex-row gap-3 animate-pulse"
+                    >
+                      <div className="aspect-video w-full lg:w-40 lg:shrink-0 rounded-lg bg-neutral-100 dark:bg-neutral-900" />
+                      <div className="flex-1 py-1 space-y-2">
+                        <div className="h-3.5 bg-neutral-100 dark:bg-neutral-900 rounded w-5/6" />
+                        <div className="h-3 bg-neutral-100 dark:bg-neutral-900 rounded w-1/2" />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : videos.length === 0 ? (
+                <div className="py-12 flex flex-col items-center justify-center text-center text-neutral-500 dark:text-neutral-400 rounded-xl border border-dashed border-neutral-200 dark:border-neutral-800 p-6">
+                  <Film className="w-6 h-6 mb-2 opacity-60" />
+                  <p className="text-xs sm:text-sm">
+                    {thaiOnly
+                      ? "No Thai-language videos matched this filter"
+                      : licenseFilter !== "all"
+                        ? "No videos matched this license filter"
+                        : "No YouTube videos found"}
+                  </p>
+                  <div className="mt-2.5 flex items-center gap-3">
+                    {thaiOnly && (
+                      <button
+                        type="button"
+                        onClick={onToggleThaiOnly}
+                        className="text-xs font-medium underline text-neutral-900 dark:text-neutral-100 cursor-pointer"
+                      >
+                        Show all languages
+                      </button>
+                    )}
+                    {licenseFilter !== "all" && (
+                      <button
+                        type="button"
+                        onClick={() => onChangeLicenseFilter("all")}
+                        className="text-xs font-medium underline text-neutral-900 dark:text-neutral-100 cursor-pointer"
+                      >
+                        Show all licenses
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 gap-2.5">
+                    {videos.map((v) => {
+                      const isSelected = selectedVideoId === v.videoId;
+                      return (
+                        <button
+                          key={v.videoId}
+                          type="button"
+                          onClick={() => handlePickYouTubeVideo(v)}
+                          className={`group text-left rounded-xl p-2 border transition-colors cursor-pointer flex flex-col lg:flex-row gap-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-950 dark:focus-visible:ring-white ${
+                            isSelected
+                              ? "border-neutral-950 dark:border-white bg-neutral-50 dark:bg-neutral-900"
+                              : "border-neutral-200 dark:border-neutral-800 hover:border-neutral-400 dark:hover:border-neutral-600 bg-white dark:bg-neutral-950"
+                          }`}
+                        >
+                          <div className="relative w-full lg:w-40 aspect-video rounded-lg bg-neutral-100 dark:bg-neutral-900 overflow-hidden shrink-0">
+                            <img
+                              src={v.thumbnail}
+                              alt={v.title}
+                              referrerPolicy="no-referrer"
+                              className="w-full h-full object-cover group-hover:scale-[1.02] transition-transform duration-200"
+                            />
+                            <span className="absolute bottom-1.5 right-1.5 px-1.5 py-0.5 rounded bg-black/80 text-white text-[10px] font-mono-tabular">
+                              {v.durationText}
+                            </span>
+                          </div>
+
+                          <div className="flex-1 min-w-0 flex flex-col justify-between py-0.5">
+                            <p className="text-[13px] font-semibold text-neutral-950 dark:text-neutral-50 line-clamp-2 leading-snug">
+                              {v.title}
+                            </p>
+                            <div className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-neutral-500 dark:text-neutral-400">
+                              <span className="truncate max-w-[160px]">{v.channel}</span>
+                              {v.viewCountText && (
+                                <>
+                                  <span aria-hidden="true">·</span>
+                                  <span className="font-mono-tabular shrink-0">{v.viewCountText}</span>
+                                </>
+                              )}
+                              {v.license === "creative_commons" && (
+                                <>
+                                  <span aria-hidden="true">·</span>
+                                  <span className="shrink-0">Creative Commons</span>
+                                </>
+                              )}
+                              {isSelected && (
+                                <>
+                                  <span aria-hidden="true">·</span>
+                                  <span className="font-semibold text-neutral-950 dark:text-white shrink-0">
+                                    Now Previewing
+                                  </span>
+                                </>
+                              )}
+                            </div>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {/* Infinite scroll sentinel & manual Load More */}
+                  {hasMoreVideos && (
+                    <div ref={loadMoreSentinelRef} className="pt-2 flex justify-center">
+                      <button
+                        type="button"
+                        onClick={onLoadMoreVideos}
+                        disabled={isLoadingMore}
+                        className="h-9 px-4 rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 hover:bg-neutral-100 dark:hover:bg-neutral-900 text-xs font-medium flex items-center gap-2 cursor-pointer disabled:opacity-50 transition-colors"
+                      >
+                        {isLoadingMore ? (
+                          <>
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            <span>Loading more videos...</span>
+                          </>
+                        ) : (
+                          <span>Load More Videos</span>
+                        )}
+                      </button>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
         )}
 
         {localMedia && (

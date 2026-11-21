@@ -4,7 +4,6 @@ import {
   ArrowUpFromLine,
   Bookmark,
   Check,
-  Clock,
   Loader2,
   Moon,
   Search,
@@ -56,22 +55,8 @@ import {
   renameSavedProject,
   saveOfflineProject,
 } from "./utils/offlineProjects";
-import { AuthStatusControl } from "./firebase";
-import { AffiliateWorkspace } from "./affiliate";
-import { useAffiliateWriteController } from "./affiliate/useAffiliateWriteController";
-
-type AppWorkspaceMode = "video" | "affiliate";
-
-function readInitialWorkspaceMode(): AppWorkspaceMode {
-  if (typeof window === "undefined") return "video";
-  return window.location.hash === "#affiliate" ? "affiliate" : "video";
-}
 
 export default function App() {
-  const [workspaceMode, setWorkspaceMode] = useState<AppWorkspaceMode>(
-    readInitialWorkspaceMode
-  );
-  const affiliateWriteController = useAffiliateWriteController();
   const [darkMode, setDarkMode] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
     return localStorage.getItem("theme") === "dark";
@@ -87,7 +72,7 @@ export default function App() {
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
 
-  const [activeTab, setActiveTab] = useState<WorkspaceTab>("videos");
+  const [activeTab, setActiveTab] = useState<WorkspaceTab>("youtube");
   const [localMedia, setLocalMedia] = useState<ActiveMediaSource | null>(null);
   const [youtubeMedia, setYoutubeMedia] = useState<ActiveMediaSource | null>(null);
   const [selectedScenes, setSelectedScenes] = useState<SceneSelection[]>([]);
@@ -372,6 +357,19 @@ export default function App() {
           });
         } else {
           setVideos(incoming);
+          if (incoming.length === 1 && /^https?:\/\//i.test(cleanQuery)) {
+            const first = incoming[0];
+            setYtPreviewSec(0);
+            setYtSeekRequest(null);
+            setYoutubeMedia({
+              sourceType: "youtube",
+              videoId: first.videoId,
+              title: first.title,
+              channel: first.channel,
+              durationSec: first.durationSec,
+              thumbnail: first.thumbnail,
+            });
+          }
         }
         setNextContinuation(data.nextContinuation ?? null);
       } catch (err) {
@@ -456,7 +454,7 @@ export default function App() {
     };
   }, []);
 
-  // Clicking a YouTube video opens it in its dedicated YouTube Preview tab without disturbing Watch & Scenes local edits
+  // Clicking a YouTube video loads it in the unified YouTube tab without disturbing Watch & Scenes local edits
   const handleSelectVideo = (video: YouTubeVideo) => {
     setYtPreviewSec(0);
     setYtSeekRequest(null);
@@ -475,7 +473,7 @@ export default function App() {
       durationSec: video.durationSec,
       thumbnail: video.thumbnail,
     });
-    setActiveTab("ytPreview");
+    setActiveTab("youtube");
   };
 
   // Uploading a local video opens it in Watch & Scenes first without auto-generating
@@ -2099,7 +2097,6 @@ export default function App() {
   // Support Ctrl+S / Cmd+S to save offline and Ctrl+Z / Ctrl+Shift+Z for subtitle Undo/Redo
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (workspaceMode !== "video") return;
       if (!(e.metaKey || e.ctrlKey)) return;
       const key = e.key.toLowerCase();
       if (key === "s") {
@@ -2129,7 +2126,6 @@ export default function App() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [
-    workspaceMode,
     activeTab,
     canSaveCurrent,
     handleSaveProject,
@@ -2167,7 +2163,7 @@ export default function App() {
             )
           );
           setSaveNotice(
-            "Subtitles and settings restored. Link the original local video file in the Saved tab to preview or export video."
+            "Subtitles and settings restored. Link the original local video file in the Projects tab to preview or export video."
           );
         }
       } catch {
@@ -2230,7 +2226,7 @@ export default function App() {
     } else if (record.sourceType === "youtube") {
       setYtPreviewSec(0);
       setYtSeekRequest(null);
-      setActiveTab("ytPreview");
+      setActiveTab("youtube");
     } else {
       setActiveTab("scenes");
     }
@@ -2339,135 +2335,20 @@ export default function App() {
     }
   };
 
-  const handleSwitchWorkspace = useCallback((nextMode: AppWorkspaceMode) => {
-    if (nextMode === "affiliate") {
-      setIsPlaying(false);
-      setLoopingSubId(null);
-    }
-    setWorkspaceMode(nextMode);
-    if (typeof window !== "undefined") {
-      try {
-        window.history.replaceState(null, "", nextMode === "affiliate" ? "#affiliate" : "#video");
-      } catch {
-        // Ignore history restriction in sandboxed iframes
-      }
-    }
-  }, []);
-
   return (
     <div
-      className={`${
-        workspaceMode === "video" && (activeTab === "edit" || activeTab === "script")
-          ? "h-[100dvh] overflow-hidden"
-          : workspaceMode === "affiliate"
-            ? "min-h-screen"
-            : "min-h-screen lg:h-screen"
-      } flex flex-col bg-white text-neutral-950 dark:bg-neutral-950 dark:text-neutral-50 transition-colors duration-150`}
+      className="h-[100dvh] overflow-hidden flex flex-col bg-white text-neutral-950 dark:bg-neutral-950 dark:text-neutral-50 transition-colors duration-150"
     >
-      {/* Responsive Top Bar: 2 clean rows on mobile/tablet in Video mode, 1 row on desktop & Affiliate mode */}
+      {/* Responsive Top Bar: 2 clean rows on mobile/tablet, 1 row on desktop */}
       <header className="px-3 sm:px-5 lg:px-6 border-b border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 shrink-0">
         <div className="min-h-11 sm:min-h-14 py-1.5 lg:py-0 lg:h-14 flex flex-wrap lg:flex-nowrap items-center justify-between gap-x-2 gap-y-1.5 lg:gap-4">
-          {/* Group 1: Brand Wordmark & Compact Workspace Switcher */}
-          <div className="flex items-center gap-2 sm:gap-3 shrink-0 order-1">
-            <span className="text-sm sm:text-base font-bold tracking-tight whitespace-nowrap shrink-0">
-              9:16 Studio
-            </span>
-            <div
-              role="group"
-              aria-label="Workspace Switcher"
-              className="inline-flex items-center p-0.5 rounded-lg border border-neutral-200 dark:border-neutral-800 bg-neutral-100 dark:bg-neutral-900 shrink-0"
-            >
-              <button
-                type="button"
-                onClick={() => handleSwitchWorkspace("video")}
-                className={`h-7 px-2.5 rounded-md text-xs font-medium transition-colors cursor-pointer whitespace-nowrap ${
-                  workspaceMode === "video"
-                    ? "bg-white dark:bg-neutral-950 text-neutral-950 dark:text-white shadow-xs"
-                    : "text-neutral-500 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-white"
-                }`}
-              >
-                Video
-              </button>
-              <button
-                type="button"
-                onClick={() => handleSwitchWorkspace("affiliate")}
-                className={`h-7 px-2.5 rounded-md text-xs font-medium transition-colors cursor-pointer whitespace-nowrap ${
-                  workspaceMode === "affiliate"
-                    ? "bg-white dark:bg-neutral-950 text-neutral-950 dark:text-white shadow-xs"
-                    : "text-neutral-500 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-white"
-                }`}
-              >
-                Affiliate
-              </button>
-            </div>
-          </div>
+          {/* Group 1: Brand Wordmark */}
+          <span className="text-sm sm:text-base font-bold tracking-tight whitespace-nowrap shrink-0 order-1">
+            9:16 Studio
+          </span>
 
-          {/* Group 2: Account & Theme Utilities (Row 1 Right on mobile/tablet, Right group on desktop) */}
+          {/* Group 2: Theme Toggle (Row 1 Right on mobile/tablet, Right group on desktop) */}
           <div className="flex items-center gap-1.5 sm:gap-2 shrink-0 order-2 lg:order-3 ml-auto lg:ml-0">
-            {workspaceMode === "video" &&
-              (affiliateWriteController.writeTracker.state === "saving" ||
-                affiliateWriteController.writeTracker.state === "sync_pending") && (
-                <button
-                  type="button"
-                  onClick={() => handleSwitchWorkspace("affiliate")}
-                  title="Affiliate Firestore write is still in progress — do not refresh or close this tab."
-                  aria-label="Open Affiliate workspace to view pending sync status"
-                  className={`h-9 px-2.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors border ${
-                    affiliateWriteController.writeTracker.state === "sync_pending"
-                      ? "border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/50 text-amber-800 dark:text-amber-200 hover:bg-amber-100 dark:hover:bg-amber-900/60"
-                      : "border-neutral-300 dark:border-neutral-700 bg-neutral-100 dark:bg-neutral-900 text-neutral-800 dark:text-neutral-200 hover:bg-neutral-200 dark:hover:bg-neutral-800"
-                  }`}
-                >
-                  {affiliateWriteController.writeTracker.state === "sync_pending" ? (
-                    <>
-                      <Clock className="w-3.5 h-3.5 shrink-0" />
-                      <span>Sync Pending</span>
-                    </>
-                  ) : (
-                    <>
-                      <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
-                      <span>Saving</span>
-                    </>
-                  )}
-                </button>
-              )}
-            {workspaceMode === "affiliate" && (exportProgress || readyDownload || exportError) && (
-              <button
-                type="button"
-                onClick={() => setExportSheetOpen(true)}
-                aria-label="Open background export status"
-                className={`relative overflow-hidden h-9 px-2.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
-                  readyDownload
-                    ? "bg-emerald-600 hover:bg-emerald-700 text-white"
-                    : exportError
-                      ? "border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300"
-                      : "bg-neutral-950 text-white dark:bg-white dark:text-neutral-950"
-                }`}
-              >
-                {exportProgress ? (
-                  <>
-                    <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
-                    <span className="tabular-nums">{exportProgress.percent}%</span>
-                    <span
-                      aria-hidden="true"
-                      className="absolute bottom-0 left-0 h-[2px] bg-emerald-400 dark:bg-emerald-600 transition-[width] duration-300"
-                      style={{ width: `${Math.max(6, exportProgress.percent)}%` }}
-                    />
-                  </>
-                ) : readyDownload ? (
-                  <>
-                    <Check className="w-3.5 h-3.5 shrink-0" />
-                    <span>{hasSavedExport ? "Saved" : "MP4 Ready"}</span>
-                  </>
-                ) : (
-                  <>
-                    <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                    <span>Export Failed</span>
-                  </>
-                )}
-              </button>
-            )}
-            <AuthStatusControl />
             <button
               type="button"
               onClick={() => setDarkMode((d) => !d)}
@@ -2479,187 +2360,171 @@ export default function App() {
           </div>
 
           {/* Video Studio Controls: Second clean row on mobile/tablet, inline center & right on desktop */}
-          {workspaceMode === "video" && (
-            <>
-              <div
-                className="basis-full h-px bg-neutral-100 dark:bg-neutral-800/80 lg:hidden order-3"
-                aria-hidden="true"
+          <div
+            className="basis-full h-px bg-neutral-100 dark:bg-neutral-800/80 lg:hidden order-3"
+            aria-hidden="true"
+          />
+
+          {/* Direct Search & Local Video Input */}
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              setActiveTab("youtube");
+              runSearch(searchInput, licenseFilter, thaiOnly);
+            }}
+            className="flex-1 min-w-0 lg:max-w-xl flex items-center gap-1.5 sm:gap-2 order-4 lg:order-2"
+          >
+            <div className="relative flex-1 min-w-0">
+              <Search className="w-4 h-4 text-neutral-400 absolute left-2.5 sm:left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                type="text"
+                value={searchInput}
+                onChange={(e) => setSearchInput(e.target.value)}
+                placeholder="Search YouTube or paste URL..."
+                aria-label="Search YouTube videos"
+                className="w-full h-9 pl-8 sm:pl-9 pr-7 sm:pr-8 text-sm rounded-lg border border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-900 text-neutral-950 dark:text-neutral-50 placeholder:text-neutral-400 focus:outline-none focus:border-neutral-950 dark:focus:border-white transition-colors"
               />
-
-              {/* Direct Search & Local Video Input */}
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  setActiveTab("videos");
-                  runSearch(searchInput, licenseFilter, thaiOnly);
-                }}
-                className="flex-1 min-w-0 lg:max-w-xl flex items-center gap-1.5 sm:gap-2 order-4 lg:order-2"
-              >
-                <div className="relative flex-1 min-w-0">
-                  <Search className="w-4 h-4 text-neutral-400 absolute left-2.5 sm:left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                  <input
-                    type="text"
-                    value={searchInput}
-                    onChange={(e) => setSearchInput(e.target.value)}
-                    placeholder="Search YouTube or paste URL..."
-                    aria-label="Search YouTube videos"
-                    className="w-full h-9 pl-8 sm:pl-9 pr-7 sm:pr-8 text-sm rounded-lg border border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-900 text-neutral-950 dark:text-neutral-50 placeholder:text-neutral-400 focus:outline-none focus:border-neutral-950 dark:focus:border-white transition-colors"
-                  />
-                  {searchInput && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSearchInput("");
-                        setActiveTab("videos");
-                        runSearch("", licenseFilter, thaiOnly);
-                      }}
-                      aria-label="Clear search and show recommended"
-                      className="w-6 h-6 rounded flex items-center justify-center text-neutral-400 hover:text-neutral-950 dark:hover:text-white absolute right-1.5 top-1/2 -translate-y-1/2 cursor-pointer"
-                    >
-                      <X className="w-3.5 h-3.5" />
-                    </button>
-                  )}
-                </div>
-
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept="video/*"
-                  className="hidden"
-                  onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (file) handleUploadLocalVideo(file);
-                    e.target.value = "";
+              {searchInput && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSearchInput("");
+                    setActiveTab("youtube");
+                    runSearch("", licenseFilter, thaiOnly);
                   }}
-                />
-                <button
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  title="Upload local video"
-                  aria-label="Upload local video"
-                  className="h-9 w-9 sm:w-auto sm:px-3 rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 hover:bg-neutral-100 dark:hover:bg-neutral-900 text-xs font-medium flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors"
+                  aria-label="Clear search and show recommended"
+                  className="w-6 h-6 rounded flex items-center justify-center text-neutral-400 hover:text-neutral-950 dark:hover:text-white absolute right-1.5 top-1/2 -translate-y-1/2 cursor-pointer"
                 >
-                  <Upload className="w-3.5 h-3.5" />
-                  <span className="hidden sm:inline">Upload</span>
+                  <X className="w-3.5 h-3.5" />
                 </button>
-              </form>
+              )}
+            </div>
 
-              {/* Save Offline & Download MP4 Actions */}
-              <div className="flex items-center gap-1.5 sm:gap-2 shrink-0 order-5 lg:order-4">
-                <button
-                  type="button"
-                  onClick={() => handleSaveProject(false)}
-                  disabled={!canSaveCurrent || isSavingProject}
-                  title="Save project offline (Ctrl+S)"
-                  aria-label="Save project offline"
-                  className="h-9 w-9 sm:w-auto sm:px-3 rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 hover:bg-neutral-100 dark:hover:bg-neutral-900 text-xs font-medium flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
-                >
-                  {isSavingProject ? (
-                    <>
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      <span className="hidden sm:inline">Saving...</span>
-                    </>
-                  ) : justSaved ? (
-                    <>
-                      <Check className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
-                      <span className="hidden sm:inline">Saved</span>
-                    </>
-                  ) : (
-                    <>
-                      <Bookmark className="w-3.5 h-3.5" />
-                      <span className="hidden sm:inline">
-                        {activeSavedId ? "Update" : "Save"}
-                      </span>
-                    </>
-                  )}
-                </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="video/*"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) handleUploadLocalVideo(file);
+                e.target.value = "";
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              title="Upload local video"
+              aria-label="Upload local video"
+              className="h-9 w-9 sm:w-auto sm:px-3 rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 hover:bg-neutral-100 dark:hover:bg-neutral-900 text-xs font-medium flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors"
+            >
+              <Upload className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Upload</span>
+            </button>
+          </form>
 
-                <button
-                  type="button"
-                  onClick={handleExportHeaderClick}
-                  disabled={
-                    !exportProgress &&
-                    !readyDownload &&
-                    !exportError &&
-                    (!project || project.scenes.length === 0 || isProcessing)
-                  }
-                  title={
-                    exportProgress
-                      ? "View export progress or cancel"
-                      : readyDownload
-                        ? "Open exported MP4"
-                        : exportError
-                          ? "View export error"
-                          : "Export 9:16 MP4"
-                  }
-                  aria-label={
-                    exportProgress
-                      ? `Exporting ${exportProgress.percent} percent, open details`
-                      : readyDownload
-                        ? "Export ready, open to save MP4"
-                        : exportError
-                          ? "Export failed, open details"
-                          : "Export 9:16 MP4"
-                  }
-                  className={`relative overflow-hidden h-9 px-3 sm:px-3.5 lg:px-4 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 sm:gap-2 whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed transition-all cursor-pointer ${
-                    readyDownload && !exportProgress
-                      ? "bg-emerald-600 hover:bg-emerald-700 text-white"
-                      : exportError && !exportProgress
-                        ? "border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/50 text-red-700 dark:text-red-300 hover:bg-red-100 dark:hover:bg-red-900/60"
-                        : "bg-neutral-950 text-white dark:bg-white dark:text-neutral-950 hover:opacity-90"
-                  }`}
-                >
-                  {exportProgress ? (
-                    <>
-                      <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
-                      <span className="tabular-nums">{exportProgress.percent}%</span>
-                      <span
-                        aria-hidden="true"
-                        className="absolute bottom-0 left-0 h-[2px] bg-emerald-400 dark:bg-emerald-600 transition-[width] duration-300"
-                        style={{ width: `${Math.max(6, exportProgress.percent)}%` }}
-                      />
-                    </>
-                  ) : readyDownload ? (
-                    <>
-                      <Check className="w-3.5 h-3.5 shrink-0" />
-                      <span>{hasSavedExport ? "Saved" : "MP4 Ready"}</span>
-                    </>
-                  ) : exportError ? (
-                    <>
-                      <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                      <span>Export Failed</span>
-                    </>
-                  ) : (
-                    <>
-                      <ArrowUpFromLine className="w-3.5 h-3.5 shrink-0" />
-                      <span>Export</span>
-                    </>
-                  )}
-                </button>
-              </div>
-            </>
-          )}
+          {/* Save Offline & Download MP4 Actions */}
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0 order-5 lg:order-4">
+            <button
+              type="button"
+              onClick={() => handleSaveProject(false)}
+              disabled={!canSaveCurrent || isSavingProject}
+              title="Save project offline (Ctrl+S)"
+              aria-label="Save project offline"
+              className="h-9 w-9 sm:w-auto sm:px-3 rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 hover:bg-neutral-100 dark:hover:bg-neutral-900 text-xs font-medium flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
+            >
+              {isSavingProject ? (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <span className="hidden sm:inline">Saving...</span>
+                </>
+              ) : justSaved ? (
+                <>
+                  <Check className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                  <span className="hidden sm:inline">Saved</span>
+                </>
+              ) : (
+                <>
+                  <Bookmark className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">
+                    {activeSavedId ? "Update" : "Save"}
+                  </span>
+                </>
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={handleExportHeaderClick}
+              disabled={
+                !exportProgress &&
+                !readyDownload &&
+                !exportError &&
+                (!project || project.scenes.length === 0 || isProcessing)
+              }
+              title={
+                exportProgress
+                  ? "View export progress or cancel"
+                  : readyDownload
+                    ? "Open exported MP4"
+                    : exportError
+                      ? "View export error"
+                      : "Export 9:16 MP4"
+              }
+              aria-label={
+                exportProgress
+                  ? `Exporting ${exportProgress.percent} percent, open details`
+                  : readyDownload
+                    ? "Export ready, open to save MP4"
+                    : exportError
+                      ? "Export failed, open details"
+                      : "Export 9:16 MP4"
+              }
+              className={`relative overflow-hidden h-9 px-3 sm:px-3.5 lg:px-4 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 sm:gap-2 whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed transition-all cursor-pointer ${
+                readyDownload && !exportProgress
+                  ? "bg-emerald-600 hover:bg-emerald-700 text-white"
+                  : exportError && !exportProgress
+                    ? "border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/50 text-red-700 dark:text-red-300 hover:bg-red-100 dark:hover:bg-red-900/60"
+                    : "bg-neutral-950 text-white dark:bg-white dark:text-neutral-950 hover:opacity-90"
+              }`}
+            >
+              {exportProgress ? (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                  <span className="tabular-nums">{exportProgress.percent}%</span>
+                  <span
+                    aria-hidden="true"
+                    className="absolute bottom-0 left-0 h-[2px] bg-emerald-400 dark:bg-emerald-600 transition-[width] duration-300"
+                    style={{ width: `${Math.max(6, exportProgress.percent)}%` }}
+                  />
+                </>
+              ) : readyDownload ? (
+                <>
+                  <Check className="w-3.5 h-3.5 shrink-0" />
+                  <span>{hasSavedExport ? "Saved" : "MP4 Ready"}</span>
+                </>
+              ) : exportError ? (
+                <>
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                  <span>Export Failed</span>
+                </>
+              ) : (
+                <>
+                  <ArrowUpFromLine className="w-3.5 h-3.5 shrink-0" />
+                  <span>Export</span>
+                </>
+              )}
+            </button>
+          </div>
         </div>
       </header>
 
-      {/* Affiliate Workspace mounts only when active so Firestore listeners detach on leaving */}
-      {workspaceMode === "affiliate" && (
-        <AffiliateWorkspace
-          writeController={affiliateWriteController}
-          onSwitchToVideoStudio={() => handleSwitchWorkspace("video")}
-        />
-      )}
-
-      {/* Video Studio stays mounted (hidden when Affiliate is active) to preserve active editing state (M1) */}
+      {/* Main Workspace */}
       {(() => {
-        const isVideoVisible = workspaceMode === "video";
-        const showStage =
-          activeTab !== "videos" && activeTab !== "ytPreview" && activeTab !== "scenes";
-        const isStageFocus = activeTab === "edit" || activeTab === "script";
+        const showStage = activeTab === "edit" || activeTab === "script";
+        const isStageFocus = showStage;
         const renderInlineStageInSidebar = showStage && isStageFocus && !isDesktop;
         const useSplitFlex = showStage && isStageFocus && isDesktop;
-        const desktopSidebarCols = !showStage ? "lg:col-span-12" : "lg:col-span-7";
-        const desktopStageCols = "lg:col-span-5";
         const sidebarWidthPct = 66 - stagePreviewScale * 16;
         const stageWidthPct = 34 + stagePreviewScale * 16;
 
@@ -2668,7 +2533,7 @@ export default function App() {
             project={project}
             cutTime={cutTime}
             seekNonce={seekNonce}
-            isPlaying={isVideoVisible ? isPlaying : false}
+            isPlaying={isPlaying}
             muted={muted}
             voiceSettings={voiceSettings}
             editSettings={videoEdit}
@@ -2686,31 +2551,24 @@ export default function App() {
 
         return (
           <main
-            hidden={!isVideoVisible}
-            aria-hidden={!isVideoVisible}
-            inert={!isVideoVisible}
-            className={
-              !isVideoVisible
-                ? "hidden"
-                : `flex-1 min-h-0 max-w-[1440px] w-full mx-auto px-4 sm:px-6 ${
-                    useSplitFlex
-                      ? "py-4 flex flex-row gap-6 overflow-hidden"
-                      : isStageFocus
-                        ? "py-2 lg:py-4 flex flex-col gap-2 lg:gap-3 overflow-hidden"
-                        : "py-4 grid grid-cols-1 lg:grid-cols-12 gap-6"
-                  }`
-            }
+            className={`flex-1 min-h-0 max-w-[1440px] w-full mx-auto px-4 sm:px-6 overflow-hidden ${
+              useSplitFlex
+                ? "py-4 flex flex-row gap-6"
+                : isStageFocus
+                  ? "py-2 lg:py-4 flex flex-col gap-2 lg:gap-3"
+                  : "py-4 flex flex-col"
+            }`}
           >
-            {/* Left / Full: Video Picker, YouTube Preview, Watch & Custom Scene Selection, Subtitles, Voice, and Saved Projects */}
+            {/* Left / Full: Explore, Scenes, Adjust, Captions, and Projects */}
             <section
               style={
                 useSplitFlex
                   ? { width: `calc(${sidebarWidthPct.toFixed(2)}% - 12px)` }
                   : undefined
               }
-              className={`${useSplitFlex ? "shrink-0 min-w-0" : desktopSidebarCols} ${
-                isStageFocus ? "flex-1 min-h-0" : "min-h-0"
-              } flex flex-col`}
+              className={`${
+                useSplitFlex ? "shrink-0 min-w-0" : "flex-1 w-full"
+              } min-h-0 flex flex-col`}
             >
           {processError && (
             <div className="mb-3 px-3.5 py-2.5 rounded-lg border border-neutral-300 dark:border-neutral-700 text-xs text-neutral-900 dark:text-neutral-100 shrink-0">
@@ -2733,9 +2591,8 @@ export default function App() {
 
           <WorkspaceSidebar
             activeTab={activeTab}
-            isWorkspaceVisible={isVideoVisible}
             onTabChange={(tab) => {
-              if (tab === "videos" || tab === "ytPreview") setIsPlaying(false);
+              if (tab === "youtube") setIsPlaying(false);
               setActiveTab(tab);
             }}
             videos={videos}
@@ -2839,7 +2696,7 @@ export default function App() {
                 ? { width: `calc(${stageWidthPct.toFixed(2)}% - 12px)` }
                 : undefined
             }
-            className={`${useSplitFlex ? "shrink-0 min-w-0" : desktopStageCols} flex items-center justify-center min-h-0`}
+            className="shrink-0 min-w-0 flex items-center justify-center min-h-0"
           >
             {stageNode}
           </section>
