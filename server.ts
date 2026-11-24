@@ -278,58 +278,214 @@ function getGeminiClient(): GoogleGenAI {
   });
 }
 
-async function withRetry<T>(fn: () => Promise<T>, maxAttempts = 2): Promise<T> {
-  let lastErr: unknown;
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+interface ParsedGeminiError {
+  status: number;
+  statusText: string;
+  rawMessage: string;
+  isTransient: boolean;
+  isUnsupportedInput: boolean;
+}
+
+function parseGeminiError(err: unknown): ParsedGeminiError {
+  const errObj = (err && typeof err === "object" ? err : {}) as {
+    status?: number;
+    code?: number;
+    message?: string;
+  };
+  const rawMessage = err instanceof Error ? err.message : String(err || "Unknown AI error");
+  let parsedCode = typeof errObj.status === "number" ? errObj.status : typeof errObj.code === "number" ? errObj.code : 0;
+  let parsedStatus = "";
+  let innerMessage = rawMessage;
+
+  const trimmed = rawMessage.trim();
+  if (trimmed.startsWith("{")) {
     try {
-      return await fn();
-    } catch (err) {
-      lastErr = err;
-      const msg = err instanceof Error ? err.message : String(err);
-      const isTransient = /503|UNAVAILABLE|high demand|overloaded/i.test(msg);
-      if (!isTransient || attempt === maxAttempts - 1) {
-        throw err;
+      const json = JSON.parse(trimmed) as {
+        error?: { code?: number; message?: string; status?: string };
+        code?: number;
+        message?: string;
+        status?: string;
+      };
+      const inner = json.error ?? json;
+      if (typeof inner.code === "number") parsedCode = inner.code;
+      if (typeof inner.status === "string") parsedStatus = inner.status;
+      if (typeof inner.message === "string" && inner.message.trim()) {
+        innerMessage = inner.message.trim();
       }
-      await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+    } catch {
+      // Keep rawMessage
     }
   }
-  throw lastErr;
+
+  if (!parsedCode) {
+    const codeMatch = rawMessage.match(/\b(400|401|403|404|429|500|502|503|504)\b/);
+    if (codeMatch) parsedCode = Number(codeMatch[1]);
+  }
+
+  const isTransient =
+    parsedCode === 429 ||
+    parsedCode === 500 ||
+    parsedCode === 502 ||
+    parsedCode === 503 ||
+    parsedCode === 504 ||
+    /429|500|502|503|504|UNAVAILABLE|RESOURCE_EXHAUSTED|high demand|overloaded|temporarily|try again|rate limit|quota|ECONNRESET|ETIMEDOUT|fetch failed/i.test(
+      `${parsedStatus} ${innerMessage} ${rawMessage}`
+    );
+
+  const isUnsupportedInput =
+    !isTransient &&
+    (parsedCode === 400 ||
+      parsedCode === 404 ||
+      /INVALID_ARGUMENT|NOT_FOUND|unsupported|not supported/i.test(
+        `${parsedStatus} ${innerMessage} ${rawMessage}`
+      ));
+
+  return {
+    status: parsedCode || 500,
+    statusText: parsedStatus,
+    rawMessage: innerMessage,
+    isTransient,
+    isUnsupportedInput,
+  };
 }
+
+function formatGeminiError(
+  err: unknown,
+  fallback = "AI processing failed. Please try again."
+): { status: number; message: string } {
+  const info = parseGeminiError(err);
+  if (
+    info.status === 503 ||
+    /UNAVAILABLE|high demand|overloaded/i.test(`${info.statusText} ${info.rawMessage}`)
+  ) {
+    return {
+      status: 503,
+      message:
+        "Gemini AI is temporarily experiencing high demand (503). Please wait a few seconds and try again.",
+    };
+  }
+  if (
+    info.status === 429 ||
+    /RESOURCE_EXHAUSTED|rate limit|quota/i.test(`${info.statusText} ${info.rawMessage}`)
+  ) {
+    return {
+      status: 429,
+      message:
+        "AI rate limit or quota reached (429). Please wait a moment and try again, or check your API key in Settings > Secrets.",
+    };
+  }
+  if (
+    info.status === 403 ||
+    /PERMISSION_DENIED|API_KEY_INVALID|API key not valid/i.test(
+      `${info.statusText} ${info.rawMessage}`
+    )
+  ) {
+    return {
+      status: 403,
+      message:
+        "Gemini API key is invalid or lacks permission. Please check your API key in Settings > Secrets.",
+    };
+  }
+  return {
+    status: info.status >= 400 && info.status < 600 ? info.status : 500,
+    message: info.rawMessage || fallback,
+  };
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  if (items.length === 0) return [];
+  const limit = Math.max(1, Math.min(concurrency, items.length));
+  const results = new Array<R>(items.length);
+  let nextIdx = 0;
+  const workers = Array.from({ length: limit }, async () => {
+    while (nextIdx < items.length) {
+      const idx = nextIdx++;
+      results[idx] = await fn(items[idx], idx);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+const RETRY_BASE_DELAYS_MS = [1200, 2500, 4500, 7500, 10000];
 
 async function generateGroundedWithFailover(
   ai: GoogleGenAI,
   contents: Parameters<GoogleGenAI["models"]["generateContent"]>[0]["contents"],
   schema: Record<string, unknown>,
-  thinkingLevel: ThinkingLevel = ThinkingLevel.MEDIUM
-) {
-  try {
-    return await withRetry(() =>
-      ai.models.generateContent({
-        model: "gemini-4-hydrogen",
-        contents,
-        config: {
-          thinkingConfig: { thinkingLevel },
-          responseMimeType: "application/json",
-          responseSchema: schema,
-        },
-      })
-    );
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    const shouldFailover = /429|503|RESOURCE_EXHAUSTED|UNAVAILABLE|quota|overloaded/i.test(msg);
-    if (!shouldFailover) throw err;
-    console.warn("Primary model unavailable/quota-limited, failing over to gemini-3.1-flash-lite");
-    return await withRetry(() =>
-      ai.models.generateContent({
-        model: "gemini-3.1-flash-lite",
-        contents,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: schema,
-        },
-      })
-    );
+  thinkingLevel: ThinkingLevel = ThinkingLevel.MEDIUM,
+  opts?: {
+    maxAttempts?: number;
+    onRetry?: (info: { attempt: number; maxAttempts: number; delayMs: number; model: string }) => void;
   }
+) {
+  const maxAttempts = Math.max(2, Math.min(6, opts?.maxAttempts ?? 6));
+  const candidateModels = ["gemini-4-hydrogen", "gemini-3.1-flash-lite"] as const;
+  const unsupportedModels = new Set<string>();
+  let lastTransientErr: unknown = null;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const preferred = candidateModels[attempt % candidateModels.length];
+    const model = unsupportedModels.has(preferred)
+      ? candidateModels.find((m) => !unsupportedModels.has(m))
+      : preferred;
+    if (!model) break;
+
+    try {
+      const config =
+        model === "gemini-4-hydrogen"
+          ? {
+              thinkingConfig: { thinkingLevel },
+              responseMimeType: "application/json",
+              responseSchema: schema,
+            }
+          : {
+              responseMimeType: "application/json",
+              responseSchema: schema,
+            };
+
+      return await ai.models.generateContent({
+        model,
+        contents,
+        config,
+      });
+    } catch (err) {
+      const info = parseGeminiError(err);
+      if (model !== "gemini-4-hydrogen" && info.isUnsupportedInput) {
+        unsupportedModels.add(model);
+        if (attempt < maxAttempts - 1) continue;
+        throw lastTransientErr ?? err;
+      }
+      if (!info.isTransient) {
+        throw err;
+      }
+      lastTransientErr = err;
+      if (attempt === maxAttempts - 1) {
+        throw err;
+      }
+      const baseDelay =
+        RETRY_BASE_DELAYS_MS[Math.min(attempt, RETRY_BASE_DELAYS_MS.length - 1)];
+      const jitter = Math.floor(Math.random() * 600);
+      const delayMs = baseDelay + jitter;
+      const nextModel = candidateModels[(attempt + 1) % candidateModels.length];
+      console.warn(
+        `Gemini ${model} transient error (${info.status}: ${info.rawMessage}). Retrying with ${nextModel} in ${delayMs}ms (attempt ${attempt + 2}/${maxAttempts})`
+      );
+      opts?.onRetry?.({
+        attempt: attempt + 2,
+        maxAttempts,
+        delayMs,
+        model: unsupportedModels.has(nextModel) ? "gemini-4-hydrogen" : nextModel,
+      });
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+
+  throw lastTransientErr ?? new Error("Gemini AI is temporarily unavailable.");
 }
 
 function parseDurationToSeconds(text: string): number {
@@ -2184,118 +2340,131 @@ async function transcribePreparedExtractedScenes(
     });
   };
 
-  const results = await Promise.all(
-    preparedJobs.map(async (job, idx) => {
-      if (job.mode === "empty") {
-        advanceGenProgress(idx);
-        return { hasDialogue: false, summary: "No audio", utterances: [] } as RawSceneUtterances;
-      }
+  const emitRetryProgress = (clipIdx: number, attempt: number, maxAttempts: number) => {
+    const pct = Math.min(94, Math.round(55 + (completedUnits / totalWorkUnits) * 39));
+    onProgress?.({
+      stage: "generating",
+      label: `AI model busy, retrying automatically (${attempt}/${maxAttempts})...`,
+      percent: pct,
+      clipIndex: clipIdx,
+      totalClips,
+    });
+  };
 
-      if (job.mode === "embedded") {
-        const parts: Array<
-          { inlineData: { mimeType: string; data: string } } | { text: string }
-        > = [];
-        if (job.audioBuf) {
-          parts.push({
-            inlineData: { mimeType: "audio/mp3", data: job.audioBuf.toString("base64") },
-          });
-        }
+  const results = await mapWithConcurrency(preparedJobs, 2, async (job, idx) => {
+    if (job.mode === "empty") {
+      advanceGenProgress(idx);
+      return { hasDialogue: false, summary: "No audio", utterances: [] } as RawSceneUtterances;
+    }
+
+    if (job.mode === "embedded") {
+      const parts: Array<
+        { inlineData: { mimeType: string; data: string } } | { text: string }
+      > = [];
+      if (job.audioBuf) {
         parts.push({
-          text: getEmbeddedSubtitlesPrompt(job.scene.durationSec, job.sceneCues, translationTone),
+          inlineData: { mimeType: "audio/mp3", data: job.audioBuf.toString("base64") },
         });
-        const resp = await generateGroundedWithFailover(
-          ai,
-          { parts },
-          sceneTranscriptSchema,
-          ThinkingLevel.LOW
-        );
-        const rawRes = JSON.parse((resp.text || "{}").trim()) as RawSceneUtterances;
-        advanceGenProgress(idx);
-        return lockUtterancesToEmbeddedCues(rawRes, job.sceneCues);
       }
+      parts.push({
+        text: getEmbeddedSubtitlesPrompt(job.scene.durationSec, job.sceneCues, translationTone),
+      });
+      const resp = await generateGroundedWithFailover(
+        ai,
+        { parts },
+        sceneTranscriptSchema,
+        ThinkingLevel.LOW,
+        {
+          onRetry: ({ attempt, maxAttempts }) => emitRetryProgress(idx, attempt, maxAttempts),
+        }
+      );
+      const rawRes = JSON.parse((resp.text || "{}").trim()) as RawSceneUtterances;
+      advanceGenProgress(idx);
+      return lockUtterancesToEmbeddedCues(rawRes, job.sceneCues);
+    }
 
-      const sc = job.scene;
-      const chunkResults = await Promise.all(
-        job.subChunks.map(async (ch) => {
-          const startFrame = Math.max(0, Math.floor(ch.startSec / 0.01));
-          const endFrame = Math.min(job.fullRms.length, Math.ceil(ch.endSec / 0.01));
-          const startByte = Math.min(job.fullPcm.length, startFrame * 320);
-          const endByte = Math.min(job.fullPcm.length, Math.max(startByte + 640, endFrame * 320));
-          const wavBuf = pcmToWavBuffer(job.fullPcm.subarray(startByte, endByte), 16000);
+    const sc = job.scene;
+    const chunkResults = await mapWithConcurrency(job.subChunks, 2, async (ch) => {
+      const startFrame = Math.max(0, Math.floor(ch.startSec / 0.01));
+      const endFrame = Math.min(job.fullRms.length, Math.ceil(ch.endSec / 0.01));
+      const startByte = Math.min(job.fullPcm.length, startFrame * 320);
+      const endByte = Math.min(job.fullPcm.length, Math.max(startByte + 640, endFrame * 320));
+      const wavBuf = pcmToWavBuffer(job.fullPcm.subarray(startByte, endByte), 16000);
 
-          const chDur = Math.max(0.2, Number(((endByte - startByte) / 32000).toFixed(2)));
-          const absStart = Number((sc.startSec + startFrame * 0.01).toFixed(2));
-          const chRms = job.fullRms.subarray(startFrame, endFrame);
-          const chWindows = job.fullSpeechWindows
-            .filter((w) => w.endSec > ch.startSec + 0.05 && w.startSec < ch.endSec - 0.05)
-            .map((w) => ({
-              startSec: Number(Math.max(0, w.startSec - startFrame * 0.01).toFixed(2)),
-              endSec: Number(Math.min(chDur, w.endSec - startFrame * 0.01).toFixed(2)),
-            }));
+      const chDur = Math.max(0.2, Number(((endByte - startByte) / 32000).toFixed(2)));
+      const absStart = Number((sc.startSec + startFrame * 0.01).toFixed(2));
+      const chRms = job.fullRms.subarray(startFrame, endFrame);
+      const chWindows = job.fullSpeechWindows
+        .filter((w) => w.endSec > ch.startSec + 0.05 && w.startSec < ch.endSec - 0.05)
+        .map((w) => ({
+          startSec: Number(Math.max(0, w.startSec - startFrame * 0.01).toFixed(2)),
+          endSec: Number(Math.min(chDur, w.endSec - startFrame * 0.01).toFixed(2)),
+        }));
 
-          const resp = await generateGroundedWithFailover(
-            ai,
+      const resp = await generateGroundedWithFailover(
+        ai,
+        {
+          parts: [
+            { inlineData: { mimeType: "audio/wav", data: wavBuf.toString("base64") } },
             {
-              parts: [
-                { inlineData: { mimeType: "audio/wav", data: wavBuf.toString("base64") } },
-                {
-                  text: getClipPrompt(
-                    chDur,
-                    absStart,
-                    absStart + chDur,
-                    chWindows,
-                    true,
-                    translationTone
-                  ),
-                },
-              ],
+              text: getClipPrompt(
+                chDur,
+                absStart,
+                absStart + chDur,
+                chWindows,
+                true,
+                translationTone
+              ),
             },
-            sceneTranscriptSchema,
-            ThinkingLevel.LOW
-          );
-
-          const rawChunk = JSON.parse((resp.text || "{}").trim()) as RawSceneUtterances;
-          const refinedChunk = refineUtterancesWithEnvelope(rawChunk, chRms, chDur, chWindows);
-          advanceGenProgress(idx);
-          return { chOffset: Number((startFrame * 0.01).toFixed(2)), refined: refinedChunk };
-        })
+          ],
+        },
+        sceneTranscriptSchema,
+        ThinkingLevel.LOW,
+        {
+          onRetry: ({ attempt, maxAttempts }) => emitRetryProgress(idx, attempt, maxAttempts),
+        }
       );
 
-      const mergedUtts: NonNullable<RawSceneUtterances["utterances"]> = [];
-      let firstSummary = "";
-      for (const item of chunkResults) {
-        if (item.refined?.summary && !firstSummary) firstSummary = item.refined.summary;
-        if (item.refined?.hasDialogue !== false && Array.isArray(item.refined?.utterances)) {
-          for (const u of item.refined.utterances) {
-            mergedUtts.push({
-              ...u,
-              startSec: Number((item.chOffset + u.startSec).toFixed(2)),
-              endSec: Number((item.chOffset + u.endSec).toFixed(2)),
-              words: Array.isArray(u.words)
-                ? u.words.map((w) => ({
-                    ...w,
-                    startSec:
-                      typeof w.startSec === "number"
-                        ? Number((item.chOffset + w.startSec).toFixed(2))
-                        : undefined,
-                    endSec:
-                      typeof w.endSec === "number"
-                        ? Number((item.chOffset + w.endSec).toFixed(2))
-                        : undefined,
-                  }))
-                : u.words,
-            });
-          }
+      const rawChunk = JSON.parse((resp.text || "{}").trim()) as RawSceneUtterances;
+      const refinedChunk = refineUtterancesWithEnvelope(rawChunk, chRms, chDur, chWindows);
+      advanceGenProgress(idx);
+      return { chOffset: Number((startFrame * 0.01).toFixed(2)), refined: refinedChunk };
+    });
+
+    const mergedUtts: NonNullable<RawSceneUtterances["utterances"]> = [];
+    let firstSummary = "";
+    for (const item of chunkResults) {
+      if (item.refined?.summary && !firstSummary) firstSummary = item.refined.summary;
+      if (item.refined?.hasDialogue !== false && Array.isArray(item.refined?.utterances)) {
+        for (const u of item.refined.utterances) {
+          mergedUtts.push({
+            ...u,
+            startSec: Number((item.chOffset + u.startSec).toFixed(2)),
+            endSec: Number((item.chOffset + u.endSec).toFixed(2)),
+            words: Array.isArray(u.words)
+              ? u.words.map((w) => ({
+                  ...w,
+                  startSec:
+                    typeof w.startSec === "number"
+                      ? Number((item.chOffset + w.startSec).toFixed(2))
+                      : undefined,
+                  endSec:
+                    typeof w.endSec === "number"
+                      ? Number((item.chOffset + w.endSec).toFixed(2))
+                      : undefined,
+                }))
+              : u.words,
+          });
         }
       }
+    }
 
-      return {
-        hasDialogue: mergedUtts.length > 0,
-        summary: firstSummary || "Scene dialogue",
-        utterances: mergedUtts,
-      } as RawSceneUtterances;
-    })
-  );
+    return {
+      hasDialogue: mergedUtts.length > 0,
+      summary: firstSummary || "Scene dialogue",
+      utterances: mergedUtts,
+    } as RawSceneUtterances;
+  });
 
   onProgress?.({
     stage: "compiling",
@@ -2882,13 +3051,13 @@ app.post("/api/process-clip-audio", async (req, res) => {
     res.json(payload);
   } catch (err) {
     console.error("Process clip audio error:", err);
-    const msg = err instanceof Error ? err.message : "Failed to process clip audio.";
+    const formatted = formatGeminiError(err, "Failed to process clip audio.");
     if (wantStream && res.headersSent) {
-      sendNdjson({ type: "error", status: 500, error: msg });
+      sendNdjson({ type: "error", status: formatted.status, error: formatted.message });
       res.end();
       return;
     }
-    res.status(500).json({ error: msg });
+    res.status(formatted.status).json({ error: formatted.message });
   } finally {
     await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   }
@@ -2985,13 +3154,13 @@ app.post("/api/process-upload", async (req, res) => {
     res.status(lockedResult.status).json(lockedResult.body);
   } catch (err) {
     console.error("Process upload error:", err);
-    const msg = err instanceof Error ? err.message : "Failed to process uploaded video.";
+    const formatted = formatGeminiError(err, "Failed to process uploaded video.");
     if (wantStream && res.headersSent) {
-      sendNdjson({ type: "error", status: 500, error: msg });
+      sendNdjson({ type: "error", status: formatted.status, error: formatted.message });
       res.end();
       return;
     }
-    res.status(500).json({ error: msg });
+    res.status(formatted.status).json({ error: formatted.message });
   }
 });
 
@@ -3165,56 +3334,66 @@ app.post("/api/process-video", async (req, res) => {
     });
 
     let completedClips = 0;
-    // Analyze each user-selected scene individually with exact startOffset / endOffset
-    const results = await Promise.all(
-      scenes.map(async (sc, idx) => {
-        const resp = await generateGroundedWithFailover(
-          ai,
-          [
-            {
-              role: "user",
-              parts: [
-                {
-                  fileData: {
-                    fileUri: `https://www.youtube.com/watch?v=${videoId}`,
-                  },
-                  videoMetadata: {
-                    startOffset: `${sc.startSec}s`,
-                    endOffset: `${sc.endSec}s`,
-                    fps: 0.5,
-                  },
+    // Analyze each user-selected scene with bounded concurrency to avoid API burst 503s
+    const results = await mapWithConcurrency(scenes, 2, async (sc, idx) => {
+      const resp = await generateGroundedWithFailover(
+        ai,
+        [
+          {
+            role: "user",
+            parts: [
+              {
+                fileData: {
+                  fileUri: `https://www.youtube.com/watch?v=${videoId}`,
                 },
-                {
-                  text: getClipPrompt(
-                    sc.durationSec,
-                    sc.startSec,
-                    sc.endSec,
-                    undefined,
-                    false,
-                    tone
-                  ),
+                videoMetadata: {
+                  startOffset: `${sc.startSec}s`,
+                  endOffset: `${sc.endSec}s`,
+                  fps: 0.5,
                 },
-              ],
-            },
-          ],
-          sceneTranscriptSchema,
-          ThinkingLevel.LOW
-        );
-        completedClips++;
-        const pct = 42 + Math.round((completedClips / Math.max(1, totalClips)) * 48);
-        emitProgress({
-          stage: "generating",
-          label:
-            totalClips === 1
-              ? "Translating Thai dialogue..."
-              : `Generating subtitles (${completedClips}/${totalClips} clips)...`,
-          percent: Math.min(92, pct),
-          clipIndex: idx + 1,
-          totalClips,
-        });
-        return JSON.parse((resp.text || "{}").trim()) as RawSceneUtterances;
-      })
-    );
+              },
+              {
+                text: getClipPrompt(
+                  sc.durationSec,
+                  sc.startSec,
+                  sc.endSec,
+                  undefined,
+                  false,
+                  tone
+                ),
+              },
+            ],
+          },
+        ],
+        sceneTranscriptSchema,
+        ThinkingLevel.LOW,
+        {
+          onRetry: ({ attempt, maxAttempts }) => {
+            const pct = 42 + Math.round((completedClips / Math.max(1, totalClips)) * 48);
+            emitProgress({
+              stage: "generating",
+              label: `AI model busy, retrying automatically (${attempt}/${maxAttempts})...`,
+              percent: Math.min(92, pct),
+              clipIndex: idx + 1,
+              totalClips,
+            });
+          },
+        }
+      );
+      completedClips++;
+      const pct = 42 + Math.round((completedClips / Math.max(1, totalClips)) * 48);
+      emitProgress({
+        stage: "generating",
+        label:
+          totalClips === 1
+            ? "Translating Thai dialogue..."
+            : `Generating subtitles (${completedClips}/${totalClips} clips)...`,
+        percent: Math.min(92, pct),
+        clipIndex: idx + 1,
+        totalClips,
+      });
+      return JSON.parse((resp.text || "{}").trim()) as RawSceneUtterances;
+    });
 
     emitProgress({
       stage: "compiling",
@@ -3276,13 +3455,13 @@ app.post("/api/process-video", async (req, res) => {
     res.json(payload);
   } catch (err) {
     console.error("Process video error:", err);
-    const msg = err instanceof Error ? err.message : "Failed to transcribe selected scenes.";
+    const formatted = formatGeminiError(err, "Failed to transcribe selected scenes.");
     if (wantStream && res.headersSent) {
-      sendNdjson({ type: "error", status: 500, error: msg });
+      sendNdjson({ type: "error", status: formatted.status, error: formatted.message });
       res.end();
       return;
     }
-    res.status(500).json({ error: msg });
+    res.status(formatted.status).json({ error: formatted.message });
   }
 });
 
@@ -3563,9 +3742,8 @@ TASK:
     });
   } catch (err) {
     console.error("Regenerate subtitle error:", err);
-    res.status(500).json({
-      error: err instanceof Error ? err.message : "Failed to regenerate subtitle with AI.",
-    });
+    const formatted = formatGeminiError(err, "Failed to regenerate subtitle with AI.");
+    res.status(formatted.status).json({ error: formatted.message });
   } finally {
     await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   }
@@ -3716,9 +3894,8 @@ RULES:
     res.json({ subtitles: updated });
   } catch (err) {
     console.error("Batch retranslate error:", err);
-    res.status(500).json({
-      error: err instanceof Error ? err.message : "Failed to re-translate subtitles.",
-    });
+    const formatted = formatGeminiError(err, "Failed to re-translate subtitles.");
+    res.status(formatted.status).json({ error: formatted.message });
   }
 });
 
@@ -4160,9 +4337,8 @@ RULES:
     res.status(400).json({ error: "No audio or video source available to AI-resync subtitles." });
   } catch (err) {
     console.error("Resync subtitles error:", err);
-    res.status(500).json({
-      error: err instanceof Error ? err.message : "Failed to resync subtitle timings with AI.",
-    });
+    const formatted = formatGeminiError(err, "Failed to resync subtitle timings with AI.");
+    res.status(formatted.status).json({ error: formatted.message });
   } finally {
     await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   }

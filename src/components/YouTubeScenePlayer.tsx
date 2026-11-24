@@ -78,6 +78,39 @@ export function mapCutTimeToSource(
   return { sceneIndex: 0, sourceSec: 0 };
 }
 
+function applySafePlaybackRate(vid: HTMLVideoElement, targetRate: number): void {
+  const safeRate =
+    typeof targetRate === "number" && Number.isFinite(targetRate)
+      ? Math.max(0.25, Math.min(2.5, targetRate))
+      : 1;
+  try {
+    if (!vid.preservesPitch) {
+      vid.preservesPitch = true;
+    }
+    const vidWebkit = vid as unknown as { webkitPreservesPitch?: boolean };
+    if (vidWebkit.webkitPreservesPitch === false) {
+      vidWebkit.webkitPreservesPitch = true;
+    }
+  } catch {
+    // ignore unsupported preservesPitch implementations
+  }
+  try {
+    if (Math.abs(vid.playbackRate - safeRate) > 0.001) {
+      vid.playbackRate = safeRate;
+    }
+  } catch {
+    // Some mobile browsers / WebViews reject playbackRate < 0.5 or > 2.0 or before metadata loads
+    try {
+      const fallbackRate = Math.max(0.5, Math.min(2.0, safeRate));
+      if (Math.abs(vid.playbackRate - fallbackRate) > 0.001) {
+        vid.playbackRate = fallbackRate;
+      }
+    } catch {
+      // ignore unsupported media state
+    }
+  }
+}
+
 export interface YouTubeScenePlayerHandle {
   play: () => void;
   pause: () => void;
@@ -280,9 +313,13 @@ export const YouTubeScenePlayer = memo(
               } catch {
                 // ignore
               }
-              if (mutedRef.current) e.target.mute();
-              else e.target.unMute();
-              e.target.setPlaybackRate?.(youtubeSpeedRef.current);
+              try {
+                if (mutedRef.current) e.target.mute();
+                else e.target.unMute();
+                e.target.setPlaybackRate?.(youtubeSpeedRef.current);
+              } catch {
+                // ignore transient YouTube player error
+              }
               const target = mapCutTimeToSource(scenesRef.current, readCurrentCutTime());
               activeSceneIdxRef.current = target.sceneIndex;
               const startFloor = Math.floor(initial.sourceSec);
@@ -314,7 +351,11 @@ export const YouTubeScenePlayer = memo(
                 setYtActualPlaying(true);
                 setNeedsDirectYtTap(false);
                 setYtEmbedError(null);
-                playerRef.current.setPlaybackRate?.(youtubeSpeedRef.current);
+                try {
+                  playerRef.current.setPlaybackRate?.(youtubeSpeedRef.current);
+                } catch {
+                  // ignore transient YouTube rate error
+                }
                 const ytT = playerRef.current.getCurrentTime?.();
                 if (typeof ytT === "number" && Number.isFinite(ytT)) {
                   ytAnchorRef.current.perfMs = performance.now();
@@ -442,7 +483,11 @@ export const YouTubeScenePlayer = memo(
       const clamped = Math.max(0, Math.min(Math.max(0, actualDur - 0.05), sourceSec));
       if (Math.abs(vid.currentTime - clamped) > 0.08) {
         seekSettleUntilRef.current = performance.now() + 650;
-        vid.currentTime = clamped;
+        try {
+          vid.currentTime = clamped;
+        } catch {
+          // ignore invalid media seek state
+        }
       } else {
         seekSettleUntilRef.current = 0;
       }
@@ -451,28 +496,28 @@ export const YouTubeScenePlayer = memo(
       pendingLocalSeekRef.current = sourceSec;
     }
 
-    if (vid.muted !== mutedRef.current) {
-      vid.muted = mutedRef.current;
-    }
-    if (!vid.preservesPitch) {
-      vid.preservesPitch = true;
-    }
-    const vidWebkit = vid as unknown as { webkitPreservesPitch?: boolean };
-    if (vidWebkit.webkitPreservesPitch === false) {
-      vidWebkit.webkitPreservesPitch = true;
+    try {
+      if (vid.muted !== mutedRef.current) {
+        vid.muted = mutedRef.current;
+      }
+    } catch {
+      // ignore
     }
     const targetRate = getEffectivePlaybackSpeed(
       "local",
       editSettingsRef.current.playbackSpeed,
       voiceSettingsRef.current.speed
     );
-    if (Math.abs(vid.playbackRate - targetRate) > 0.001) {
-      vid.playbackRate = targetRate;
-    }
+    applySafePlaybackRate(vid, targetRate);
 
     pendingLocalPlayRef.current = true;
     playAttemptPendingRef.current = true;
-    const playPromise = vid.play();
+    let playPromise: Promise<void> | undefined;
+    try {
+      playPromise = vid.play();
+    } catch {
+      playPromise = undefined;
+    }
     onPlayingChangeRef.current(true);
     if (playPromise && typeof playPromise.then === "function") {
       playPromise
@@ -547,7 +592,11 @@ export const YouTubeScenePlayer = memo(
     setAutoMutedFallback(false);
     const vid = localVideoRef.current;
     if (vid && !vid.paused) {
-      vid.pause();
+      try {
+        vid.pause();
+      } catch {
+        // ignore
+      }
     }
     onPlayingChangeRef.current(false);
   }, []);
@@ -884,21 +933,12 @@ export const YouTubeScenePlayer = memo(
     if ((!autoMutedFallbackRef.current || muted) && vid.muted !== muted) {
       vid.muted = muted;
     }
-    if (!vid.preservesPitch) {
-      vid.preservesPitch = true;
-    }
-    const vidWebkit = vid as unknown as { webkitPreservesPitch?: boolean };
-    if (vidWebkit.webkitPreservesPitch === false) {
-      vidWebkit.webkitPreservesPitch = true;
-    }
     const targetRate = getEffectivePlaybackSpeed(
       "local",
       editSettings.playbackSpeed,
       voiceSettings.speed
     );
-    if (Math.abs(vid.playbackRate - targetRate) > 0.001) {
-      vid.playbackRate = targetRate;
-    }
+    applySafePlaybackRate(vid, targetRate);
     if (hasVoiceEffects || voiceAttachedRef.current) {
       voiceAttachedRef.current = true;
       applyVoiceEffectsToVideoElement(vid, voiceSettings, isPlaying);
@@ -914,7 +954,11 @@ export const YouTubeScenePlayer = memo(
       autoMutedFallbackRef.current = false;
       setAutoMutedFallback(false);
       if (!vid.paused) {
-        vid.pause();
+        try {
+          vid.pause();
+        } catch {
+          // ignore
+        }
       }
     }
   }, [sourceType, isPlaying, muted, voiceSettings, editSettings.playbackSpeed, hasVoiceEffects, startLocalPlayback]);
@@ -932,7 +976,7 @@ export const YouTubeScenePlayer = memo(
           ? scenesRef.current
           : [{ index: 0, startSec: 0, endSec: fallbackDur, durationSec: fallbackDur, summary: "Full video" }];
       if (vid && curScenes.length > 0 && !vid.paused && !vid.seeking && vid.readyState >= 1) {
-        const idx = Math.min(activeSceneIdxRef.current, curScenes.length - 1);
+        const idx = Math.max(0, Math.min(activeSceneIdxRef.current, curScenes.length - 1));
         const sc = curScenes[idx];
         const srcT = vid.currentTime;
         const now = performance.now();
@@ -941,7 +985,11 @@ export const YouTubeScenePlayer = memo(
           if (now - lastSeekFixAtRef.current > 600) {
             lastSeekFixAtRef.current = now;
             seekSettleUntilRef.current = now + 650;
-            vid.currentTime = sc.startSec;
+            try {
+              vid.currentTime = sc.startSec;
+            } catch {
+              // ignore
+            }
           }
         } else if (srcT >= sc.endSec - 0.03 && now >= seekSettleUntilRef.current) {
           if (idx + 1 < curScenes.length) {
@@ -951,11 +999,19 @@ export const YouTubeScenePlayer = memo(
             if (Math.abs(nextSc.startSec - srcT) > 0.18) {
               lastSeekFixAtRef.current = now;
               seekSettleUntilRef.current = now + 650;
-              vid.currentTime = nextSc.startSec;
+              try {
+                vid.currentTime = nextSc.startSec;
+              } catch {
+                // ignore
+              }
             }
             onTimeUpdateRef.current(getSceneCutStart(curScenes, nextIdx));
           } else {
-            vid.pause();
+            try {
+              vid.pause();
+            } catch {
+              // ignore
+            }
             onEndedRef.current();
             return;
           }
@@ -982,6 +1038,12 @@ export const YouTubeScenePlayer = memo(
         vid.currentTime = clamped;
       }
     }
+    const targetRate = getEffectivePlaybackSpeed(
+      "local",
+      editSettingsRef.current.playbackSpeed,
+      voiceSettingsRef.current.speed
+    );
+    applySafePlaybackRate(vid, targetRate);
     if (pendingLocalPlayRef.current && isPlayingRef.current && vid.paused && vid.readyState >= 1) {
       pendingLocalPlayRef.current = false;
       playAttemptPendingRef.current = true;
@@ -1024,7 +1086,11 @@ export const YouTubeScenePlayer = memo(
 
   const transformCss = buildCssTransformString(editSettings);
   const filterCss = buildCssFilterString(editSettings);
-  const vignetteOpacity = Math.max(0, Math.min(1, editSettings.vignette / 100));
+  const safeVignette =
+    typeof editSettings.vignette === "number" && Number.isFinite(editSettings.vignette)
+      ? editSettings.vignette
+      : 0;
+  const vignetteOpacity = Math.max(0, Math.min(1, safeVignette / 100));
 
   if (sourceType === "local") {
     if (!localUrl) {
@@ -1076,17 +1142,12 @@ export const YouTubeScenePlayer = memo(
               voiceAttachedRef.current = true;
               applyVoiceEffectsToVideoElement(e.currentTarget, voiceSettingsRef.current, true);
             }
-            if (!e.currentTarget.preservesPitch) {
-              e.currentTarget.preservesPitch = true;
-            }
             const nextRate = getEffectivePlaybackSpeed(
               "local",
               editSettingsRef.current.playbackSpeed,
               voiceSettingsRef.current.speed
             );
-            if (Math.abs(e.currentTarget.playbackRate - nextRate) > 0.001) {
-              e.currentTarget.playbackRate = nextRate;
-            }
+            applySafePlaybackRate(e.currentTarget, nextRate);
             if (!isPlayingRef.current) {
               onPlayingChangeRef.current(true);
             }

@@ -28,7 +28,15 @@ export function getEffectivePlaybackSpeed(
   rawSpeed: number,
   extraSpeed = 1
 ): number {
-  const combined = (rawSpeed || 1) * (extraSpeed || 1);
+  const safeRaw =
+    typeof rawSpeed === "number" && Number.isFinite(rawSpeed) && rawSpeed > 0
+      ? rawSpeed
+      : 1;
+  const safeExtra =
+    typeof extraSpeed === "number" && Number.isFinite(extraSpeed) && extraSpeed > 0
+      ? extraSpeed
+      : 1;
+  const combined = safeRaw * safeExtra;
   const clamped = Math.max(0.25, Math.min(2.5, combined));
   if (sourceType === "local") return clamped;
   let nearest = 1;

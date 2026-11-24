@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+const useIsomorphicLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
 import {
   ChevronDown,
   ChevronUp,
@@ -663,9 +664,18 @@ export function ProjectTimelineEditor({
     frozen: frozenTrackTime !== null,
   };
 
+  useIsomorphicLayoutEffect(() => {
+    if (timeReadoutRef.current) {
+      const safeCut = typeof cutTime === "number" && Number.isFinite(cutTime) ? Math.max(0, cutTime) : 0;
+      timeReadoutRef.current.textContent = formatTimePrecise(safeCut);
+    }
+  }, [cutTime, project?.scenes.length]);
+
   useEffect(() => {
     if (!subscribeCutTime) return;
-    return subscribeCutTime((liveSec) => {
+    return subscribeCutTime((rawLiveSec) => {
+      const liveSec =
+        typeof rawLiveSec === "number" && Number.isFinite(rawLiveSec) ? Math.max(0, rawLiveSec) : 0;
       const cfg = timelineTransformConfigRef.current;
       if (cfg.frozen || dragStateRef.current || liveScrubCutRef.current !== null) return;
       if (trackSlideRef.current) {
@@ -1404,7 +1414,7 @@ export function ProjectTimelineEditor({
           </button>
 
           <span className="text-xs font-mono-tabular text-[#0c1026] dark:text-[#f3f5fc] shrink-0">
-            <span ref={timeReadoutRef}>{formatTimePrecise(cutTime)}</span>
+            <span ref={timeReadoutRef} />
             <span className="text-[#4d597d] dark:text-[#919ec4]">
               {" "}
               / {formatTimePrecise(totalCutDuration)}

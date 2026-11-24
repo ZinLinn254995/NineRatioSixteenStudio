@@ -44,6 +44,7 @@ import { DEFAULT_VOICE_SETTINGS } from "./utils/voicePresets";
 import { DEFAULT_VIDEO_EDIT } from "./utils/videoFilters";
 import { resumeAllVoiceContexts } from "./utils/webAudioVoice";
 import {
+  formatReadableApiError,
   readStreamingProcessResponse,
   safeReadJson,
   uploadBlobInChunks,
@@ -64,6 +65,8 @@ import {
   listSavedProjects,
   materializeReadableBlob,
   renameSavedProject,
+  sanitizeEditSettings,
+  sanitizeVoiceSettings,
   saveOfflineProject,
 } from "./utils/offlineProjects";
 
@@ -135,6 +138,7 @@ export default function App() {
   const [stagePreviewScale, setStagePreviewScale] = useState<number>(DEFAULT_STAGE_PREVIEW_SCALE);
 
   const activeRunIdRef = useRef(0);
+  const lastGenActionRef = useRef<{ type: "all" } | { type: "clip"; sceneId: string } | null>(null);
   const generateAbortRef = useRef<AbortController | null>(null);
   const resyncAbortRef = useRef<AbortController | null>(null);
   const retranslateAbortRef = useRef<AbortController | null>(null);
@@ -163,11 +167,12 @@ export default function App() {
   const getLiveCutTime = useCallback(() => liveCutTimeRef.current, []);
 
   const publishCutTime = useCallback((sec: number, syncReactNow = true) => {
-    liveCutTimeRef.current = sec;
-    cutTimeListenersRef.current.forEach((fn) => fn(sec));
+    const safeSec = typeof sec === "number" && Number.isFinite(sec) ? Math.max(0, sec) : 0;
+    liveCutTimeRef.current = safeSec;
+    cutTimeListenersRef.current.forEach((fn) => fn(safeSec));
     if (syncReactNow) {
       lastReactCutSyncAtRef.current = performance.now();
-      setCutTime(sec);
+      setCutTime(safeSec);
     }
   }, []);
 
@@ -816,6 +821,7 @@ export default function App() {
     const targetMedia = localMedia ?? youtubeMedia;
     if (!targetMedia || selectedScenes.length === 0) return;
 
+    lastGenActionRef.current = { type: "all" };
     const runId = ++activeRunIdRef.current;
     generateAbortRef.current?.abort();
     const controller = new AbortController();
@@ -1034,7 +1040,7 @@ export default function App() {
         return;
       }
       if (activeRunIdRef.current === runId) {
-        setProcessError(err instanceof Error ? err.message : "Failed to transcribe scenes.");
+        setProcessError(formatReadableApiError(err, "Failed to transcribe scenes."));
       }
     } finally {
       if (generateAbortRef.current === controller) {
@@ -1055,6 +1061,7 @@ export default function App() {
     if (targetIdx === -1) return;
     const targetScene = selectedScenes[targetIdx];
 
+    lastGenActionRef.current = { type: "clip", sceneId };
     const runId = ++activeRunIdRef.current;
     generateAbortRef.current?.abort();
     const controller = new AbortController();
@@ -1291,9 +1298,10 @@ export default function App() {
       }
       if (activeRunIdRef.current === runId) {
         setProcessError(
-          err instanceof Error
-            ? `Clip ${targetIdx + 1}: ${err.message}`
-            : `Failed to generate subtitles for Clip ${targetIdx + 1}.`
+          `Clip ${targetIdx + 1}: ${formatReadableApiError(
+            err,
+            `Failed to generate subtitles for Clip ${targetIdx + 1}.`
+          )}`
         );
       }
     } finally {
@@ -1321,7 +1329,9 @@ export default function App() {
   };
 
   const handlePlayerTimeUpdate = useCallback(
-    (newCutTime: number) => {
+    (rawCutTime: number) => {
+      const newCutTime =
+        typeof rawCutTime === "number" && Number.isFinite(rawCutTime) ? Math.max(0, rawCutTime) : 0;
       const activeLoopId = loopingSubIdRef.current;
       if (activeLoopId) {
         const loopSub = projectRef.current?.subtitles.find((s) => s.id === activeLoopId);
@@ -2168,7 +2178,7 @@ export default function App() {
         return;
       }
       setSubtitleRegenError(
-        err instanceof Error ? err.message : "Failed to regenerate subtitle with AI."
+        formatReadableApiError(err, "Failed to regenerate subtitle with AI.")
       );
     } finally {
       if (regenAbortMapRef.current.get(id) === controller) {
@@ -2261,7 +2271,7 @@ export default function App() {
         return;
       }
       setSubtitleRegenError(
-        err instanceof Error ? err.message : "Failed to re-translate subtitles."
+        formatReadableApiError(err, "Failed to re-translate subtitles.")
       );
     } finally {
       if (retranslateAbortRef.current === controller) {
@@ -2540,7 +2550,7 @@ export default function App() {
         return;
       }
       setSubtitleRegenError(
-        err instanceof Error ? err.message : "Failed to auto-sync subtitle timings with AI."
+        formatReadableApiError(err, "Failed to auto-sync subtitle timings with AI.")
       );
     } finally {
       if (resyncAbortRef.current === controller) {
@@ -2836,8 +2846,8 @@ export default function App() {
 
     setActiveSavedId(record.id);
     setSelectedScenes(record.selectedScenes.map((s) => ({ ...s })));
-    setVoiceSettings({ ...DEFAULT_VOICE_SETTINGS, ...record.voiceSettings });
-    setVideoEdit({ ...DEFAULT_VIDEO_EDIT, ...record.editSettings });
+    setVoiceSettings(sanitizeVoiceSettings(record.voiceSettings));
+    setVideoEdit(sanitizeEditSettings(record.editSettings));
     const openedMedia: ActiveMediaSource = {
       sourceType: record.sourceType,
       videoId: record.videoId,
@@ -3302,7 +3312,7 @@ export default function App() {
           const showStage = activeTab === "studio";
           const useDesktopStudio = showStage && isDesktop;
           const renderInlineStageInSidebar = showStage && !isDesktop;
-          const stageWidthPct = 30 + stagePreviewScale * 14;
+          const stageWidthPct = Math.min(58, Math.max(24, 30 + stagePreviewScale * 14));
 
           const stageNode = showStage ? (
             <Stage9x16
@@ -3451,8 +3461,36 @@ export default function App() {
           const alertsNode = hasAlerts ? (
             <div className="px-3.5 py-2 border-b border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#070814] space-y-2 shrink-0">
               {processError && (
-                <div className="px-3 py-2 rounded-md border border-red-200 dark:border-red-900/70 bg-red-50/80 dark:bg-red-950/35 text-xs text-red-700 dark:text-red-300">
-                  {processError}
+                <div className="px-3 py-2 rounded-md border border-red-200 dark:border-red-900/70 bg-red-50/80 dark:bg-red-950/35 flex items-start justify-between gap-3 text-xs text-red-700 dark:text-red-300">
+                  <span className="min-w-0 break-words leading-relaxed">{processError}</span>
+                  <div className="flex items-center gap-2 shrink-0 pt-0.5">
+                    {lastGenActionRef.current &&
+                      selectedScenes.length > 0 &&
+                      Boolean(localMedia ?? youtubeMedia) &&
+                      !isProcessing && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const act = lastGenActionRef.current;
+                            if (act?.type === "clip") {
+                              void handleGenerateSingleClip(act.sceneId);
+                            } else {
+                              void handleGenerateSubtitles();
+                            }
+                          }}
+                          className="text-[11px] font-semibold text-red-700 dark:text-red-200 hover:underline cursor-pointer"
+                        >
+                          Retry
+                        </button>
+                      )}
+                    <button
+                      type="button"
+                      onClick={() => setProcessError(null)}
+                      className="text-[11px] font-medium text-red-600/80 dark:text-red-300/80 hover:underline cursor-pointer"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
                 </div>
               )}
 
@@ -3478,7 +3516,7 @@ export default function App() {
                 <div className="flex-1 min-h-0 flex flex-row overflow-hidden">
                   <section
                     style={{ width: `${stageWidthPct.toFixed(2)}%` }}
-                    className="shrink-0 min-w-[290px] max-w-[540px] flex items-center justify-center min-h-0 bg-[#dfe5f4] dark:bg-[#04050e] p-3 lg:p-4 overflow-hidden"
+                    className="shrink-0 min-w-[260px] max-w-[720px] flex items-center justify-center min-h-0 bg-[#dfe5f4] dark:bg-[#04050e] p-3 lg:p-4 overflow-hidden"
                   >
                     {stageNode}
                   </section>

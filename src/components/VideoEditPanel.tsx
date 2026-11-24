@@ -114,7 +114,7 @@ export function getVideoEditDirtyMap(
 const SPEED_PRESETS = [0.5, 0.75, 1, 1.25, 1.5, 2];
 
 function formatSpeedDuration(sec: number): string {
-  const s = Math.max(0, sec);
+  const s = typeof sec === "number" && Number.isFinite(sec) ? Math.max(0, sec) : 0;
   const mins = Math.floor(s / 60);
   const rem = s - mins * 60;
   if (mins > 0) {
@@ -165,15 +165,34 @@ export function VideoEditPanel({
     });
   };
 
+  const safePlaybackSpeed =
+    typeof settings.playbackSpeed === "number" &&
+    Number.isFinite(settings.playbackSpeed) &&
+    settings.playbackSpeed > 0
+      ? settings.playbackSpeed
+      : DEFAULT_VIDEO_EDIT.playbackSpeed;
+  const safeZoom =
+    typeof settings.zoom === "number" && Number.isFinite(settings.zoom) && settings.zoom > 0
+      ? settings.zoom
+      : DEFAULT_VIDEO_EDIT.zoom;
+  const safeSourceDurationSec =
+    typeof sourceDurationSec === "number" && Number.isFinite(sourceDurationSec) && sourceDurationSec > 0
+      ? sourceDurationSec
+      : 0;
+
   const { visualDirty, audioDirty, isModified } = getVideoEditDirtyMap(settings, voiceSettings);
   const isYoutube = sourceType === "youtube";
-  const effectiveSpeed = getEffectivePlaybackSpeed(
+  const rawEffectiveSpeed = getEffectivePlaybackSpeed(
     sourceType,
-    settings.playbackSpeed,
+    safePlaybackSpeed,
     voiceSettings.speed
   );
+  const effectiveSpeed =
+    typeof rawEffectiveSpeed === "number" && Number.isFinite(rawEffectiveSpeed) && rawEffectiveSpeed > 0
+      ? rawEffectiveSpeed
+      : 1;
   const scaledDurationSec =
-    sourceDurationSec && sourceDurationSec > 0 ? sourceDurationSec / effectiveSpeed : null;
+    safeSourceDurationSec > 0 ? safeSourceDurationSec / effectiveSpeed : null;
 
   const allSections: {
     id: EditSectionId;
@@ -278,11 +297,11 @@ export function VideoEditPanel({
               </div>
               <div className="flex items-center gap-1.5 text-xs font-mono-tabular">
                 <span className="text-[#0c1026] dark:text-[#f3f5fc] font-semibold">
-                  {isYoutube ? `${effectiveSpeed}x` : `${settings.playbackSpeed.toFixed(2)}x`}
+                  {isYoutube ? `${effectiveSpeed}x` : `${safePlaybackSpeed.toFixed(2)}x`}
                 </span>
-                {scaledDurationSec !== null && sourceDurationSec && (
+                {scaledDurationSec !== null && safeSourceDurationSec > 0 && (
                   <span className="text-[#4d597d] dark:text-[#919ec4]">
-                    ({formatSpeedDuration(sourceDurationSec)} →{" "}
+                    ({formatSpeedDuration(safeSourceDurationSec)} →{" "}
                     <span className="text-[#0c1026] dark:text-[#f3f5fc] font-medium">
                       {formatSpeedDuration(scaledDurationSec)}
                     </span>
@@ -294,7 +313,7 @@ export function VideoEditPanel({
 
             <div className="grid grid-cols-6 gap-1">
               {SPEED_PRESETS.map((presetSpeed) => {
-                const active = Math.abs(settings.playbackSpeed - presetSpeed) < 0.01;
+                const active = Math.abs(safePlaybackSpeed - presetSpeed) < 0.01;
                 return (
                   <button
                     key={presetSpeed}
@@ -317,8 +336,13 @@ export function VideoEditPanel({
               min={0.5}
               max={2}
               step={isYoutube ? 0.25 : 0.05}
-              value={settings.playbackSpeed}
-              onChange={(e) => updateField("playbackSpeed", parseFloat(e.target.value))}
+              value={Math.max(0.5, Math.min(2, safePlaybackSpeed))}
+              onChange={(e) => {
+                const next = parseFloat(e.target.value);
+                if (Number.isFinite(next)) {
+                  updateField("playbackSpeed", next);
+                }
+              }}
               aria-label="Global video playback speed"
               className="w-full h-1.5 rounded-full appearance-none bg-[#d2dcf0] dark:bg-[#21284c] cursor-pointer"
             />
@@ -362,7 +386,7 @@ export function VideoEditPanel({
               <button
                 type="button"
                 onClick={() =>
-                  updateField("zoom", Math.max(0.5, Number((settings.zoom - 0.15).toFixed(2))))
+                  updateField("zoom", Math.max(0.5, Number((safeZoom - 0.15).toFixed(2))))
                 }
                 title="Zoom Out"
                 className="h-7 px-1 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center justify-center gap-1 cursor-pointer whitespace-nowrap transition-colors"
@@ -374,7 +398,7 @@ export function VideoEditPanel({
               <button
                 type="button"
                 onClick={() =>
-                  updateField("zoom", Math.min(2.5, Number((settings.zoom + 0.15).toFixed(2))))
+                  updateField("zoom", Math.min(2.5, Number((safeZoom + 0.15).toFixed(2))))
                 }
                 title="Zoom In"
                 className="h-7 px-1 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center justify-center gap-1 cursor-pointer whitespace-nowrap transition-colors"
@@ -443,7 +467,7 @@ export function VideoEditPanel({
                 <div className="flex items-center justify-between text-xs">
                   <span className="text-[#4d597d] dark:text-[#919ec4]">Zoom</span>
                   <span className="font-mono-tabular text-[#0c1026] dark:text-[#f3f5fc]">
-                    {settings.zoom.toFixed(2)}x
+                    {safeZoom.toFixed(2)}x
                   </span>
                 </div>
                 <input
@@ -451,8 +475,11 @@ export function VideoEditPanel({
                   min={0.5}
                   max={2.5}
                   step={0.05}
-                  value={settings.zoom}
-                  onChange={(e) => updateField("zoom", parseFloat(e.target.value))}
+                  value={Math.max(0.5, Math.min(2.5, safeZoom))}
+                  onChange={(e) => {
+                    const next = parseFloat(e.target.value);
+                    if (Number.isFinite(next)) updateField("zoom", next);
+                  }}
                   aria-label="Video zoom"
                   className="w-full h-1.5 rounded-full appearance-none bg-[#d2dcf0] dark:bg-[#21284c] cursor-pointer"
                 />
@@ -663,8 +690,11 @@ export function VideoEditPanel({
                   min={0}
                   max={8}
                   step={0.5}
-                  value={settings.blurPx}
-                  onChange={(e) => updateField("blurPx", parseFloat(e.target.value))}
+                  value={Number.isFinite(settings.blurPx) ? settings.blurPx : 0}
+                  onChange={(e) => {
+                    const next = parseFloat(e.target.value);
+                    if (Number.isFinite(next)) updateField("blurPx", next);
+                  }}
                   aria-label="Blur"
                   className="w-full h-1.5 rounded-full appearance-none bg-[#d2dcf0] dark:bg-[#21284c] cursor-pointer"
                 />

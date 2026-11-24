@@ -116,26 +116,41 @@ export function VoiceChangerPanel({
         </div>
 
         {/* Speed */}
-        <div className="space-y-1">
-          <div className="flex items-center justify-between text-xs">
-            <span className="text-[#4d597d] dark:text-[#919ec4]">Voice Speed</span>
-            <span className="font-mono-tabular text-[#0c1026] dark:text-[#f3f5fc]">
-              {isYoutube
-                ? `${getEffectivePlaybackSpeed("youtube", settings.speed)}x`
-                : `${settings.speed.toFixed(2)}x`}
-            </span>
-          </div>
-          <input
-            type="range"
-            min={0.75}
-            max={1.4}
-            step={isYoutube ? 0.25 : 0.01}
-            value={settings.speed}
-            onChange={(e) => updateField("speed", parseFloat(e.target.value))}
-            aria-label="Voice speed"
-            className="w-full h-1.5 rounded-full appearance-none bg-[#d2dcf0] dark:bg-[#21284c] cursor-pointer"
-          />
-        </div>
+        {(() => {
+          const safeSpeed =
+            typeof settings.speed === "number" &&
+            Number.isFinite(settings.speed) &&
+            settings.speed > 0
+              ? settings.speed
+              : DEFAULT_VOICE_SETTINGS.speed;
+          return (
+            <div className="space-y-1">
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-[#4d597d] dark:text-[#919ec4]">Voice Speed</span>
+                <span className="font-mono-tabular text-[#0c1026] dark:text-[#f3f5fc]">
+                  {isYoutube
+                    ? `${getEffectivePlaybackSpeed("youtube", safeSpeed)}x`
+                    : `${safeSpeed.toFixed(2)}x`}
+                </span>
+              </div>
+              <input
+                type="range"
+                min={0.75}
+                max={1.4}
+                step={isYoutube ? 0.25 : 0.01}
+                value={Math.max(0.75, Math.min(1.4, safeSpeed))}
+                onChange={(e) => {
+                  const next = parseFloat(e.target.value);
+                  if (Number.isFinite(next)) {
+                    updateField("speed", next);
+                  }
+                }}
+                aria-label="Voice speed"
+                className="w-full h-1.5 rounded-full appearance-none bg-[#d2dcf0] dark:bg-[#21284c] cursor-pointer"
+              />
+            </div>
+          );
+        })()}
 
         {/* Pitch, Tone, Echo, Robot */}
         <div className={`grid grid-cols-2 gap-x-4 gap-y-2.5 ${isYoutube ? "opacity-45" : ""}`}>

@@ -29,6 +29,62 @@ export async function safeReadJson<T = Record<string, unknown>>(resp: Response):
   throw new Error(`Upload/processing request failed (${hint}). Please try again.`);
 }
 
+export function formatReadableApiError(
+  raw: unknown,
+  fallback = "Processing failed. Please try again."
+): string {
+  const rawStr = raw instanceof Error ? raw.message : String(raw || "");
+  const trimmed = rawStr.trim();
+  if (!trimmed) return fallback;
+
+  let msg = trimmed;
+  let code = 0;
+  let statusText = "";
+
+  if (trimmed.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(trimmed) as {
+        error?: { code?: number; message?: string; status?: string } | string;
+        code?: number;
+        message?: string;
+        status?: string;
+      };
+      const inner =
+        parsed.error && typeof parsed.error === "object" ? parsed.error : parsed;
+      if (typeof inner.code === "number") code = inner.code;
+      if (typeof inner.status === "string") statusText = inner.status;
+      if (typeof inner.message === "string" && inner.message.trim()) {
+        msg = inner.message.trim();
+      } else if (typeof parsed.error === "string" && parsed.error.trim()) {
+        msg = parsed.error.trim();
+      }
+    } catch {
+      // Keep trimmed text
+    }
+  }
+
+  if (
+    code === 503 ||
+    /503|UNAVAILABLE|high demand|overloaded/i.test(`${statusText} ${msg}`)
+  ) {
+    return "Gemini AI is temporarily experiencing high demand (503). Please wait a few seconds and try again.";
+  }
+  if (
+    code === 429 ||
+    /429|RESOURCE_EXHAUSTED|rate limit|quota/i.test(`${statusText} ${msg}`)
+  ) {
+    return "AI rate limit or quota reached (429). Please wait a moment and try again, or check your API key in Settings > Secrets.";
+  }
+  if (
+    code === 403 ||
+    /PERMISSION_DENIED|API_KEY_INVALID|API key not valid/i.test(`${statusText} ${msg}`)
+  ) {
+    return "Gemini API key is invalid or lacks permission. Please check your API key in Settings > Secrets.";
+  }
+
+  return msg;
+}
+
 export async function readStreamingProcessResponse<T extends { error?: string }>(
   resp: Response,
   onProgress?: (ev: SubtitleGenerationProgress) => void
@@ -37,7 +93,9 @@ export async function readStreamingProcessResponse<T extends { error?: string }>
   if (!contentType.includes("application/x-ndjson") || !resp.body) {
     const data = await safeReadJson<T>(resp);
     if (!resp.ok) {
-      throw new Error(data.error || `Processing failed (HTTP ${resp.status}).`);
+      throw new Error(
+        formatReadableApiError(data.error, `Processing failed (HTTP ${resp.status}).`)
+      );
     }
     return data;
   }
@@ -66,7 +124,7 @@ export async function readStreamingProcessResponse<T extends { error?: string }>
         totalClips: typeof parsed.totalClips === "number" ? parsed.totalClips : undefined,
       });
     } else if (parsed.type === "error") {
-      streamError = String(parsed.error || "Processing failed.");
+      streamError = formatReadableApiError(parsed.error, "Processing failed.");
     } else if (parsed.type === "result") {
       finalResult = parsed.data as T;
     }

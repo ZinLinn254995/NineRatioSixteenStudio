@@ -146,32 +146,46 @@ export const VIDEO_FILTER_PRESETS: VideoFilterPresetOption[] = [
   },
 ];
 
+const numOr = (v: unknown, fb: number): number =>
+  typeof v === "number" && Number.isFinite(v) ? v : fb;
+
 export function buildCssFilterString(edit: VideoEditSettings): string {
   const parts: string[] = [];
-  if (edit.brightness !== 100) parts.push(`brightness(${edit.brightness}%)`);
-  if (edit.contrast !== 100) parts.push(`contrast(${edit.contrast}%)`);
-  if (edit.saturation !== 100) parts.push(`saturate(${edit.saturation}%)`);
-  if (edit.hueDeg !== 0) parts.push(`hue-rotate(${edit.hueDeg}deg)`);
-  if (edit.sepia > 0) parts.push(`sepia(${edit.sepia}%)`);
-  if (edit.grayscale > 0) parts.push(`grayscale(${edit.grayscale}%)`);
-  if (edit.blurPx > 0) parts.push(`blur(${edit.blurPx}px)`);
+  const brightness = numOr(edit.brightness, 100);
+  const contrast = numOr(edit.contrast, 100);
+  const saturation = numOr(edit.saturation, 100);
+  const hueDeg = numOr(edit.hueDeg, 0);
+  const sepia = numOr(edit.sepia, 0);
+  const grayscale = numOr(edit.grayscale, 0);
+  const blurPx = numOr(edit.blurPx, 0);
+  if (brightness !== 100) parts.push(`brightness(${brightness}%)`);
+  if (contrast !== 100) parts.push(`contrast(${contrast}%)`);
+  if (saturation !== 100) parts.push(`saturate(${saturation}%)`);
+  if (hueDeg !== 0) parts.push(`hue-rotate(${hueDeg}deg)`);
+  if (sepia > 0) parts.push(`sepia(${sepia}%)`);
+  if (grayscale > 0) parts.push(`grayscale(${grayscale}%)`);
+  if (blurPx > 0) parts.push(`blur(${blurPx}px)`);
   return parts.length > 0 ? parts.join(" ") : "none";
 }
 
 export function buildCssTransformString(edit: VideoEditSettings): string {
+  const zoom = numOr(edit.zoom, 1);
+  const panX = numOr(edit.panX, 0);
+  const panY = numOr(edit.panY, 0);
+  const rotateDeg = numOr(edit.rotateDeg, 0);
   if (
-    edit.zoom === 1 &&
-    edit.panX === 0 &&
-    edit.panY === 0 &&
-    edit.rotateDeg === 0 &&
+    zoom === 1 &&
+    panX === 0 &&
+    panY === 0 &&
+    rotateDeg === 0 &&
     !edit.flipH &&
     !edit.flipV
   ) {
     return "none";
   }
-  const sx = edit.zoom * (edit.flipH ? -1 : 1);
-  const sy = edit.zoom * (edit.flipV ? -1 : 1);
-  return `translate(${edit.panX}%, ${edit.panY}%) scale(${sx}, ${sy}) rotate(${edit.rotateDeg}deg)`;
+  const sx = zoom * (edit.flipH ? -1 : 1);
+  const sy = zoom * (edit.flipV ? -1 : 1);
+  return `translate(${panX}%, ${panY}%) scale(${sx}, ${sy}) rotate(${rotateDeg}deg)`;
 }
 
 const ADV_TILE_SIZE = 128;

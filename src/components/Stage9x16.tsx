@@ -1,13 +1,15 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+const useIsomorphicLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
 import { Pause, Play, Volume2, VolumeX } from "lucide-react";
 import type { SubtitleItem, VideoEditSettings, VideoProject, VoiceSettings } from "../types";
 import { YouTubeScenePlayer, type YouTubeScenePlayerHandle } from "./YouTubeScenePlayer";
 import { getEffectivePlaybackSpeed } from "../utils/voicePresets";
 import { findActiveSubtitle, getScrollAnchorSubtitle } from "../utils/projectTimeline";
+import { AppErrorBoundary } from "./AppErrorBoundary";
 
 function getActiveWordHighlightKey(sub: SubtitleItem | undefined, highlightTime: number): string {
-  if (!sub) return "";
-  const localElapsed = Math.max(0, highlightTime - sub.startTime);
+  if (!sub || !Array.isArray(sub.words)) return "";
+  const localElapsed = Math.max(0, highlightTime - (Number.isFinite(sub.startTime) ? sub.startTime : 0));
   for (let wi = 0; wi < sub.words.length; wi++) {
     const word = sub.words[wi];
     const isLast = wi === sub.words.length - 1;
@@ -20,6 +22,35 @@ function getActiveWordHighlightKey(sub: SubtitleItem | undefined, highlightTime:
 }
 
 export const DEFAULT_STAGE_PREVIEW_SCALE = 1;
+export const MAX_STAGE_PREVIEW_SCALE = 2;
+
+export function scaleToBoundsValue(
+  scale: number,
+  minVal: number,
+  defaultVal: number,
+  maxVal: number
+): number {
+  const s = Math.max(0, Math.min(MAX_STAGE_PREVIEW_SCALE, scale));
+  if (s <= 1) {
+    return Math.round(minVal + s * (defaultVal - minVal));
+  }
+  return Math.round(defaultVal + (s - 1) * (maxVal - defaultVal));
+}
+
+export function boundsValueToScale(
+  val: number,
+  minVal: number,
+  defaultVal: number,
+  maxVal: number
+): number {
+  const clamped = Math.max(minVal, Math.min(maxVal, val));
+  if (clamped <= defaultVal) {
+    const lowerSpan = Math.max(1, defaultVal - minVal);
+    return Math.max(0, Math.min(1, (clamped - minVal) / lowerSpan));
+  }
+  const upperSpan = Math.max(1, maxVal - defaultVal);
+  return Math.max(1, Math.min(MAX_STAGE_PREVIEW_SCALE, 1 + (clamped - defaultVal) / upperSpan));
+}
 
 export function getCompactStageBounds(outerWidth: number, viewportHeight: number) {
   const stageHorizontalPad = 20; // px-2.5 (10px each side)
@@ -31,21 +62,24 @@ export function getCompactStageBounds(outerWidth: number, viewportHeight: number
     Math.min(availWidth, Math.floor((maxSafeHeight * 16) / 9))
   );
   const minWidthPx = Math.max(
-    176,
-    Math.min(maxWidthPx - 24, Math.round(maxWidthPx * 0.44))
+    140,
+    Math.min(maxWidthPx - 48, Math.round(maxWidthPx * 0.4))
   );
-  const spanWidthPx = Math.max(1, maxWidthPx - minWidthPx);
+  const defaultWidthPx = Math.max(
+    minWidthPx + 24,
+    Math.min(maxWidthPx - 16, Math.round(maxWidthPx * 0.72))
+  );
   const minHeightPx = Math.round((minWidthPx * 9) / 16);
+  const defaultHeightPx = Math.round((defaultWidthPx * 9) / 16);
   const maxHeightPx = Math.round((maxWidthPx * 9) / 16);
-  const spanHeightPx = Math.max(1, maxHeightPx - minHeightPx);
   return {
     availWidth,
     minWidthPx,
+    defaultWidthPx,
     maxWidthPx,
-    spanWidthPx,
     minHeightPx,
+    defaultHeightPx,
     maxHeightPx,
-    spanHeightPx,
   };
 }
 
@@ -72,7 +106,8 @@ interface Stage9x16Props {
 }
 
 function formatSec(sec: number): string {
-  const s = Math.max(0, Math.floor(sec));
+  const safeSec = typeof sec === "number" && Number.isFinite(sec) ? sec : 0;
+  const s = Math.max(0, Math.floor(safeSec));
   const m = Math.floor(s / 60);
   const r = s % 60;
   return `${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}`;
@@ -116,14 +151,14 @@ export function Stage9x16({
   const dragCleanupRef = useRef<(() => void) | null>(null);
   const resizeMetricsRef = useRef<{
     minHeightPx: number;
+    defaultHeightPx: number;
     maxHeightPx: number;
-    spanPx: number;
     isCompactLayout: boolean;
     onChangePreviewScale?: (scale: number) => void;
   }>({
-    minHeightPx: 150,
+    minHeightPx: 160,
+    defaultHeightPx: 320,
     maxHeightPx: 480,
-    spanPx: 330,
     isCompactLayout: false,
     onChangePreviewScale: undefined,
   });
@@ -175,19 +210,29 @@ export function Stage9x16({
     return () => ro.disconnect();
   }, []);
 
-  const totalDuration = project?.targetDurationSec || 90;
-  const effectiveSpeed = project
+  const safeCutTime = typeof cutTime === "number" && Number.isFinite(cutTime) ? Math.max(0, cutTime) : 0;
+  const totalDuration =
+    typeof project?.targetDurationSec === "number" &&
+    Number.isFinite(project.targetDurationSec) &&
+    project.targetDurationSec > 0
+      ? project.targetDurationSec
+      : 90;
+  const rawEffectiveSpeed = project
     ? getEffectivePlaybackSpeed(
         project.sourceType,
         editSettings.playbackSpeed,
         voiceSettings.speed
       )
     : 1;
+  const effectiveSpeed =
+    typeof rawEffectiveSpeed === "number" && Number.isFinite(rawEffectiveSpeed) && rawEffectiveSpeed > 0
+      ? rawEffectiveSpeed
+      : 1;
   const displayTotalDuration = totalDuration / effectiveSpeed;
   const leadSec = project ? (project.sourceType === "youtube" ? 0.22 : 0.12) : 0;
-  const subtitles = project?.subtitles ?? [];
+  const subtitles = Array.isArray(project?.subtitles) ? project.subtitles : [];
 
-  const [subClockTime, setSubClockTime] = useState<number>(cutTime);
+  const [subClockTime, setSubClockTime] = useState<number>(safeCutTime);
   const wordKeyRef = useRef<string>("");
   const lastDisplaySecRef = useRef<number>(-1);
   const subtitlesRef = useRef(subtitles);
@@ -203,39 +248,56 @@ export function Stage9x16({
   const leadSecRef = useRef(leadSec);
   leadSecRef.current = leadSec;
 
-  // Keep local Stage clock and DOM scrubber synced whenever paused, reset, or explicitly seeked
+  // Keep local Stage clock and DOM scrubber synced whenever paused, reset, seeked, or speed changes
   const sceneCount = project?.scenes.length ?? 0;
-  useEffect(() => {
-    if (!isPlaying || !subscribeCutTime) {
-      setSubClockTime(cutTime);
-      const hl = Math.min(totalDuration, cutTime);
-      wordKeyRef.current = getActiveWordHighlightKey(
-        findActiveSubtitle(subtitles, hl),
-        hl
-      );
-      lastDisplaySecRef.current = Math.floor(cutTime / effectiveSpeed);
-      if (scrubberInputRef.current) {
-        scrubberInputRef.current.value = String(cutTime);
-      }
-      if (pctTextRef.current) {
-        const pct = totalDuration > 0 ? Math.min(100, (cutTime / totalDuration) * 100) : 0;
-        pctTextRef.current.textContent = `${Math.round(pct)}%`;
-      }
-      if (timeTextRef.current) {
-        const speedSuffix =
-          Math.abs(effectiveSpeed - 1) > 0.01
-            ? ` (${effectiveSpeed.toFixed(2).replace(/\.00$/, "")}x)`
-            : "";
-        timeTextRef.current.textContent = `${formatSec(cutTime / effectiveSpeed)} / ${formatSec(displayTotalDuration)}${speedSuffix}`;
-      }
+  const hasTransportBar = Boolean(project && project.scenes.length > 0);
+  useIsomorphicLayoutEffect(() => {
+    const syncTime =
+      isPlaying && getLiveCutTime
+        ? Math.max(0, Number.isFinite(getLiveCutTime()) ? getLiveCutTime() : safeCutTime)
+        : safeCutTime;
+    lastDisplaySecRef.current = Math.floor(syncTime / effectiveSpeed);
+    if (scrubberInputRef.current && (!isPlaying || !subscribeCutTime)) {
+      scrubberInputRef.current.value = String(syncTime);
+    }
+    if (pctTextRef.current) {
+      const pct = totalDuration > 0 ? Math.min(100, (syncTime / totalDuration) * 100) : 0;
+      pctTextRef.current.textContent = `${Math.round(pct)}%`;
+    }
+    if (timeTextRef.current) {
+      const speedSuffix =
+        Math.abs(effectiveSpeed - 1) > 0.01
+          ? ` (${effectiveSpeed.toFixed(2).replace(/\.00$/, "")}x)`
+          : "";
+      timeTextRef.current.textContent = `${formatSec(syncTime / effectiveSpeed)} / ${formatSec(displayTotalDuration)}${speedSuffix}`;
     }
   }, [
-    cutTime,
+    safeCutTime,
     isPlaying,
     seekNonce,
     totalDuration,
     effectiveSpeed,
     displayTotalDuration,
+    sceneCount,
+    hasTransportBar,
+    subscribeCutTime,
+    getLiveCutTime,
+  ]);
+
+  useEffect(() => {
+    if (!isPlaying || !subscribeCutTime) {
+      setSubClockTime(safeCutTime);
+      const hl = Math.min(totalDuration, safeCutTime);
+      wordKeyRef.current = getActiveWordHighlightKey(
+        findActiveSubtitle(subtitles, hl),
+        hl
+      );
+    }
+  }, [
+    safeCutTime,
+    isPlaying,
+    seekNonce,
+    totalDuration,
     subtitles,
     sceneCount,
     subscribeCutTime,
@@ -244,9 +306,11 @@ export function Stage9x16({
   // Subscribe to 60fps clock: update scrubber & timer via DOM refs, and only re-render subtitle cards on word/card transitions
   useEffect(() => {
     if (!subscribeCutTime) return;
-    return subscribeCutTime((liveSec) => {
+    return subscribeCutTime((rawLiveSec) => {
+      const liveSec =
+        typeof rawLiveSec === "number" && Number.isFinite(rawLiveSec) ? Math.max(0, rawLiveSec) : 0;
       const totDur = totalDurationRef.current;
-      const spd = effectiveSpeedRef.current;
+      const spd = effectiveSpeedRef.current > 0 ? effectiveSpeedRef.current : 1;
       const totDisp = displayTotalDurationRef.current;
 
       if (scrubberInputRef.current) {
@@ -278,7 +342,9 @@ export function Stage9x16({
     });
   }, [subscribeCutTime]);
 
-  const activeTimeForDisplay = subscribeCutTime ? subClockTime : cutTime;
+  const rawActiveTime = subscribeCutTime ? subClockTime : safeCutTime;
+  const activeTimeForDisplay =
+    typeof rawActiveTime === "number" && Number.isFinite(rawActiveTime) ? Math.max(0, rawActiveTime) : 0;
   const highlightTime =
     isPlaying && project
       ? Math.min(totalDuration, activeTimeForDisplay + leadSec)
@@ -296,49 +362,69 @@ export function Stage9x16({
 
     const cHeight = container.clientHeight;
     const targetTop = el.offsetTop + el.clientHeight * 0.5 - cHeight * 0.42;
-    container.scrollTo({
-      top: Math.max(0, targetTop),
-      behavior: "smooth",
-    });
+    try {
+      container.scrollTo({
+        top: Math.max(0, targetTop),
+        behavior: "smooth",
+      });
+    } catch {
+      // ignore unsupported smooth scroll
+    }
   }, [scrollTargetSub?.id]);
 
-  const initialStageCutTime = getLiveCutTime ? getLiveCutTime() : activeTimeForDisplay;
-  const displayCutTime = initialStageCutTime / effectiveSpeed;
-  const progressPct = totalDuration > 0 ? Math.min(100, (initialStageCutTime / totalDuration) * 100) : 0;
+  const rawInitialCutTime = getLiveCutTime ? getLiveCutTime() : activeTimeForDisplay;
+  const initialStageCutTime =
+    typeof rawInitialCutTime === "number" && Number.isFinite(rawInitialCutTime)
+      ? Math.max(0, rawInitialCutTime)
+      : 0;
 
-  const clampedScale = Math.max(0, Math.min(1, previewScale));
+  const safePreviewScale =
+    typeof previewScale === "number" && Number.isFinite(previewScale)
+      ? previewScale
+      : DEFAULT_STAGE_PREVIEW_SCALE;
+  const clampedScale = Math.max(0, Math.min(MAX_STAGE_PREVIEW_SCALE, safePreviewScale));
   const isCompactLayout = compactMobile && !viewportMetrics.isLg;
-  const compactBounds = getCompactStageBounds(
-    outerWidth > 0 ? outerWidth : viewportMetrics.width,
-    viewportMetrics.height
+  const effectiveOuterW = outerWidth > 0 ? outerWidth : viewportMetrics.width;
+  const availableFrameOuterWidth = Math.max(120, effectiveOuterW - (isCompactLayout ? 20 : 0));
+
+  let minHeightPx: number;
+  let defaultHeightPx: number;
+  let maxHeightPx: number;
+
+  if (isCompactLayout) {
+    const widthCappedMaxH = Math.floor((availableFrameOuterWidth * 16) / 9);
+    const maxSafeMobileH = Math.max(
+      240,
+      Math.min(Math.round(viewportMetrics.height * 0.6), widthCappedMaxH)
+    );
+    maxHeightPx = maxSafeMobileH;
+    minHeightPx = Math.max(128, Math.min(maxHeightPx - 80, Math.round(maxHeightPx * 0.28)));
+    defaultHeightPx = Math.max(
+      minHeightPx + 36,
+      Math.min(maxHeightPx - 36, Math.round(maxHeightPx * 0.56))
+    );
+  } else {
+    const controlsReservePx = hasTransportBar ? 104 : 38;
+    const boundedHeightCeiling =
+      fitContainerHeight && containerHeight > 180
+        ? Math.max(220, containerHeight - controlsReservePx)
+        : Math.max(360, viewportMetrics.height - 180);
+    const widthCappedMaxH =
+      outerWidth > 0 ? Math.floor((availableFrameOuterWidth * 16) / 9) : 920;
+    maxHeightPx = Math.max(240, Math.min(920, boundedHeightCeiling, widthCappedMaxH));
+    minHeightPx = Math.max(160, Math.min(maxHeightPx - 60, Math.round(maxHeightPx * 0.42)));
+    defaultHeightPx = Math.max(
+      minHeightPx + 30,
+      Math.min(maxHeightPx - 24, Math.round(maxHeightPx * 0.72))
+    );
+  }
+
+  const frameHeightPx = scaleToBoundsValue(
+    clampedScale,
+    minHeightPx,
+    defaultHeightPx,
+    maxHeightPx
   );
-  const boundedHeightCeiling =
-    fitContainerHeight && !isCompactLayout && containerHeight > 180
-      ? Math.max(220, containerHeight - 78)
-      : Math.max(360, viewportMetrics.height - 168);
-  const minHeightPx = isCompactLayout
-    ? compactBounds.minHeightPx
-    : Math.max(
-        180,
-        Math.min(
-          fitContainerHeight ? Math.round(boundedHeightCeiling * 0.62) : 440,
-          viewportMetrics.height - 340
-        )
-      );
-  const baseMaxHeightPx = isCompactLayout
-    ? compactBounds.maxHeightPx
-    : Math.max(minHeightPx + 40, Math.min(840, boundedHeightCeiling));
-  const availableFrameOuterWidth = Math.max(120, outerWidth - (isCompactLayout ? 24 : 0));
-  const maxHeightPx = isCompactLayout
-    ? baseMaxHeightPx
-    : outerWidth > 0
-      ? Math.max(
-          minHeightPx + 24,
-          Math.min(baseMaxHeightPx, Math.floor((availableFrameOuterWidth * 16) / 9))
-        )
-      : baseMaxHeightPx;
-  const spanPx = Math.max(1, maxHeightPx - minHeightPx);
-  const frameHeightPx = Math.round(minHeightPx + clampedScale * spanPx);
   const targetStageWidthPx = Math.round((frameHeightPx * 9) / 16);
   const renderedStageWidthPx =
     outerWidth > 0 ? Math.min(targetStageWidthPx, availableFrameOuterWidth) : targetStageWidthPx;
@@ -346,8 +432,8 @@ export function Stage9x16({
 
   resizeMetricsRef.current = {
     minHeightPx,
+    defaultHeightPx,
     maxHeightPx,
-    spanPx,
     isCompactLayout,
     onChangePreviewScale,
   };
@@ -361,25 +447,31 @@ export function Stage9x16({
   }, []);
 
   const scaleLabel =
-    clampedScale < 0.28 ? "Small" : clampedScale > 0.72 ? "Large" : "Normal";
+    clampedScale < 0.35
+      ? "Small"
+      : clampedScale < 0.85
+        ? "Medium"
+        : clampedScale <= 1.15
+          ? "Normal"
+          : "Large";
 
   const applyDragClientY = (clientY: number) => {
     const active = dragStartRef.current;
     const {
       minHeightPx: curMin,
+      defaultHeightPx: curDef,
       maxHeightPx: curMax,
-      spanPx: curSpan,
       isCompactLayout: compact,
       onChangePreviewScale: notifyScale,
     } = resizeMetricsRef.current;
     if (!active || !notifyScale) return;
     const dy = clientY - active.startY;
-    const sensitivity = compact ? 1.0 : 1.5;
+    const sensitivity = compact ? 1.0 : 1.35;
     const nextHeight = Math.max(
       curMin,
       Math.min(curMax, active.startHeightPx + dy * sensitivity)
     );
-    const nextScale = Math.max(0, Math.min(1, (nextHeight - curMin) / curSpan));
+    const nextScale = boundsValueToScale(nextHeight, curMin, curDef, curMax);
     notifyScale(Number(nextScale.toFixed(4)));
   };
 
@@ -479,7 +571,8 @@ export function Stage9x16({
     if (!onChangePreviewScale) return;
     const target = e.target as HTMLElement | null;
     if (target?.closest("button, input")) return;
-    onChangePreviewScale(clampedScale >= 0.99 ? 0.5 : DEFAULT_STAGE_PREVIEW_SCALE);
+    const isDefault = Math.abs(clampedScale - DEFAULT_STAGE_PREVIEW_SCALE) < 0.03;
+    onChangePreviewScale(isDefault ? 0.5 : DEFAULT_STAGE_PREVIEW_SCALE);
   };
 
   const handleDragKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
@@ -491,13 +584,15 @@ export function Stage9x16({
       onChangePreviewScale(Math.max(0, Number((clampedScale - 0.05).toFixed(2))));
     } else if (e.key === "ArrowDown" || e.key === "ArrowRight") {
       e.preventDefault();
-      onChangePreviewScale(Math.min(1, Number((clampedScale + 0.05).toFixed(2))));
+      onChangePreviewScale(
+        Math.min(MAX_STAGE_PREVIEW_SCALE, Number((clampedScale + 0.05).toFixed(2)))
+      );
     } else if (e.key === "Home") {
       e.preventDefault();
       onChangePreviewScale(0);
     } else if (e.key === "End") {
       e.preventDefault();
-      onChangePreviewScale(1);
+      onChangePreviewScale(MAX_STAGE_PREVIEW_SCALE);
     } else if (e.key === "0" || e.key === "Enter") {
       e.preventDefault();
       onChangePreviewScale(DEFAULT_STAGE_PREVIEW_SCALE);
@@ -574,24 +669,26 @@ export function Stage9x16({
                 hasSubtitles ? "shrink-0" : "flex-1 h-full"
               }`}
             >
-              <YouTubeScenePlayer
-                ref={playerRef}
-                sourceType={project.sourceType}
-                videoId={project.videoId}
-                localUrl={project.localUrl}
-                scenes={project.scenes}
-                cutTime={subscribeCutTime ? 0 : cutTime}
-                getLiveCutTime={getLiveCutTime}
-                seekNonce={seekNonce}
-                isPlaying={isPlaying}
-                muted={muted}
-                voiceSettings={voiceSettings}
-                editSettings={editSettings}
-                fallbackThumbnail={project.keyframeUrls[0]}
-                onTimeUpdate={onTimeUpdate}
-                onPlayingChange={onPlayingChange}
-                onEnded={onEnded}
-              />
+              <AppErrorBoundary fallbackLabel="Video preview error" compact>
+                <YouTubeScenePlayer
+                  ref={playerRef}
+                  sourceType={project.sourceType}
+                  videoId={project.videoId}
+                  localUrl={project.localUrl}
+                  scenes={project.scenes}
+                  cutTime={subscribeCutTime ? 0 : safeCutTime}
+                  getLiveCutTime={getLiveCutTime}
+                  seekNonce={seekNonce}
+                  isPlaying={isPlaying}
+                  muted={muted}
+                  voiceSettings={voiceSettings}
+                  editSettings={editSettings}
+                  fallbackThumbnail={project.keyframeUrls[0]}
+                  onTimeUpdate={onTimeUpdate}
+                  onPlayingChange={onPlayingChange}
+                  onEnded={onEnded}
+                />
+              </AppErrorBoundary>
             </div>
 
             {/* Bottom Scrolling List Item View — fixed 720px coordinate system matching exportVideo.ts, scaled uniformly with preview */}
@@ -845,8 +942,8 @@ export function Stage9x16({
                             }}
                             className="flex flex-wrap items-start"
                           >
-                            {sub.words.map((word, wi) => {
-                              const isLastWord = wi === sub.words.length - 1;
+                            {(Array.isArray(sub.words) ? sub.words : []).map((word, wi, wordsArr) => {
+                              const isLastWord = wi === wordsArr.length - 1;
                               const isWordSpoken =
                                 isActive &&
                                 localElapsed >= word.startOffsetSec &&
@@ -968,161 +1065,117 @@ export function Stage9x16({
         )}
       </div>
 
-      {/* Transport Controls Row with integrated full-row vertical drag resize */}
-      {project && project.scenes.length > 0 ? (
+      {/* Standalone Preview Resize Drag Bar (strictly separate from playback buttons) */}
+      {onChangePreviewScale && (
         <div
-          role={onChangePreviewScale ? "slider" : undefined}
-          tabIndex={onChangePreviewScale ? 0 : undefined}
-          aria-label={
-            onChangePreviewScale
-              ? "Playback controls and preview size drag bar (drag row up to shrink, down to enlarge, double-click for normal)"
-              : undefined
-          }
-          aria-orientation={onChangePreviewScale ? "vertical" : undefined}
-          aria-valuemin={onChangePreviewScale ? 0 : undefined}
-          aria-valuemax={onChangePreviewScale ? 100 : undefined}
-          aria-valuenow={onChangePreviewScale ? Math.round(clampedScale * 100) : undefined}
-          title={
-            onChangePreviewScale
-              ? "Drag this row up to shrink · Drag down to enlarge · Double-click for Normal"
-              : undefined
-          }
-          onPointerDown={onChangePreviewScale ? handleDragPointerDown : undefined}
-          onTouchStart={onChangePreviewScale ? handleDragTouchStart : undefined}
-          onDoubleClick={onChangePreviewScale ? handleDragDoubleClick : undefined}
-          onKeyDown={onChangePreviewScale ? handleDragKeyDown : undefined}
-          className={`relative group flex flex-col ${
-            isResizing ? "transition-none" : "transition-colors duration-150"
-          } ${
-            onChangePreviewScale
-              ? `w-full ${
-                  compactMobile
-                    ? "border-t border-b rounded-none px-3.5 pt-1 pb-2"
-                    : "border rounded-lg px-3 pt-1 pb-2"
-                } cursor-ns-resize touch-none select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-700 dark:focus-visible:ring-teal-400 ${
-                  isResizing
-                    ? "border-teal-700 dark:border-teal-400 bg-teal-50/70 dark:bg-[#141933]"
-                    : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:border-[#b4c2e3] dark:hover:border-[#2f3866]"
-                }`
-              : "w-full border border-transparent px-0 py-0"
+          role="slider"
+          tabIndex={0}
+          aria-label="Resize 9:16 video preview (drag up to shrink, down to enlarge, double-click for 100%)"
+          aria-orientation="vertical"
+          aria-valuemin={0}
+          aria-valuemax={200}
+          aria-valuenow={Math.round(clampedScale * 100)}
+          title="Drag up to shrink · Drag down to enlarge (up to 200%) · Double-click for 100%"
+          onPointerDown={handleDragPointerDown}
+          onTouchStart={handleDragTouchStart}
+          onDoubleClick={handleDragDoubleClick}
+          onKeyDown={handleDragKeyDown}
+          className={`relative group w-full h-6 flex items-center justify-center cursor-ns-resize touch-none select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-700 dark:focus-visible:ring-teal-400 ${
+            compactMobile && !hasTransportBar
+              ? "border-b border-[#d2dcf0] dark:border-[#21284c]"
+              : ""
           }`}
         >
-          {/* Dedicated touch-friendly Drag Bar Strip along top of the Play row */}
-          {onChangePreviewScale && (
-            <div className="flex items-center justify-center py-1.5 touch-none">
-              <span
-                className={`h-1 rounded-full transition-all ${
-                  isResizing
-                    ? "w-16 bg-teal-700 dark:bg-teal-400"
-                    : "w-10 bg-[#bcc9e6] dark:bg-[#2f3866] group-hover:w-14 group-hover:bg-teal-700/70 dark:group-hover:bg-teal-400/70"
-                }`}
-              />
-              {isResizing && (
-                <span className="pointer-events-none absolute -top-6 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded bg-teal-700 text-white dark:bg-teal-400 dark:text-[#060918] text-[10px] font-mono-tabular font-semibold whitespace-nowrap shadow-sm">
-                  {scaleLabel} · {Math.round(clampedScale * 100)}%
-                </span>
-              )}
-            </div>
+          <span
+            className={`h-1 rounded-full transition-all ${
+              isResizing
+                ? "w-16 bg-teal-700 dark:bg-teal-400"
+                : "w-10 bg-[#b8c2d0] dark:bg-[#2f3866] group-hover:w-14 group-hover:bg-teal-700/80 dark:group-hover:bg-teal-400/80"
+            }`}
+          />
+          <button
+            type="button"
+            onPointerDown={(e) => e.stopPropagation()}
+            onTouchStart={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              onChangePreviewScale(DEFAULT_STAGE_PREVIEW_SCALE);
+            }}
+            title="Reset preview size to 100%"
+            className={`absolute right-3 text-[10px] font-mono-tabular transition-colors cursor-pointer ${
+              Math.abs(clampedScale - DEFAULT_STAGE_PREVIEW_SCALE) >= 0.02
+                ? "text-teal-700 dark:text-teal-400 font-semibold hover:underline"
+                : "text-[#64748b] dark:text-[#7c89b0]"
+            }`}
+          >
+            {Math.round(clampedScale * 100)}%
+          </button>
+          {isResizing && (
+            <span className="pointer-events-none absolute -top-6 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded bg-teal-700 text-white dark:bg-teal-400 dark:text-[#060918] text-[10px] font-mono-tabular font-semibold whitespace-nowrap shadow-sm">
+              {scaleLabel} · {Math.round(clampedScale * 100)}%
+            </span>
           )}
-
-          <div
-            className={`w-full flex items-center ${
-              compactMobile ? "gap-2 lg:gap-2.5" : "gap-2.5"
-            }`}
-          >
-            <button
-              type="button"
-              onPointerDown={(e) => e.stopPropagation()}
-              onTouchStart={(e) => e.stopPropagation()}
-              onClick={() => {
-                if (playerRef.current) {
-                  playerRef.current.togglePlay();
-                } else {
-                  onTogglePlay();
-                }
-              }}
-              aria-label={isPlaying ? "Pause" : "Play"}
-              className={`${
-                compactMobile ? "w-8 h-8 lg:w-9 lg:h-9" : "w-9 h-9"
-              } rounded-md bg-teal-700 hover:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 text-white dark:text-[#060918] flex items-center justify-center shrink-0 transition-colors cursor-pointer`}
-            >
-              {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 ml-0.5" />}
-            </button>
-
-            <div className="flex-1 flex flex-col gap-1 min-w-0">
-              <input
-                ref={scrubberInputRef}
-                type="range"
-                min={0}
-                max={totalDuration}
-                step={0.1}
-                defaultValue={initialStageCutTime}
-                onPointerDown={(e) => e.stopPropagation()}
-                onTouchStart={(e) => e.stopPropagation()}
-                onChange={(e) => onSeek(parseFloat(e.target.value))}
-                aria-label="Timeline scrubber"
-                className="w-full h-1.5 rounded-full appearance-none bg-[#d2dcf0] dark:bg-[#21284c] cursor-pointer"
-              />
-              <div className="flex items-center justify-between text-[11px] text-[#4d597d] dark:text-[#919ec4] font-mono-tabular">
-                <span ref={timeTextRef} className="truncate">
-                  {formatSec(displayCutTime)} / {formatSec(displayTotalDuration)}
-                  {Math.abs(effectiveSpeed - 1) > 0.01 ? ` (${effectiveSpeed.toFixed(2).replace(/\.00$/, "")}x)` : ""}
-                </span>
-                <span ref={pctTextRef} className="shrink-0 ml-1">
-                  {Math.round(progressPct)}%
-                </span>
-              </div>
-            </div>
-
-            <button
-              type="button"
-              onPointerDown={(e) => e.stopPropagation()}
-              onTouchStart={(e) => e.stopPropagation()}
-              onClick={onToggleMute}
-              aria-label={muted ? "Unmute original audio" : "Mute original audio"}
-              className={`${
-                compactMobile ? "w-8 h-8 lg:w-9 lg:h-9" : "w-9 h-9"
-              } rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[#0c1026] dark:text-[#f3f5fc] flex items-center justify-center shrink-0 transition-colors cursor-pointer`}
-            >
-              {muted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
-            </button>
-          </div>
         </div>
-      ) : (
-        onChangePreviewScale && (
-          <div
-            role="slider"
-            tabIndex={0}
-            aria-label="Resize 9:16 video preview (drag up to shrink, down to enlarge, double-click for normal)"
-            aria-orientation="vertical"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={Math.round(clampedScale * 100)}
-            title="Drag up to shrink · Drag down to enlarge · Double-click to reset Normal"
-            onPointerDown={handleDragPointerDown}
-            onTouchStart={handleDragTouchStart}
-            onDoubleClick={handleDragDoubleClick}
-            onKeyDown={handleDragKeyDown}
-            className={`relative group w-full h-6 flex items-center justify-center cursor-ns-resize touch-none select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-700 dark:focus-visible:ring-teal-400 ${
-              compactMobile
-                ? "border-b border-[#d2dcf0] dark:border-[#21284c]"
-                : ""
-            }`}
+      )}
+
+      {/* Separate 9:16 Playback Controls Row */}
+      {hasTransportBar && (
+        <div
+          className={`w-full flex items-center ${
+            compactMobile
+              ? "gap-2 lg:gap-2.5 border-t border-b rounded-none px-3.5 py-2"
+              : "gap-2.5 border rounded-lg px-3 py-2"
+          } border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022]`}
+        >
+          <button
+            type="button"
+            onClick={() => {
+              if (playerRef.current) {
+                playerRef.current.togglePlay();
+              } else {
+                onTogglePlay();
+              }
+            }}
+            aria-label={isPlaying ? "Pause" : "Play"}
+            className={`${
+              compactMobile ? "w-8 h-8 lg:w-9 lg:h-9" : "w-9 h-9"
+            } rounded-md bg-teal-700 hover:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 text-white dark:text-[#060918] flex items-center justify-center shrink-0 transition-colors cursor-pointer`}
           >
-            <span
-              className={`h-1 rounded-full transition-all ${
-                isResizing
-                  ? "w-16 bg-teal-700 dark:bg-teal-400"
-                  : "w-10 bg-[#b8c2d0] dark:bg-[#2f3866] group-hover:w-14 group-hover:bg-teal-700/80 dark:group-hover:bg-teal-400/80"
-              }`}
+            {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 ml-0.5" />}
+          </button>
+
+          <div className="flex-1 flex flex-col gap-1 min-w-0">
+            <input
+              ref={scrubberInputRef}
+              type="range"
+              min={0}
+              max={totalDuration}
+              step={0.1}
+              defaultValue={initialStageCutTime}
+              onChange={(e) => {
+                const next = parseFloat(e.target.value);
+                if (Number.isFinite(next)) onSeek(next);
+              }}
+              aria-label="Timeline scrubber"
+              className="w-full h-1.5 rounded-full appearance-none bg-[#d2dcf0] dark:bg-[#21284c] cursor-pointer"
             />
-            {isResizing && (
-              <span className="pointer-events-none absolute -top-6 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded bg-teal-700 text-white dark:bg-teal-400 dark:text-[#060918] text-[10px] font-mono-tabular font-semibold whitespace-nowrap shadow-sm">
-                {scaleLabel} · {Math.round(clampedScale * 100)}%
-              </span>
-            )}
+            <div className="flex items-center justify-between text-[11px] text-[#4d597d] dark:text-[#919ec4] font-mono-tabular">
+              <span ref={timeTextRef} className="truncate" />
+              <span ref={pctTextRef} className="shrink-0 ml-1" />
+            </div>
           </div>
-        )
+
+          <button
+            type="button"
+            onClick={onToggleMute}
+            aria-label={muted ? "Unmute original audio" : "Mute original audio"}
+            className={`${
+              compactMobile ? "w-8 h-8 lg:w-9 lg:h-9" : "w-9 h-9"
+            } rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[#0c1026] dark:text-[#f3f5fc] flex items-center justify-center shrink-0 transition-colors cursor-pointer`}
+          >
+            {muted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+          </button>
+        </div>
       )}
     </div>
   );

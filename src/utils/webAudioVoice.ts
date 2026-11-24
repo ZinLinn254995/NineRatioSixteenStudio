@@ -522,59 +522,68 @@ class RealTimeVoiceProcessor {
 
   public applySettings(settings: VoiceSettings) {
     this.latestSettings = { ...settings };
+    if (this.ctx.state === "closed") return;
     const now = this.ctx.currentTime;
+    if (!Number.isFinite(now)) return;
 
-    if (this.workletReady && this.workletNode) {
-      const pitchParam = this.workletNode.parameters.get("pitchSemitones");
-      const robotParam = this.workletNode.parameters.get("robotAmount");
-      const advParam = this.workletNode.parameters.get("advAmount");
-      const isoParam = this.workletNode.parameters.get("isoAmount");
-      pitchParam?.setValueAtTime(settings.pitchSemitones, now);
-      robotParam?.setValueAtTime(Math.max(0, Math.min(1, settings.robot / 100)), now);
-      advParam?.setValueAtTime(
-        settings.adversarialNoise
-          ? Math.max(0.05, Math.min(1, (settings.adversarialStrength || 35) / 100))
-          : 0,
-        now
-      );
-      isoParam?.setValueAtTime(
-        settings.vocalIsolation
-          ? Math.max(0.1, Math.min(1, (settings.vocalIsolationStrength || 65) / 100))
-          : 0,
-        now
-      );
+    const finiteOr = (val: unknown, fallback: number): number =>
+      typeof val === "number" && Number.isFinite(val) ? val : fallback;
+
+    const pitchSemi = Math.max(-12, Math.min(12, finiteOr(settings.pitchSemitones, 0)));
+    const robotVal = Math.max(0, Math.min(1, finiteOr(settings.robot, 0) / 100));
+    const advVal = settings.adversarialNoise
+      ? Math.max(0.05, Math.min(1, finiteOr(settings.adversarialStrength, 35) / 100))
+      : 0;
+    const isoVal = settings.vocalIsolation
+      ? Math.max(0.1, Math.min(1, finiteOr(settings.vocalIsolationStrength, 65) / 100))
+      : 0;
+
+    try {
+      if (this.workletReady && this.workletNode) {
+        const pitchParam = this.workletNode.parameters.get("pitchSemitones");
+        const robotParam = this.workletNode.parameters.get("robotAmount");
+        const advParam = this.workletNode.parameters.get("advAmount");
+        const isoParam = this.workletNode.parameters.get("isoAmount");
+        pitchParam?.setValueAtTime(pitchSemi, now);
+        robotParam?.setValueAtTime(robotVal, now);
+        advParam?.setValueAtTime(advVal, now);
+        isoParam?.setValueAtTime(isoVal, now);
+      }
+
+      // Tone shaping
+      const toneVal = Math.max(-10, Math.min(10, finiteOr(settings.tone, 0)));
+      const bassDb = toneVal < 0 ? Math.abs(toneVal) * 1.3 : -toneVal * 0.45;
+      const trebleDb = toneVal > 0 ? toneVal * 1.3 : -Math.abs(toneVal) * 0.35;
+      this.bassFilter.gain.setTargetAtTime(bassDb, now, 0.02);
+      this.trebleFilter.gain.setTargetAtTime(trebleDb, now, 0.02);
+
+      // Spectral Phase Shifting (6-band all-pass cascade)
+      if (settings.spectralPhaseShift) {
+        const phaseAmt = Math.max(
+          0.1,
+          Math.min(1, finiteOr(settings.spectralPhaseStrength, 50) / 100)
+        );
+        const qVal = 0.6 + phaseAmt * 3.4;
+        const freqScale = 0.88 + phaseAmt * 0.24;
+        this.phaseDryGain.gain.setTargetAtTime(0, now, 0.02);
+        this.phaseWetGain.gain.setTargetAtTime(1, now, 0.02);
+        this.phaseFilters.forEach((f, idx) => {
+          f.frequency.setTargetAtTime(SPECTRAL_PHASE_FREQS[idx] * freqScale, now, 0.02);
+          f.Q.setTargetAtTime(qVal, now, 0.02);
+        });
+      } else {
+        this.phaseDryGain.gain.setTargetAtTime(1, now, 0.02);
+        this.phaseWetGain.gain.setTargetAtTime(0, now, 0.02);
+      }
+
+      // Echo wet mix & feedback
+      const echoAmt = Math.max(0, Math.min(1, finiteOr(settings.echo, 0) / 100));
+      this.echoDelay.delayTime.setTargetAtTime(0.08 + echoAmt * 0.16, now, 0.02);
+      this.echoFeedback.gain.setTargetAtTime(0.15 + echoAmt * 0.45, now, 0.02);
+      this.echoWetGain.gain.setTargetAtTime(echoAmt * 0.65, now, 0.02);
+    } catch {
+      // Ignore transient WebAudio state errors so UI playback never crashes
     }
-
-    // Tone shaping
-    const bassDb = settings.tone < 0 ? Math.abs(settings.tone) * 1.3 : -settings.tone * 0.45;
-    const trebleDb = settings.tone > 0 ? settings.tone * 1.3 : -Math.abs(settings.tone) * 0.35;
-    this.bassFilter.gain.setTargetAtTime(bassDb, now, 0.02);
-    this.trebleFilter.gain.setTargetAtTime(trebleDb, now, 0.02);
-
-    // Spectral Phase Shifting (6-band all-pass cascade)
-    if (settings.spectralPhaseShift) {
-      const phaseAmt = Math.max(
-        0.1,
-        Math.min(1, (settings.spectralPhaseStrength || 50) / 100)
-      );
-      const qVal = 0.6 + phaseAmt * 3.4;
-      const freqScale = 0.88 + phaseAmt * 0.24;
-      this.phaseDryGain.gain.setTargetAtTime(0, now, 0.02);
-      this.phaseWetGain.gain.setTargetAtTime(1, now, 0.02);
-      this.phaseFilters.forEach((f, idx) => {
-        f.frequency.setTargetAtTime(SPECTRAL_PHASE_FREQS[idx] * freqScale, now, 0.02);
-        f.Q.setTargetAtTime(qVal, now, 0.02);
-      });
-    } else {
-      this.phaseDryGain.gain.setTargetAtTime(1, now, 0.02);
-      this.phaseWetGain.gain.setTargetAtTime(0, now, 0.02);
-    }
-
-    // Echo wet mix & feedback
-    const echoAmt = Math.max(0, Math.min(1, settings.echo / 100));
-    this.echoDelay.delayTime.setTargetAtTime(0.08 + echoAmt * 0.16, now, 0.02);
-    this.echoFeedback.gain.setTargetAtTime(0.15 + echoAmt * 0.45, now, 0.02);
-    this.echoWetGain.gain.setTargetAtTime(echoAmt * 0.65, now, 0.02);
   }
 }
 
@@ -594,8 +603,12 @@ export function applyVoiceEffectsToVideoElement(
       return;
     }
   }
-  if (isPlaying) {
-    proc.resume();
+  try {
+    if (isPlaying) {
+      proc.resume();
+    }
+    proc.applySettings(settings);
+  } catch {
+    // ignore WebAudio runtime errors
   }
-  proc.applySettings(settings);
 }

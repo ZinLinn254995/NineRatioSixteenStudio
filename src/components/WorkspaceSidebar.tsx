@@ -3,6 +3,7 @@ import {
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
   type TouchEvent as ReactTouchEvent,
@@ -60,7 +61,13 @@ import { ScenePicker } from "./ScenePicker";
 import { YouTubePreviewPanel } from "./YouTubePreviewPanel";
 import { VideoEditPanel, getVideoEditDirtyMap } from "./VideoEditPanel";
 import { ProjectTimelineEditor } from "./ProjectTimelineEditor";
-import { DEFAULT_STAGE_PREVIEW_SCALE, getCompactStageBounds } from "./Stage9x16";
+import {
+  boundsValueToScale,
+  DEFAULT_STAGE_PREVIEW_SCALE,
+  getCompactStageBounds,
+  MAX_STAGE_PREVIEW_SCALE,
+  scaleToBoundsValue,
+} from "./Stage9x16";
 import { SavedProjectsPanel } from "./SavedProjectsPanel";
 import { DEFAULT_VOICE_SETTINGS, getEffectivePlaybackSpeed } from "../utils/voicePresets";
 import { findActiveSubtitle, getSceneDurationSec } from "../utils/projectTimeline";
@@ -346,8 +353,10 @@ export function WorkspaceSidebar({
   const [isClipsResizing, setIsClipsResizing] = useState(false);
   const clipsDragStartRef = useRef<{
     startY: number;
-    startScale: number;
-    spanHeightPx: number;
+    startHeightPx: number;
+    minHeightPx: number;
+    defaultHeightPx: number;
+    maxHeightPx: number;
     pointerId: number | null;
     source: "pointer" | "touch";
   } | null>(null);
@@ -436,24 +445,40 @@ export function WorkspaceSidebar({
     mobileStageWidth > 0 ? mobileStageWidth : 390,
     viewportHeight
   );
-  const clampedClipsScale = Math.max(0, Math.min(1, effectiveClipsScale));
-  const clipsWidthPx = Math.round(
-    compactBounds.minWidthPx + clampedClipsScale * compactBounds.spanWidthPx
+  const clampedClipsScale = Math.max(0, Math.min(MAX_STAGE_PREVIEW_SCALE, effectiveClipsScale));
+  const clipsWidthPx = scaleToBoundsValue(
+    clampedClipsScale,
+    compactBounds.minWidthPx,
+    compactBounds.defaultWidthPx,
+    compactBounds.maxWidthPx
   );
-  const clipsHeightPx = Math.round(
-    compactBounds.minHeightPx + clampedClipsScale * compactBounds.spanHeightPx
+  const clipsHeightPx = scaleToBoundsValue(
+    clampedClipsScale,
+    compactBounds.minHeightPx,
+    compactBounds.defaultHeightPx,
+    compactBounds.maxHeightPx
   );
   const isClipsFullWidth =
-    clampedClipsScale >= 0.999 && compactBounds.maxWidthPx >= compactBounds.availWidth;
-  const clipsSpanHeightPx = compactBounds.spanHeightPx;
+    clampedClipsScale >= 1.999 && compactBounds.maxWidthPx >= compactBounds.availWidth;
   const clipsScaleLabel =
-    clampedClipsScale < 0.28 ? "Small" : clampedClipsScale > 0.72 ? "Large" : "Normal";
+    clampedClipsScale < 0.35
+      ? "Small"
+      : clampedClipsScale < 0.85
+        ? "Medium"
+        : clampedClipsScale <= 1.15
+          ? "Normal"
+          : "Large";
 
   const applyClipsDragClientY = (clientY: number) => {
     const active = clipsDragStartRef.current;
     if (!active) return;
     const dy = clientY - active.startY;
-    const nextScale = Math.max(0, Math.min(1, active.startScale + dy / active.spanHeightPx));
+    const nextScale = boundsValueToScale(
+      active.startHeightPx + dy,
+      active.minHeightPx,
+      active.defaultHeightPx,
+      active.maxHeightPx
+    );
     updateClipsScale(Number(nextScale.toFixed(4)));
   };
 
@@ -473,8 +498,10 @@ export function WorkspaceSidebar({
     clipsDragCleanupRef.current?.();
     clipsDragStartRef.current = {
       startY,
-      startScale: clampedClipsScale,
-      spanHeightPx: clipsSpanHeightPx,
+      startHeightPx: clipsHeightPx,
+      minHeightPx: compactBounds.minHeightPx,
+      defaultHeightPx: compactBounds.defaultHeightPx,
+      maxHeightPx: compactBounds.maxHeightPx,
       pointerId,
       source,
     };
@@ -529,6 +556,8 @@ export function WorkspaceSidebar({
 
   const handleClipsDragPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (e.button !== 0 && e.pointerType === "mouse") return;
+    const target = e.target as HTMLElement | null;
+    if (target?.closest("button, input")) return;
     e.preventDefault();
     try {
       e.currentTarget.setPointerCapture(e.pointerId);
@@ -541,11 +570,16 @@ export function WorkspaceSidebar({
   const handleClipsDragTouchStart = (e: ReactTouchEvent<HTMLDivElement>) => {
     if (clipsDragStartRef.current) return;
     if (e.touches.length !== 1) return;
+    const target = e.target as HTMLElement | null;
+    if (target?.closest("button, input")) return;
     beginClipsDragSession(e.touches[0].clientY, "touch", null);
   };
 
-  const handleClipsDragDoubleClick = () => {
-    updateClipsScale(clampedClipsScale >= 0.99 ? 0.5 : DEFAULT_STAGE_PREVIEW_SCALE);
+  const handleClipsDragDoubleClick = (e: ReactMouseEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement | null;
+    if (target?.closest("button, input")) return;
+    const isDefault = Math.abs(clampedClipsScale - DEFAULT_STAGE_PREVIEW_SCALE) < 0.03;
+    updateClipsScale(isDefault ? 0.5 : DEFAULT_STAGE_PREVIEW_SCALE);
   };
 
   const handleClipsDragKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -554,13 +588,15 @@ export function WorkspaceSidebar({
       updateClipsScale(Math.max(0, Number((clampedClipsScale - 0.05).toFixed(2))));
     } else if (e.key === "ArrowDown" || e.key === "ArrowRight") {
       e.preventDefault();
-      updateClipsScale(Math.min(1, Number((clampedClipsScale + 0.05).toFixed(2))));
+      updateClipsScale(
+        Math.min(MAX_STAGE_PREVIEW_SCALE, Number((clampedClipsScale + 0.05).toFixed(2)))
+      );
     } else if (e.key === "Home") {
       e.preventDefault();
       updateClipsScale(0);
     } else if (e.key === "End") {
       e.preventDefault();
-      updateClipsScale(1);
+      updateClipsScale(MAX_STAGE_PREVIEW_SCALE);
     } else if (e.key === "0" || e.key === "Enter") {
       e.preventDefault();
       updateClipsScale(DEFAULT_STAGE_PREVIEW_SCALE);
@@ -663,15 +699,19 @@ export function WorkspaceSidebar({
   const hasStudioVideo = Boolean(localMedia || project);
   const isStudioView = activeTab === "studio";
 
-  const studioHeaderDuration = project
-    ? Math.round(
-        project.targetDurationSec /
-          getEffectivePlaybackSpeed(
-            project.sourceType,
-            editSettings.playbackSpeed,
-            voiceSettings.speed
-          )
+  const rawTargetDuration =
+    project && typeof project.targetDurationSec === "number" && Number.isFinite(project.targetDurationSec)
+      ? Math.max(0, project.targetDurationSec)
+      : 0;
+  const rawHeaderSpeed = project
+    ? getEffectivePlaybackSpeed(
+        project.sourceType,
+        editSettings.playbackSpeed,
+        voiceSettings.speed
       )
+    : 1;
+  const studioHeaderDuration = project
+    ? Math.round(rawTargetDuration / (rawHeaderSpeed > 0 ? rawHeaderSpeed : 1))
     : 0;
 
   return (
@@ -720,12 +760,12 @@ export function WorkspaceSidebar({
               <div
                 role="slider"
                 tabIndex={0}
-                aria-label="Resize 16:9 preview (drag up to shrink, down to enlarge, double-click to toggle)"
+                aria-label="Resize 16:9 preview (drag up to shrink, down to enlarge, double-click for 100%)"
                 aria-orientation="vertical"
                 aria-valuemin={0}
-                aria-valuemax={100}
+                aria-valuemax={200}
                 aria-valuenow={Math.round(clampedClipsScale * 100)}
-                title="Drag up to shrink · Drag down to enlarge · Double-click to toggle size"
+                title="Drag up to shrink · Drag down to enlarge (up to 200%) · Double-click for 100%"
                 onPointerDown={handleClipsDragPointerDown}
                 onTouchStart={handleClipsDragTouchStart}
                 onDoubleClick={handleClipsDragDoubleClick}
@@ -739,6 +779,23 @@ export function WorkspaceSidebar({
                       : "w-10 bg-[#b8c2d0] dark:bg-[#2f3866] group-hover:w-14 group-hover:bg-teal-700/80 dark:group-hover:bg-teal-400/80"
                   }`}
                 />
+                <button
+                  type="button"
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onTouchStart={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    updateClipsScale(DEFAULT_STAGE_PREVIEW_SCALE);
+                  }}
+                  title="Reset preview size to 100%"
+                  className={`absolute right-3 text-[10px] font-mono-tabular transition-colors cursor-pointer ${
+                    Math.abs(clampedClipsScale - DEFAULT_STAGE_PREVIEW_SCALE) >= 0.02
+                      ? "text-teal-700 dark:text-teal-400 font-semibold hover:underline"
+                      : "text-[#64748b] dark:text-[#7c89b0]"
+                  }`}
+                >
+                  {Math.round(clampedClipsScale * 100)}%
+                </button>
                 {isClipsResizing && (
                   <span className="pointer-events-none absolute -top-6 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded bg-teal-700 text-white dark:bg-teal-400 dark:text-[#060918] text-[10px] font-mono-tabular font-semibold whitespace-nowrap shadow-sm">
                     {clipsScaleLabel} · {Math.round(clampedClipsScale * 100)}%
@@ -1192,7 +1249,7 @@ export function WorkspaceSidebar({
 
               {project && (
                 <span className="text-[11px] text-[#4d597d] dark:text-[#919ec4] font-mono-tabular whitespace-nowrap">
-                  {project.scenes.length} · {studioHeaderDuration}s
+                  {`${project.scenes.length} · ${studioHeaderDuration}s`}
                 </span>
               )}
             </div>

@@ -171,7 +171,7 @@ function clampFinite(value: unknown, min: number, max: number, fallback: number)
   return Math.max(min, Math.min(max, n));
 }
 
-function sanitizeVoiceSettings(raw: unknown): VoiceSettings {
+export function sanitizeVoiceSettings(raw: unknown): VoiceSettings {
   const rec = raw && typeof raw === "object" ? (raw as Partial<VoiceSettings>) : {};
   return {
     presetId: typeof rec.presetId === "string" ? rec.presetId : DEFAULT_VOICE_SETTINGS.presetId,
@@ -213,7 +213,7 @@ function sanitizeVoiceSettings(raw: unknown): VoiceSettings {
   };
 }
 
-function sanitizeEditSettings(raw: unknown): VideoEditSettings {
+export function sanitizeEditSettings(raw: unknown): VideoEditSettings {
   const rec = raw && typeof raw === "object" ? (raw as Partial<VideoEditSettings>) : {};
   return {
     filterPreset: typeof rec.filterPreset === "string" ? rec.filterPreset : DEFAULT_VIDEO_EDIT.filterPreset,
