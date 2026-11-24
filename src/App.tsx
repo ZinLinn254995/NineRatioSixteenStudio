@@ -15,6 +15,7 @@ import type {
   ActiveMediaSource,
   SavedProjectRecord,
   SceneSelection,
+  SpeechRegion,
   SpeakingScene,
   SubtitleGenerationProgress,
   SubtitleItem,
@@ -52,6 +53,7 @@ import {
 import { extractMp4AudioClips } from "./utils/mp4ClipAudio";
 import {
   ensureSceneIds,
+  findActiveSubtitle,
   getSceneDurationSec,
   remapSubtitlesToScenes,
 } from "./utils/projectTimeline";
@@ -69,6 +71,23 @@ import {
   sanitizeVoiceSettings,
   saveOfflineProject,
 } from "./utils/offlineProjects";
+import {
+  projectSpeechRegionsToCutTimeline,
+  type TimelineSegmentLike,
+} from "./utils/audioSpeechAnalyzer";
+import {
+  applyFindReplaceToSubtitles,
+  buildWordsFromPhonetic,
+  findExactSubtitleAtTime,
+  isKeyboardShortcutBlockedByElement,
+  mergeRetranslatedSubtitles,
+  mergeWordChipsInSubtitle,
+  resolveNextSelectedSubtitleId,
+  selectSubtitlesForRetranslation,
+  splitWordChipInSubtitle,
+  updateWordChipInSubtitle,
+  type AutoFollowState,
+} from "./utils/subtitleState";
 
 export default function App() {
   const [darkMode, setDarkMode] = useState<boolean>(() => {
@@ -107,10 +126,26 @@ export default function App() {
   const [regeneratingClipPercent, setRegeneratingClipPercent] = useState<number | null>(null);
   const [processError, setProcessError] = useState<string | null>(null);
   const [regeneratingSubIds, setRegeneratingSubIds] = useState<string[]>([]);
+  const [retranslatingSubIds, setRetranslatingSubIds] = useState<string[]>([]);
   const [isRetranslatingAll, setIsRetranslatingAll] = useState(false);
   const [isResyncingTimings, setIsResyncingTimings] = useState(false);
+  const [transcribingRange, setTranscribingRange] = useState<{
+    startSec: number;
+    endSec: number;
+  } | null>(null);
   const [subtitleRegenError, setSubtitleRegenError] = useState<string | null>(null);
   const [loopingSubId, setLoopingSubId] = useState<string | null>(null);
+  const [selectedSubtitleId, setSelectedSubtitleId] = useState<string | null>(null);
+  const [captionTab, setCaptionTab] = useState<"script" | "style" | "sync">("script");
+  const [isSubtitleSearchOpen, setIsSubtitleSearchOpen] = useState(false);
+  const [autoFollowState, setAutoFollowState] = useState<AutoFollowState>("following");
+  const [stageSelectRequest, setStageSelectRequest] = useState<{
+    id: string;
+    focusPhonetic?: boolean;
+    nonce: number;
+  } | null>(null);
+  const [shortcutToast, setShortcutToast] = useState<string | null>(null);
+  const [baselineSubRegions, setBaselineSubRegions] = useState<SpeechRegion[]>([]);
 
   const [project, setProject] = useState<VideoProject | null>(null);
   const [cutTime, setCutTime] = useState(0);
@@ -141,6 +176,7 @@ export default function App() {
   const lastGenActionRef = useRef<{ type: "all" } | { type: "clip"; sceneId: string } | null>(null);
   const generateAbortRef = useRef<AbortController | null>(null);
   const resyncAbortRef = useRef<AbortController | null>(null);
+  const transcribeRangeAbortRef = useRef<AbortController | null>(null);
   const retranslateAbortRef = useRef<AbortController | null>(null);
   const regenAbortMapRef = useRef<Map<string, AbortController>>(new Map());
   const searchSeqRef = useRef(0);
@@ -150,12 +186,43 @@ export default function App() {
   projectRef.current = project;
   const loopingSubIdRef = useRef<string | null>(null);
   loopingSubIdRef.current = loopingSubId;
+  const selectedSubtitleIdRef = useRef<string | null>(null);
+  selectedSubtitleIdRef.current = selectedSubtitleId;
+  const isSubtitleSearchOpenRef = useRef(false);
+  isSubtitleSearchOpenRef.current = isSubtitleSearchOpen;
+  const exportSheetOpenRef = useRef(false);
+  exportSheetOpenRef.current = exportSheetOpen;
+  const activeTabRef = useRef<WorkspaceTab>(activeTab);
+  activeTabRef.current = activeTab;
+  const studioSectionRef = useRef<StudioSectionId>(studioSection);
+  studioSectionRef.current = studioSection;
+  const prevSubtitlesRef = useRef<SubtitleItem[]>([]);
+  const shortcutToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const cutTimeRef = useRef(0);
   cutTimeRef.current = cutTime;
   const liveCutTimeRef = useRef(0);
   const cutTimeListenersRef = useRef<Set<(sec: number) => void>>(new Set());
   const lastReactCutSyncAtRef = useRef(0);
   const lastLoopSeekAtRef = useRef(0);
+
+  const showShortcutToast = useCallback((message: string) => {
+    setShortcutToast(message);
+    if (shortcutToastTimerRef.current) {
+      clearTimeout(shortcutToastTimerRef.current);
+    }
+    shortcutToastTimerRef.current = setTimeout(() => {
+      setShortcutToast(null);
+      shortcutToastTimerRef.current = null;
+    }, 2400);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (shortcutToastTimerRef.current) {
+        clearTimeout(shortcutToastTimerRef.current);
+      }
+    };
+  }, []);
 
   const subscribeCutTime = useCallback((listener: (sec: number) => void) => {
     cutTimeListenersRef.current.add(listener);
@@ -293,17 +360,31 @@ export default function App() {
   const setBaselineFromProject = useCallback((proj: VideoProject | null) => {
     resyncAbortRef.current?.abort();
     resyncAbortRef.current = null;
+    transcribeRangeAbortRef.current?.abort();
+    transcribeRangeAbortRef.current = null;
     retranslateAbortRef.current?.abort();
     retranslateAbortRef.current = null;
     regenAbortMapRef.current.forEach((ctrl) => ctrl.abort());
     regenAbortMapRef.current.clear();
     setIsResyncingTimings(false);
+    setTranscribingRange(null);
     setIsRetranslatingAll(false);
+    setRetranslatingSubIds([]);
     setRegeneratingSubIds([]);
 
     lastSubTypingCoalesceRef.current = null;
     setSubUndoStack([]);
     setSubRedoStack([]);
+    prevSubtitlesRef.current = proj?.subtitles ?? [];
+    setSelectedSubtitleId(null);
+    setIsSubtitleSearchOpen(false);
+    setAutoFollowState("following");
+    setBaselineSubRegions(
+      proj?.subtitles.map((s) => ({
+        sourceStartSec: s.sourceStartSec,
+        sourceEndSec: s.sourceEndSec,
+      })) ?? []
+    );
     if (!proj) {
       timelineBaselineRef.current = null;
       setTimelineDirty(false);
@@ -318,6 +399,62 @@ export default function App() {
     };
     setTimelineDirty(false);
   }, []);
+
+  useEffect(() => {
+    if (baselineSubRegions.length === 0 && project && project.subtitles.length > 0) {
+      setBaselineSubRegions(
+        project.subtitles.map((s) => ({
+          sourceStartSec: s.sourceStartSec,
+          sourceEndSec: s.sourceEndSec,
+        }))
+      );
+    }
+  }, [baselineSubRegions.length, project]);
+
+  const cutSpeechRegions = useMemo(() => {
+    if (!project) return [];
+    const normalized = ensureSceneIds(project.scenes);
+    let cursor = 0;
+    const segments: TimelineSegmentLike[] = normalized.map((sc) => {
+      const clipDur = Math.max(0.1, sc.endSec - sc.startSec);
+      const seg: TimelineSegmentLike = {
+        startSec: sc.startSec,
+        endSec: sc.endSec,
+        clipDur,
+        cutStart: cursor,
+        cutEnd: cursor + clipDur,
+      };
+      cursor += clipDur;
+      return seg;
+    });
+    const resolvedSpeechRegions: SpeechRegion[] =
+      project.speechRegions && project.speechRegions.length > 0
+        ? project.speechRegions
+        : baselineSubRegions.length > 0
+          ? baselineSubRegions
+          : project.subtitles.map((s) => ({
+              sourceStartSec: s.sourceStartSec,
+              sourceEndSec: s.sourceEndSec,
+            }));
+    const primary = projectSpeechRegionsToCutTimeline(segments, resolvedSpeechRegions);
+    if (primary.length > 0) return primary;
+    const fallbackSubs: SpeechRegion[] =
+      baselineSubRegions.length > 0
+        ? baselineSubRegions
+        : project.subtitles.map((s) => ({
+            sourceStartSec: s.sourceStartSec,
+            sourceEndSec: s.sourceEndSec,
+          }));
+    return projectSpeechRegionsToCutTimeline(segments, fallbackSubs);
+  }, [project, baselineSubRegions]);
+
+  // Automatically fall back selectedSubtitleId to adjacent row or null when removed via delete/merge/undo/redo/trim
+  useEffect(() => {
+    const prevSubs = prevSubtitlesRef.current;
+    const nextSubs = project?.subtitles ?? [];
+    prevSubtitlesRef.current = nextSubs;
+    setSelectedSubtitleId((cur) => resolveNextSelectedSubtitleId(prevSubs, nextSubs, cur));
+  }, [project?.subtitles]);
 
   useEffect(() => {
     if (!localMedia && !project && studioSection !== "clips") {
@@ -1526,35 +1663,6 @@ export default function App() {
     });
   }, []);
 
-  const buildWordsFromPhonetic = (
-    phonetic: string,
-    spanStart: number,
-    spanEnd: number,
-    existingWords: SubtitleWord[] = []
-  ): SubtitleWord[] => {
-    const tokens = phonetic.trim().split(/\s+/).filter(Boolean);
-    if (tokens.length === 0) return [];
-    const spanDur = Math.max(0.2, spanEnd - spanStart);
-    const totalWeight = tokens.reduce((acc, t) => acc + Math.max(2, t.length), 0) || 1;
-    let cursor = spanStart;
-    return tokens.map((tok, wi) => {
-      const existing = existingWords[wi];
-      const wDur = (Math.max(2, tok.length) / totalWeight) * spanDur;
-      const startOffsetSec = Number(cursor.toFixed(2));
-      const endOffsetSec = Number(
-        (wi === tokens.length - 1 ? spanEnd : cursor + wDur).toFixed(2)
-      );
-      cursor = endOffsetSec;
-      return {
-        phonetic: tok,
-        thai: existing?.thai || tok,
-        burmeseGloss: existing?.burmeseGloss || "",
-        startOffsetSec,
-        endOffsetSec,
-      };
-    });
-  };
-
   const handleUpdateSubtitle = (
     id: string,
     field: "thaiPhonetic" | "burmese" | "thaiScript",
@@ -1564,8 +1672,8 @@ export default function App() {
     const applyEdit = (list: SubtitleItem[]): SubtitleItem[] =>
       list.map((sub: SubtitleItem) => {
         if (sub.id !== id) return sub;
-        if (field === "burmese") return { ...sub, burmese: value };
-        if (field === "thaiScript") return { ...sub, thaiScript: value };
+        if (field === "burmese") return { ...sub, burmese: value, isManuallyEdited: true };
+        if (field === "thaiScript") return { ...sub, thaiScript: value, isManuallyEdited: true };
 
         const tokens = value.split(/\s+/).filter(Boolean);
         if (tokens.length === sub.words.length && sub.words.length > 0) {
@@ -1573,13 +1681,13 @@ export default function App() {
             ...sub.words[wi],
             phonetic: tok,
           }));
-          return { ...sub, thaiPhonetic: value, words };
+          return { ...sub, thaiPhonetic: value, words, isManuallyEdited: true };
         }
 
         const spanStart = sub.words[0]?.startOffsetSec ?? 0;
         const spanEnd = sub.words[sub.words.length - 1]?.endOffsetSec ?? (sub.endTime - sub.startTime);
         const words = buildWordsFromPhonetic(value, spanStart, spanEnd, sub.words);
-        return { ...sub, thaiPhonetic: value, words };
+        return { ...sub, thaiPhonetic: value, words, isManuallyEdited: true };
       });
 
     if (timelineBaselineRef.current) {
@@ -1607,7 +1715,7 @@ export default function App() {
         const words = sub.words.map((w, wi) =>
           wi === wordIndex ? { ...w, burmeseGloss } : w
         );
-        return { ...sub, words };
+        return { ...sub, words, isManuallyEdited: true };
       });
 
     if (timelineBaselineRef.current) {
@@ -1618,6 +1726,80 @@ export default function App() {
 
     setProject((prev) =>
       prev ? { ...prev, subtitles: applyWordEdit(prev.subtitles) } : prev
+    );
+  };
+
+  const handleUpdateWordChip = (
+    subId: string,
+    wordIndex: number,
+    patch: { phonetic?: string; thai?: string; burmeseGloss?: string }
+  ) => {
+    pushSubtitleUndo(`wordchip:${subId}:${wordIndex}`);
+    const applyChipEdit = (list: SubtitleItem[]): SubtitleItem[] =>
+      list.map((sub) =>
+        sub.id === subId ? updateWordChipInSubtitle(sub, wordIndex, patch) : sub
+      );
+
+    if (timelineBaselineRef.current) {
+      timelineBaselineRef.current.subtitles = applyChipEdit(
+        timelineBaselineRef.current.subtitles
+      );
+    }
+
+    setProject((prev) =>
+      prev ? { ...prev, subtitles: applyChipEdit(prev.subtitles) } : prev
+    );
+  };
+
+  const handleMergeWordChips = (subId: string, leftIndex: number) => {
+    pushSubtitleUndo();
+    const applyMerge = (list: SubtitleItem[]): SubtitleItem[] =>
+      list.map((sub) =>
+        sub.id === subId ? mergeWordChipsInSubtitle(sub, leftIndex) : sub
+      );
+
+    if (timelineBaselineRef.current) {
+      timelineBaselineRef.current.subtitles = applyMerge(
+        timelineBaselineRef.current.subtitles
+      );
+    }
+
+    setProject((prev) =>
+      prev ? { ...prev, subtitles: applyMerge(prev.subtitles) } : prev
+    );
+  };
+
+  const handleSplitWordChip = (
+    subId: string,
+    wordIndex: number,
+    partA: string,
+    partB: string,
+    partAGloss?: string,
+    partBGloss?: string
+  ) => {
+    pushSubtitleUndo();
+    const applySplit = (list: SubtitleItem[]): SubtitleItem[] =>
+      list.map((sub) =>
+        sub.id === subId
+          ? splitWordChipInSubtitle(
+              sub,
+              wordIndex,
+              partA,
+              partB,
+              partAGloss,
+              partBGloss
+            )
+          : sub
+      );
+
+    if (timelineBaselineRef.current) {
+      timelineBaselineRef.current.subtitles = applySplit(
+        timelineBaselineRef.current.subtitles
+      );
+    }
+
+    setProject((prev) =>
+      prev ? { ...prev, subtitles: applySplit(prev.subtitles) } : prev
     );
   };
 
@@ -1651,6 +1833,7 @@ export default function App() {
       thaiScript: thaiPhonetic,
       burmese,
       words: buildWordsFromPhonetic(thaiPhonetic, 0, duration),
+      isManuallyEdited: true,
     };
 
     if (timelineBaselineRef.current) {
@@ -1667,6 +1850,8 @@ export default function App() {
         subtitles: [...prev.subtitles, newItem].sort((a, b) => a.startTime - b.startTime),
       };
     });
+    setSelectedSubtitleId(newItem.id);
+    setStageSelectRequest({ id: newItem.id, focusPhonetic: false, nonce: Date.now() });
     handleSeek(startTime);
   };
 
@@ -1695,66 +1880,71 @@ export default function App() {
     caseSensitive?: boolean;
   }): number => {
     if (!project || !opts.findText) return 0;
-    const escapeRegExp = (str: string) => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const flags = opts.caseSensitive ? "g" : "gi";
-    const regex = new RegExp(escapeRegExp(opts.findText), flags);
-    let totalMatches = 0;
-
-    const replaceInText = (src: string): string => {
-      if (!src) return src;
-      const matches = src.match(regex);
-      if (matches && matches.length > 0) {
-        totalMatches += matches.length;
-        return src.replace(regex, opts.replaceText);
-      }
-      return src;
-    };
-
-    const replaceSilent = (src: string): string => (src ? src.replace(regex, opts.replaceText) : src);
-
-    const transformList = (list: SubtitleItem[], countMatches: boolean): SubtitleItem[] =>
-      list.map((sub) => {
-        const fn = countMatches ? replaceInText : replaceSilent;
-        const nextPhonetic =
-          opts.field === "all" || opts.field === "thaiPhonetic" ? fn(sub.thaiPhonetic) : sub.thaiPhonetic;
-        const nextThai =
-          opts.field === "all" || opts.field === "thaiScript" ? fn(sub.thaiScript) : sub.thaiScript;
-        const nextBurmese =
-          opts.field === "all" || opts.field === "burmese" ? fn(sub.burmese) : sub.burmese;
-        const nextWords = sub.words.map((w) => ({
-          ...w,
-          phonetic:
-            opts.field === "all" || opts.field === "thaiPhonetic"
-              ? replaceSilent(w.phonetic)
-              : w.phonetic,
-          burmeseGloss:
-            opts.field === "all" || opts.field === "burmese"
-              ? w.burmeseGloss
-                ? replaceSilent(w.burmeseGloss)
-                : w.burmeseGloss
-              : w.burmeseGloss,
-        }));
-        return {
-          ...sub,
-          thaiPhonetic: nextPhonetic,
-          thaiScript: nextThai,
-          burmese: nextBurmese,
-          words: nextWords,
-        };
-      });
-
-    const nextSubs = transformList(project.subtitles, true);
+    const { subtitles: nextSubs, totalMatches } = applyFindReplaceToSubtitles(
+      project.subtitles,
+      opts
+    );
     if (totalMatches === 0) return 0;
 
     pushSubtitleUndo();
     if (timelineBaselineRef.current) {
-      timelineBaselineRef.current.subtitles = transformList(
+      timelineBaselineRef.current.subtitles = applyFindReplaceToSubtitles(
         timelineBaselineRef.current.subtitles,
-        false
-      );
+        opts
+      ).subtitles;
     }
     setProject((prev) => (prev ? { ...prev, subtitles: nextSubs } : prev));
     return totalMatches;
+  };
+
+  const handleApplyPasteTranscriptSync = (
+    syncedSubtitles: SubtitleItem[],
+    changedCount: number
+  ) => {
+    if (!project || syncedSubtitles.length === 0 || changedCount <= 0) return;
+
+    pushSubtitleUndo();
+    const syncedById = new Map(syncedSubtitles.map((sub) => [sub.id, sub]));
+
+    if (timelineBaselineRef.current) {
+      timelineBaselineRef.current.subtitles = timelineBaselineRef.current.subtitles.map(
+        (baseSub) => {
+          const updated = syncedById.get(baseSub.id);
+          if (!updated) return baseSub;
+          return {
+            ...baseSub,
+            thaiPhonetic: updated.thaiPhonetic,
+            thaiScript: updated.thaiScript,
+            burmese: updated.burmese,
+            words: updated.words.map((w) => ({ ...w })),
+            isManuallyEdited: Boolean(updated.isManuallyEdited),
+          };
+        }
+      );
+    }
+
+    setProject((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        subtitles: prev.subtitles.map((sub) => {
+          const updated = syncedById.get(sub.id);
+          if (!updated) return sub;
+          return {
+            ...sub,
+            thaiPhonetic: updated.thaiPhonetic,
+            thaiScript: updated.thaiScript,
+            burmese: updated.burmese,
+            words: updated.words.map((w) => ({ ...w })),
+            isManuallyEdited: Boolean(updated.isManuallyEdited),
+          };
+        }),
+      };
+    });
+
+    setSaveNotice(
+      `Synced ${changedCount} subtitle ${changedCount === 1 ? "line" : "lines"} (timings preserved).`
+    );
   };
 
   const handleUpdateSubtitleTiming = (id: string, nextStart: number, nextEnd: number) => {
@@ -1861,7 +2051,7 @@ export default function App() {
       const dur = target.endTime - target.startTime;
       if (dur < 0.45) return list;
 
-      const curCut = cutTimeRef.current;
+      const curCut = liveCutTimeRef.current;
       const usePlayhead =
         curCut > target.startTime + 0.22 && curCut < target.endTime - 0.22;
       let splitTime = usePlayhead ? curCut : target.startTime + dur * 0.5;
@@ -1942,6 +2132,7 @@ export default function App() {
         thaiPhonetic: phonetic1,
         burmese: burmese1,
         words: words1,
+        isManuallyEdited: true,
       };
       const secondItem: SubtitleItem = {
         id: `${target.id}-sp-${Date.now().toString(36).slice(-4)}`,
@@ -1955,6 +2146,7 @@ export default function App() {
         thaiPhonetic: phonetic2,
         burmese: burmese2,
         words: words2,
+        isManuallyEdited: true,
       };
 
       const next = [...list];
@@ -2016,6 +2208,7 @@ export default function App() {
           .filter(Boolean)
           .join(" "),
         words: mergedWords,
+        isManuallyEdited: true,
       };
 
       const next = [...list];
@@ -2155,6 +2348,7 @@ export default function App() {
                 thaiPhonetic: updatedFields.thaiPhonetic,
                 burmese: updatedFields.burmese,
                 words: Array.isArray(updatedFields.words) ? updatedFields.words : sub.words,
+                isManuallyEdited: false,
               }
             : sub
         );
@@ -2192,16 +2386,28 @@ export default function App() {
     retranslateAbortRef.current?.abort();
     retranslateAbortRef.current = null;
     setIsRetranslatingAll(false);
+    setRetranslatingSubIds([]);
   }, []);
 
-  const handleRetranslateAll = async (tone: TranslationTone) => {
+  const handleRetranslateAll = async (
+    tone: TranslationTone,
+    options?: { skipManuallyEdited?: boolean }
+  ) => {
     if (!project || project.subtitles.length === 0 || isRetranslatingAll) return;
+    const skipManuallyEdited = Boolean(options?.skipManuallyEdited);
+    const targetSubtitles = selectSubtitlesForRetranslation(
+      project.subtitles,
+      skipManuallyEdited
+    );
+    if (targetSubtitles.length === 0) return;
+
     retranslateAbortRef.current?.abort();
     const controller = new AbortController();
     retranslateAbortRef.current = controller;
 
     setSubtitleRegenError(null);
     setIsRetranslatingAll(true);
+    setRetranslatingSubIds(targetSubtitles.map((s) => s.id));
 
     try {
       const resp = await fetch("/api/retranslate-subtitles", {
@@ -2210,7 +2416,7 @@ export default function App() {
         signal: controller.signal,
         body: JSON.stringify({
           translationTone: tone,
-          subtitles: project.subtitles.map((s) => ({
+          subtitles: targetSubtitles.map((s) => ({
             id: s.id,
             startTime: s.startTime,
             endTime: s.endTime,
@@ -2238,19 +2444,9 @@ export default function App() {
       }
       if (controller.signal.aborted) return;
 
-      const byId = new Map(data.subtitles.map((item) => [item.id, item]));
+      const patches = data.subtitles;
       const applyBatch = (list: SubtitleItem[]): SubtitleItem[] =>
-        list.map((sub) => {
-          const patch = byId.get(sub.id);
-          if (!patch) return sub;
-          return {
-            ...sub,
-            thaiScript: patch.thaiScript || sub.thaiScript,
-            thaiPhonetic: patch.thaiPhonetic || sub.thaiPhonetic,
-            burmese: patch.burmese || sub.burmese,
-            words: Array.isArray(patch.words) && patch.words.length > 0 ? patch.words : sub.words,
-          };
-        });
+        mergeRetranslatedSubtitles(list, patches);
 
       pushSubtitleUndo();
 
@@ -2278,6 +2474,112 @@ export default function App() {
         retranslateAbortRef.current = null;
       }
       setIsRetranslatingAll(false);
+      setRetranslatingSubIds([]);
+    }
+  };
+
+  const handleFillMissingGlosses = async (subIds: string[]) => {
+    if (!project || subIds.length === 0 || isRetranslatingAll) return;
+    const idSet = new Set(subIds);
+    const targetSubtitles = project.subtitles.filter((s) => idSet.has(s.id));
+    if (targetSubtitles.length === 0) return;
+
+    retranslateAbortRef.current?.abort();
+    const controller = new AbortController();
+    retranslateAbortRef.current = controller;
+
+    setSubtitleRegenError(null);
+    setIsRetranslatingAll(true);
+    setRetranslatingSubIds(targetSubtitles.map((s) => s.id));
+
+    try {
+      const resp = await fetch("/api/retranslate-subtitles", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({
+          translationTone: videoEdit.translationTone,
+          subtitles: targetSubtitles.map((s) => ({
+            id: s.id,
+            startTime: s.startTime,
+            endTime: s.endTime,
+            originalSpokenText: s.originalSpokenText,
+            thaiScript: s.thaiScript,
+            thaiPhonetic: s.thaiPhonetic,
+            burmese: s.burmese,
+          })),
+        }),
+      });
+
+      const data = await safeReadJson<{
+        subtitles?: Array<{
+          id: string;
+          thaiScript: string;
+          thaiPhonetic: string;
+          burmese: string;
+          words: SubtitleWord[];
+        }>;
+        error?: string;
+      }>(resp);
+
+      if (!resp.ok || !Array.isArray(data.subtitles)) {
+        throw new Error(data.error || "Failed to fill missing Burmese glosses.");
+      }
+      if (controller.signal.aborted) return;
+
+      const byId = new Map(data.subtitles.map((item) => [item.id, item]));
+      const applyGlossFill = (list: SubtitleItem[]): SubtitleItem[] =>
+        list.map((sub) => {
+          const patch = byId.get(sub.id);
+          if (!patch || !Array.isArray(patch.words) || patch.words.length === 0) {
+            return sub;
+          }
+          const nextWords = sub.words.map((w, wi) => {
+            if (w.burmeseGloss && w.burmeseGloss.trim()) return w;
+            const norm = w.phonetic.trim().toLowerCase();
+            const byIndex = patch.words[wi];
+            const candidate =
+              byIndex && byIndex.burmeseGloss?.trim()
+                ? byIndex
+                : patch.words.find(
+                    (pw) =>
+                      pw.phonetic.trim().toLowerCase() === norm &&
+                      Boolean(pw.burmeseGloss?.trim())
+                  );
+            return candidate?.burmeseGloss?.trim()
+              ? { ...w, burmeseGloss: candidate.burmeseGloss.trim() }
+              : w;
+          });
+          return { ...sub, words: nextWords };
+        });
+
+      pushSubtitleUndo();
+
+      if (timelineBaselineRef.current) {
+        timelineBaselineRef.current.subtitles = applyGlossFill(
+          timelineBaselineRef.current.subtitles
+        );
+      }
+
+      setProject((prev) =>
+        prev ? { ...prev, subtitles: applyGlossFill(prev.subtitles) } : prev
+      );
+    } catch (err) {
+      if (
+        controller.signal.aborted ||
+        (err instanceof DOMException && err.name === "AbortError")
+      ) {
+        return;
+      }
+      setSubtitleRegenError(
+        formatReadableApiError(err, "Failed to fill missing Burmese glosses.")
+      );
+    } finally {
+      if (retranslateAbortRef.current === controller) {
+        retranslateAbortRef.current = null;
+      }
+      setIsRetranslatingAll(false);
+      setRetranslatingSubIds([]);
     }
   };
 
@@ -2560,6 +2862,284 @@ export default function App() {
     }
   };
 
+  const handleTranscribeRange = async (
+    rawStartSec: number,
+    rawEndSec: number
+  ): Promise<{ addedCount: number; message?: string }> => {
+    const curProj = projectRef.current;
+    if (!curProj || transcribingRange) {
+      return { addedCount: 0 };
+    }
+
+    const maxDur = Math.max(0.5, curProj.targetDurationSec || 10);
+    const startSec = Number(Math.max(0, Math.min(maxDur - 0.25, rawStartSec)).toFixed(2));
+    const endSec = Number(Math.max(startSec + 0.25, Math.min(maxDur, rawEndSec)).toFixed(2));
+    if (endSec <= startSec + 0.2) {
+      return { addedCount: 0, message: "Select at least a 0.25s range." };
+    }
+
+    transcribeRangeAbortRef.current?.abort();
+    const controller = new AbortController();
+    transcribeRangeAbortRef.current = controller;
+
+    setSubtitleRegenError(null);
+    setProcessError(null);
+    setSaveNotice(null);
+    setTranscribingRange({ startSec, endSec });
+
+    try {
+      const sortedSubs = [...curProj.subtitles].sort((a, b) => a.startTime - b.startTime);
+      let prevSub: SubtitleItem | null = null;
+      let nextSub: SubtitleItem | null = null;
+      for (const s of sortedSubs) {
+        if (s.endTime <= startSec + 0.15 && s.startTime < startSec) {
+          prevSub = s;
+        } else if (!nextSub && s.startTime >= endSec - 0.15 && s.endTime > endSec) {
+          nextSub = s;
+          break;
+        }
+      }
+
+      let uploadId = curProj.uploadId || localMedia?.uploadId;
+      const localFile = curProj.localFile || localMedia?.localFile;
+      let clipAudioBase64: string | undefined;
+      let mimeType: string | undefined;
+      let trimLeadSec: number | undefined;
+      let clipsAudioPayload:
+        | Array<{ trimLeadSec?: number; durationSec: number; audioBase64: string; mimeType?: string }>
+        | undefined;
+
+      const extractLocalRangeAudio = async () => {
+        if (!localFile) return false;
+        const padStart = Math.max(0, startSec - 0.4);
+        const padEnd = Math.min(maxDur, endSec + 0.4);
+        const overlappingSlices: Array<{ startSec: number; endSec: number }> = [];
+        let cutCursor = 0;
+        for (const sc of curProj.scenes) {
+          const dur = getSceneDurationSec(sc);
+          const scCutStart = cutCursor;
+          const scCutEnd = cutCursor + dur;
+          const ovStart = Math.max(padStart, scCutStart);
+          const ovEnd = Math.min(padEnd, scCutEnd);
+          if (ovEnd - ovStart > 0.02) {
+            overlappingSlices.push({
+              startSec: Number((sc.startSec + (ovStart - scCutStart)).toFixed(3)),
+              endSec: Number((sc.startSec + (ovEnd - scCutStart)).toFixed(3)),
+            });
+          }
+          cutCursor = scCutEnd;
+        }
+
+        if (overlappingSlices.length > 0) {
+          const extracted = await extractMp4AudioClips(localFile, overlappingSlices);
+          if (controller.signal.aborted) return true;
+          if (extracted && extracted.length === 1) {
+            clipAudioBase64 = extracted[0].audioBase64;
+            mimeType = extracted[0].mimeType;
+            trimLeadSec = extracted[0].trimLeadSec;
+            clipsAudioPayload = undefined;
+            return true;
+          }
+          if (extracted && extracted.length === overlappingSlices.length) {
+            clipsAudioPayload = extracted.map((c) => ({
+              trimLeadSec: c.trimLeadSec,
+              durationSec: c.durationSec,
+              audioBase64: c.audioBase64,
+              mimeType: c.mimeType,
+            }));
+            clipAudioBase64 = undefined;
+            return true;
+          }
+        }
+
+        uploadId = await uploadBlobInChunks(
+          localFile,
+          localFile.name,
+          controller.signal
+        );
+        if (controller.signal.aborted) return true;
+        setLocalMedia((prev) => (prev ? { ...prev, uploadId } : prev));
+        setProject((prev) => (prev ? { ...prev, uploadId } : prev));
+        return true;
+      };
+
+      if (curProj.sourceType === "local" && !uploadId && localFile) {
+        await extractLocalRangeAudio();
+        if (controller.signal.aborted) return { addedCount: 0 };
+      }
+
+      const buildPayload = (activeUploadId?: string) =>
+        JSON.stringify({
+          startSec,
+          endSec,
+          translationTone: videoEdit.translationTone,
+          sourceType: curProj.sourceType,
+          uploadId: activeUploadId,
+          videoId: curProj.videoId,
+          clipAudioBase64,
+          mimeType,
+          trimLeadSec,
+          clipsAudio: clipsAudioPayload,
+          scenes: curProj.scenes.map((sc) => ({
+            startSec: sc.startSec,
+            endSec: sc.endSec,
+            durationSec: sc.durationSec,
+          })),
+          prevContext: prevSub
+            ? {
+                originalSpokenText: prevSub.originalSpokenText,
+                thaiScript: prevSub.thaiScript,
+                thaiPhonetic: prevSub.thaiPhonetic,
+                burmese: prevSub.burmese,
+              }
+            : null,
+          nextContext: nextSub
+            ? {
+                originalSpokenText: nextSub.originalSpokenText,
+                thaiScript: nextSub.thaiScript,
+                thaiPhonetic: nextSub.thaiPhonetic,
+                burmese: nextSub.burmese,
+              }
+            : null,
+        });
+
+      let resp = await fetch("/api/transcribe-range", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: buildPayload(uploadId),
+      });
+
+      if (resp.status === 404 && curProj.sourceType === "local" && localFile) {
+        uploadId = undefined;
+        setLocalMedia((prev) => (prev ? { ...prev, uploadId: undefined } : prev));
+        setProject((prev) => (prev ? { ...prev, uploadId: undefined } : prev));
+        await extractLocalRangeAudio();
+        if (controller.signal.aborted) return { addedCount: 0 };
+        resp = await fetch("/api/transcribe-range", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: controller.signal,
+          body: buildPayload(uploadId),
+        });
+      }
+
+      const data = await safeReadJson<{
+        hasSpeech?: boolean;
+        message?: string;
+        subtitles?: SubtitleItem[];
+        error?: string;
+      }>(resp);
+
+      if (!resp.ok) {
+        throw new Error(data.error || "Failed to transcribe range with AI.");
+      }
+      if (controller.signal.aborted) return { addedCount: 0 };
+
+      if (data.hasSpeech === false || !Array.isArray(data.subtitles) || data.subtitles.length === 0) {
+        const msg =
+          data.message ||
+          `No spoken dialogue detected between ${startSec.toFixed(1)}s and ${endSec.toFixed(1)}s.`;
+        setSaveNotice(msg);
+        return { addedCount: 0, message: msg };
+      }
+
+      const latestProj = projectRef.current ?? curProj;
+      const stamp = Date.now();
+      const newItems: SubtitleItem[] = data.subtitles.map((rawItem, idx) => {
+        const itemStart = Number(
+          Math.max(0, Math.min(maxDur - 0.25, Number(rawItem.startTime) || startSec)).toFixed(2)
+        );
+        const itemEnd = Number(
+          Math.max(itemStart + 0.25, Math.min(maxDur, Number(rawItem.endTime) || endSec)).toFixed(2)
+        );
+        const dur = Math.max(0.25, itemEnd - itemStart);
+        const mappedStart = mapCutTimeToSource(latestProj.scenes, itemStart);
+        const mappedEnd = mapCutTimeToSource(latestProj.scenes, itemEnd);
+        const thaiPhonetic = (rawItem.thaiPhonetic || "").trim() || (rawItem.thaiScript || "").trim();
+        const words: SubtitleWord[] =
+          Array.isArray(rawItem.words) && rawItem.words.length > 0
+            ? rawItem.words.map((w) => ({
+                phonetic: w.phonetic || "",
+                thai: w.thai || "",
+                burmeseGloss: w.burmeseGloss || "",
+                startOffsetSec: Number(Math.max(0, Math.min(dur - 0.02, Number(w.startOffsetSec) || 0)).toFixed(2)),
+                endOffsetSec: Number(Math.max(0.02, Math.min(dur, Number(w.endOffsetSec) || dur)).toFixed(2)),
+              }))
+            : buildWordsFromPhonetic(thaiPhonetic, 0, dur);
+
+        return {
+          id: `sub-range-${stamp}-${idx}-${Math.random().toString(36).slice(2, 6)}`,
+          sceneIndex: mappedStart.sceneIndex,
+          startTime: itemStart,
+          endTime: itemEnd,
+          sourceStartSec: Number(mappedStart.sourceSec.toFixed(2)),
+          sourceEndSec: Number(mappedEnd.sourceSec.toFixed(2)),
+          originalSpokenText: (rawItem.originalSpokenText || "").trim() || thaiPhonetic,
+          thaiPhonetic,
+          thaiScript: (rawItem.thaiScript || "").trim() || thaiPhonetic,
+          burmese: (rawItem.burmese || "").trim(),
+          words,
+          isManuallyEdited: false,
+        };
+      });
+
+      if (newItems.length === 0) {
+        const msg = `No spoken dialogue detected between ${startSec.toFixed(1)}s and ${endSec.toFixed(1)}s.`;
+        setSaveNotice(msg);
+        return { addedCount: 0, message: msg };
+      }
+
+      pushSubtitleUndo();
+
+      if (timelineBaselineRef.current) {
+        timelineBaselineRef.current.subtitles = [
+          ...timelineBaselineRef.current.subtitles,
+          ...newItems.map((it) => ({
+            ...it,
+            words: it.words.map((w) => ({ ...w })),
+          })),
+        ].sort((a, b) => a.startTime - b.startTime);
+      }
+
+      setProject((prev) =>
+        prev
+          ? {
+              ...prev,
+              subtitles: [...prev.subtitles, ...newItems].sort(
+                (a, b) => a.startTime - b.startTime
+              ),
+            }
+          : prev
+      );
+
+      const firstNew = newItems[0];
+      setSelectedSubtitleId(firstNew.id);
+      setStageSelectRequest({ id: firstNew.id, focusPhonetic: false, nonce: Date.now() });
+      handleSeek(firstNew.startTime);
+      setSaveNotice(
+        `Added ${newItems.length} AI subtitle${newItems.length === 1 ? "" : "s"} (${startSec.toFixed(1)}s–${endSec.toFixed(1)}s).`
+      );
+      return { addedCount: newItems.length };
+    } catch (err) {
+      if (
+        controller.signal.aborted ||
+        (err instanceof DOMException && err.name === "AbortError")
+      ) {
+        return { addedCount: 0 };
+      }
+      const readable = formatReadableApiError(err, "Failed to transcribe range with AI.");
+      setSubtitleRegenError(readable);
+      setProcessError(readable);
+      return { addedCount: 0, message: readable };
+    } finally {
+      if (transcribeRangeAbortRef.current === controller) {
+        transcribeRangeAbortRef.current = null;
+      }
+      setTranscribingRange(null);
+    }
+  };
+
   useEffect(() => {
     const currentUrl = readyDownload?.blobUrl;
     return () => {
@@ -2766,45 +3346,186 @@ export default function App() {
     ]
   );
 
-  // Support Ctrl+S / Cmd+S to save offline and Ctrl+Z / Ctrl+Shift+Z for subtitle Undo/Redo
+  const handleSeekRef = useRef(handleSeek);
+  handleSeekRef.current = handleSeek;
+  const handleTogglePlayRef = useRef(handleTogglePlay);
+  handleTogglePlayRef.current = handleTogglePlay;
+  const handleToggleLoopSubtitleRef = useRef(handleToggleLoopSubtitle);
+  handleToggleLoopSubtitleRef.current = handleToggleLoopSubtitle;
+  const handleSplitSubtitleRef = useRef(handleSplitSubtitle);
+  handleSplitSubtitleRef.current = handleSplitSubtitle;
+  const handleSaveProjectRef = useRef(handleSaveProject);
+  handleSaveProjectRef.current = handleSaveProject;
+  const handleUndoSubtitlesRef = useRef(handleUndoSubtitles);
+  handleUndoSubtitlesRef.current = handleUndoSubtitles;
+  const handleRedoSubtitlesRef = useRef(handleRedoSubtitles);
+  handleRedoSubtitlesRef.current = handleRedoSubtitles;
+  const canSaveCurrentRef = useRef(canSaveCurrent);
+  canSaveCurrentRef.current = canSaveCurrent;
+
+  const handleSelectStageSubtitle = useCallback((id: string, startTime: number) => {
+    handleSeekRef.current(startTime);
+    setSelectedSubtitleId(id);
+    setActiveTab("studio");
+    setStudioSection("captions");
+    setCaptionTab("script");
+    setAutoFollowState("following");
+    setStageSelectRequest({ id, focusPhonetic: true, nonce: Date.now() });
+  }, []);
+
+  // Global keyboard shortcuts with IME guard, focus guard, and safe modifier handling
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (!(e.metaKey || e.ctrlKey)) return;
+      if (e.isComposing || e.keyCode === 229) return;
+
+      const hasPrimaryMod = e.metaKey || e.ctrlKey;
       const key = e.key.toLowerCase();
-      if (key === "s") {
+
+      // Ctrl/Cmd + Alt + ArrowUp / ArrowDown: step subtitle selection (allowed inside inputs)
+      if (
+        hasPrimaryMod &&
+        e.altKey &&
+        !e.shiftKey &&
+        (e.key === "ArrowUp" || e.key === "ArrowDown")
+      ) {
+        const subs = projectRef.current?.subtitles;
+        if (activeTabRef.current !== "studio" || !subs || subs.length === 0) return;
+
         e.preventDefault();
-        if (canSaveCurrent) {
-          handleSaveProject(false);
+        const curTime = liveCutTimeRef.current;
+        const anchorId =
+          selectedSubtitleIdRef.current ?? findActiveSubtitle(subs, curTime)?.id ?? null;
+        let nextTarget: SubtitleItem | undefined;
+        if (anchorId) {
+          const idx = subs.findIndex((s) => s.id === anchorId);
+          if (idx !== -1) {
+            nextTarget =
+              e.key === "ArrowUp"
+                ? subs[Math.max(0, idx - 1)]
+                : subs[Math.min(subs.length - 1, idx + 1)];
+          }
+        }
+        if (!nextTarget) {
+          if (e.key === "ArrowDown") {
+            nextTarget = subs.find((s) => s.startTime >= curTime) ?? subs[0];
+          } else {
+            const prevMatches = subs.filter((s) => s.startTime <= curTime);
+            nextTarget = prevMatches[prevMatches.length - 1] ?? subs[subs.length - 1];
+          }
+        }
+        if (nextTarget) {
+          setSelectedSubtitleId(nextTarget.id);
+          handleSeekRef.current(nextTarget.startTime);
+          setStudioSection("captions");
+          setCaptionTab("script");
+          setStageSelectRequest({ id: nextTarget.id, focusPhonetic: false, nonce: Date.now() });
         }
         return;
       }
 
-      if (activeTab === "studio" && studioSection === "captions" && projectRef.current) {
-        const target = e.target as HTMLElement | null;
-        const tag = target?.tagName;
-        const inTextField =
-          tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target?.isContentEditable;
-        if (inTextField) return;
-
-        if (key === "z" && !e.shiftKey) {
+      if (hasPrimaryMod && !e.altKey) {
+        if (key === "s") {
           e.preventDefault();
-          handleUndoSubtitles();
-        } else if ((key === "z" && e.shiftKey) || key === "y") {
-          e.preventDefault();
-          handleRedoSubtitles();
+          if (canSaveCurrentRef.current) {
+            void handleSaveProjectRef.current(false);
+          }
+          return;
         }
+
+        if (
+          activeTabRef.current === "studio" &&
+          studioSectionRef.current === "captions" &&
+          projectRef.current
+        ) {
+          const target = e.target as HTMLElement | null;
+          const tag = target?.tagName;
+          const inTextField =
+            tag === "INPUT" ||
+            tag === "TEXTAREA" ||
+            tag === "SELECT" ||
+            Boolean(target?.isContentEditable);
+          if (inTextField) return;
+
+          if (key === "z" && !e.shiftKey) {
+            e.preventDefault();
+            handleUndoSubtitlesRef.current();
+          } else if ((key === "z" && e.shiftKey) || key === "y") {
+            e.preventDefault();
+            handleRedoSubtitlesRef.current();
+          }
+        }
+        return;
+      }
+
+      if (e.key === "Escape" && !hasPrimaryMod && !e.altKey) {
+        if (isSubtitleSearchOpenRef.current) {
+          e.preventDefault();
+          setIsSubtitleSearchOpen(false);
+          return;
+        }
+        const activeEl = document.activeElement;
+        if (activeEl instanceof HTMLElement) {
+          const tag = activeEl.tagName;
+          if (
+            tag === "INPUT" ||
+            tag === "TEXTAREA" ||
+            tag === "SELECT" ||
+            activeEl.isContentEditable
+          ) {
+            activeEl.blur();
+          }
+        }
+        return;
+      }
+
+      if (hasPrimaryMod || e.altKey) return;
+      if (
+        activeTabRef.current !== "studio" ||
+        !projectRef.current ||
+        exportSheetOpenRef.current
+      ) {
+        return;
+      }
+
+      if (isKeyboardShortcutBlockedByElement(e.target, document.activeElement)) return;
+
+      if (e.code === "Space" || e.key === " ") {
+        e.preventDefault();
+        handleTogglePlayRef.current();
+        return;
+      }
+
+      if (key === "l" && !e.shiftKey) {
+        const subs = projectRef.current.subtitles;
+        const targetId =
+          selectedSubtitleIdRef.current ??
+          findActiveSubtitle(subs, liveCutTimeRef.current)?.id ??
+          null;
+        if (targetId) {
+          e.preventDefault();
+          handleToggleLoopSubtitleRef.current(targetId);
+        }
+        return;
+      }
+
+      if (key === "s" && !e.shiftKey) {
+        e.preventDefault();
+        const curTime = liveCutTimeRef.current;
+        const exactSub = findExactSubtitleAtTime(projectRef.current.subtitles, curTime);
+        if (!exactSub) {
+          showShortcutToast("Move playhead onto a subtitle to split.");
+          return;
+        }
+        if (exactSub.endTime - exactSub.startTime < 0.45) {
+          showShortcutToast("Subtitle line is too short to split.");
+          return;
+        }
+        handleSplitSubtitleRef.current(exactSub.id);
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [
-    activeTab,
-    studioSection,
-    canSaveCurrent,
-    handleSaveProject,
-    handleUndoSubtitles,
-    handleRedoSubtitles,
-  ]);
+  }, [showShortcutToast]);
 
   const handleOpenSavedProject = async (record: SavedProjectRecord) => {
     activeRunIdRef.current++;
@@ -3335,6 +4056,14 @@ export default function App() {
               fitContainerHeight={isDesktop}
               previewScale={stagePreviewScale}
               onChangePreviewScale={setStagePreviewScale}
+              onChangeVideoHeightPct={(pct) =>
+                setVideoEdit((prev) => ({
+                  ...prev,
+                  videoHeightPct: Math.max(26, Math.min(52, Math.round(pct))),
+                }))
+              }
+              selectedSubtitleId={selectedSubtitleId}
+              onSelectSubtitle={handleSelectStageSubtitle}
             />
           ) : null;
 
@@ -3423,6 +4152,7 @@ export default function App() {
               onRetranslateAll={handleRetranslateAll}
               onCancelRetranslateAll={handleCancelRetranslateAll}
               regeneratingSubIds={regeneratingSubIds}
+              retranslatingSubIds={retranslatingSubIds}
               isRetranslatingAll={isRetranslatingAll}
               subtitleRegenError={subtitleRegenError}
               onClearSubtitleRegenError={() => setSubtitleRegenError(null)}
@@ -3454,6 +4184,23 @@ export default function App() {
               studioSection={studioSection}
               onChangeStudioSection={setStudioSection}
               showMobileTimelineTab={!isDesktop}
+              selectedSubtitleId={selectedSubtitleId}
+              onSelectSubtitle={setSelectedSubtitleId}
+              captionTab={captionTab}
+              onChangeCaptionTab={setCaptionTab}
+              isSubtitleSearchOpen={isSubtitleSearchOpen}
+              onChangeSubtitleSearchOpen={setIsSubtitleSearchOpen}
+              autoFollowState={autoFollowState}
+              onChangeAutoFollowState={setAutoFollowState}
+              stageSelectRequest={stageSelectRequest}
+              cutSpeechRegions={cutSpeechRegions}
+              onUpdateWordChip={handleUpdateWordChip}
+              onMergeWordChips={handleMergeWordChips}
+              onSplitWordChip={handleSplitWordChip}
+              onFillMissingGlosses={handleFillMissingGlosses}
+              onTranscribeRange={handleTranscribeRange}
+              transcribingRange={transcribingRange}
+              onApplyPasteTranscriptSync={handleApplyPasteTranscriptSync}
             />
           );
 
@@ -3545,9 +4292,13 @@ export default function App() {
                       onPlayFromTime={handlePlayFromTime}
                       onUpdateScenes={handleUpdateProjectScenes}
                       onUpdateSubtitleTiming={handleUpdateSubtitleTiming}
+                      onShiftAllSubtitles={handleShiftAllSubtitles}
                       onRestoreSnapshot={handleRestoreProjectSnapshot}
                       onResetTimeline={handleResetTimeline}
                       onGoToScenes={() => setStudioSection("clips")}
+                      cutSpeechRegions={cutSpeechRegions}
+                      onTranscribeRange={handleTranscribeRange}
+                      transcribingRange={transcribingRange}
                     />
                   </div>
                 )}
@@ -3612,6 +4363,16 @@ export default function App() {
         onRetry={() => void startBackgroundExport(true)}
         onDiscardResult={handleDiscardExportResult}
       />
+
+      {shortcutToast && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="fixed bottom-16 lg:bottom-6 left-1/2 -translate-x-1/2 z-50 px-3.5 py-2 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-[#0c1026]/95 dark:bg-[#141933]/95 text-white text-xs font-medium shadow-lg pointer-events-none"
+        >
+          {shortcutToast}
+        </div>
+      )}
     </div>
   );
 }

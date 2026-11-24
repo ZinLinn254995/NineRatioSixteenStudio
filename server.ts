@@ -4344,6 +4344,642 @@ RULES:
   }
 });
 
+function mapCutTimeToSourceServer(
+  scenes: Array<{ startSec: number; endSec: number; durationSec?: number }>,
+  cutTime: number
+): { sceneIndex: number; sourceSec: number } {
+  if (!Array.isArray(scenes) || scenes.length === 0) {
+    return { sceneIndex: 0, sourceSec: Number(Math.max(0, cutTime).toFixed(2)) };
+  }
+  let acc = 0;
+  for (let i = 0; i < scenes.length; i++) {
+    const s = scenes[i];
+    const dur = Math.max(0.1, Number(s.durationSec) || Number(s.endSec) - Number(s.startSec) || 0.1);
+    if (cutTime < acc + dur - 0.001 || i === scenes.length - 1) {
+      const offset = Math.max(0, Math.min(dur, cutTime - acc));
+      return {
+        sceneIndex: i,
+        sourceSec: Number(Math.min(Number(s.endSec), Number(s.startSec) + offset).toFixed(2)),
+      };
+    }
+    acc += dur;
+  }
+  return { sceneIndex: 0, sourceSec: 0 };
+}
+
+function mapSourceTimeToCutServer(
+  scenes: Array<{ startSec: number; endSec: number; durationSec?: number }>,
+  sourceSec: number,
+  fallbackOriginCut = 0,
+  fallbackOriginSrc = 0
+): number {
+  if (!Array.isArray(scenes) || scenes.length === 0) {
+    return Math.max(0, sourceSec);
+  }
+  let acc = 0;
+  for (let i = 0; i < scenes.length; i++) {
+    const s = scenes[i];
+    const dur = Math.max(0.1, Number(s.durationSec) || Number(s.endSec) - Number(s.startSec) || 0.1);
+    if (sourceSec >= s.startSec - 0.5 && sourceSec <= s.endSec + 0.5) {
+      const off = Math.max(0, Math.min(dur, sourceSec - s.startSec));
+      return Number((acc + off).toFixed(2));
+    }
+    acc += dur;
+  }
+  return Math.max(0, Number((fallbackOriginCut + (sourceSec - fallbackOriginSrc)).toFixed(2)));
+}
+
+app.post("/api/transcribe-range", async (req, res) => {
+  const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "thai-range-sub-"));
+  try {
+    const {
+      startSec,
+      endSec,
+      prevContext,
+      nextContext,
+      translationTone,
+      sourceType,
+      uploadId,
+      videoId,
+      clipAudioBase64,
+      mimeType,
+      trimLeadSec,
+      clipsAudio,
+      scenes = [],
+    } = (req.body || {}) as {
+      startSec?: number;
+      endSec?: number;
+      prevContext?: RegenerateContextLine | null;
+      nextContext?: RegenerateContextLine | null;
+      translationTone?: TranslationTone;
+      sourceType?: "local" | "youtube";
+      uploadId?: string;
+      videoId?: string;
+      clipAudioBase64?: string;
+      mimeType?: string;
+      trimLeadSec?: number;
+      clipsAudio?: Array<{
+        trimLeadSec?: number;
+        durationSec: number;
+        audioBase64: string;
+        mimeType?: string;
+      }>;
+      scenes?: { startSec: number; endSec: number; durationSec?: number }[];
+    };
+
+    const rawStart = Number(startSec);
+    const rawEnd = Number(endSec);
+    if (!Number.isFinite(rawStart) || !Number.isFinite(rawEnd) || rawEnd <= rawStart + 0.2) {
+      res.status(400).json({ error: "Select a valid time range (at least 0.25s) to transcribe." });
+      return;
+    }
+
+    const normalizedScenes = (Array.isArray(scenes) ? scenes : [])
+      .map((sc) => {
+        const s = Math.max(0, Number(sc.startSec) || 0);
+        const e = Math.max(s + 0.2, Number(sc.endSec) || s + 1);
+        return { startSec: s, endSec: e, durationSec: Number((e - s).toFixed(2)) };
+      })
+      .filter((sc) => sc.durationSec >= 0.2);
+
+    const totalCutDur =
+      normalizedScenes.length > 0
+        ? normalizedScenes.reduce((acc, sc) => acc + sc.durationSec, 0)
+        : 0;
+
+    const reqStart = Math.max(0, totalCutDur > 0 ? Math.min(totalCutDur - 0.25, rawStart) : rawStart);
+    const reqEnd = Math.max(
+      reqStart + 0.25,
+      totalCutDur > 0 ? Math.min(totalCutDur, rawEnd) : rawEnd
+    );
+    if (reqEnd - reqStart > 90) {
+      res.status(400).json({ error: "Please select a range of 90 seconds or less at a time." });
+      return;
+    }
+
+    const PAD_SEC = 0.4;
+    const paddedCutStart = Math.max(0, Number((reqStart - PAD_SEC).toFixed(2)));
+    const paddedCutEnd = Number(
+      (totalCutDur > 0 ? Math.min(totalCutDur, reqEnd + PAD_SEC) : reqEnd + PAD_SEC).toFixed(2)
+    );
+    const padLead = Number((reqStart - paddedCutStart).toFixed(2));
+    const reqDur = Number((reqEnd - reqStart).toFixed(2));
+    const focusStartInClip = padLead;
+    const focusEndInClip = Number((padLead + reqDur).toFixed(2));
+
+    const tone = normalizeTranslationTone(translationTone);
+    const contextLines: string[] = [];
+    if (
+      prevContext &&
+      (prevContext.originalSpokenText || prevContext.thaiPhonetic || prevContext.burmese)
+    ) {
+      contextLines.push(
+        `Previous subtitle (just BEFORE ${reqStart.toFixed(2)}s — match tone/style, do NOT repeat it): spoken="${prevContext.originalSpokenText || ""}" | phonetic="${prevContext.thaiPhonetic || ""}" | thai="${prevContext.thaiScript || ""}" | burmese="${prevContext.burmese || ""}"`
+      );
+    }
+    if (
+      nextContext &&
+      (nextContext.originalSpokenText || nextContext.thaiPhonetic || nextContext.burmese)
+    ) {
+      contextLines.push(
+        `Next subtitle (just AFTER ${reqEnd.toFixed(2)}s — match tone/style, do NOT repeat it): spoken="${nextContext.originalSpokenText || ""}" | phonetic="${nextContext.thaiPhonetic || ""}" | thai="${nextContext.thaiScript || ""}" | burmese="${nextContext.burmese || ""}"`
+      );
+    }
+    const contextBlock =
+      contextLines.length > 0
+        ? `\nSURROUNDING DIALOGUE CONTEXT:\n${contextLines.join("\n")}\n`
+        : "";
+
+    const ai = getGeminiClient();
+
+    interface LocalRangeAudioPrep {
+      wavBase64: string;
+      rms: Float32Array;
+      speechWindows: SpeechWindow[];
+      clipDur: number;
+    }
+
+    let localAudioPrep: LocalRangeAudioPrep | null = null;
+    let ytMeta: {
+      metaStart: number;
+      metaEnd: number;
+      metaDur: number;
+      srcReqStart: number;
+      srcReqEnd: number;
+    } | null = null;
+
+    if (sourceType === "local") {
+      const targetDur = Math.max(0.4, paddedCutEnd - paddedCutStart);
+
+      if (clipAudioBase64) {
+        const ext = mimeType?.includes("wav") ? ".wav" : ".m4a";
+        const inClip = path.join(tmpDir, `inline-range${ext}`);
+        const pcmPath = path.join(tmpDir, "inline-range.pcm");
+        try {
+          await fs.promises.writeFile(inClip, Buffer.from(clipAudioBase64, "base64"));
+          const lead = Math.max(0, Number(trimLeadSec) || 0);
+          await execFileAsync(
+            "ffmpeg",
+            [
+              "-y",
+              ...(lead > 0.005 ? ["-ss", lead.toFixed(4)] : []),
+              "-i",
+              inClip,
+              "-t",
+              targetDur.toFixed(3),
+              "-vn",
+              "-sn",
+              "-dn",
+              "-af",
+              "aresample=async=1:first_pts=0",
+              "-f",
+              "s16le",
+              "-ac",
+              "1",
+              "-ar",
+              "16000",
+              pcmPath,
+            ],
+            FFMPEG_EXEC_OPTS
+          );
+          if (fs.existsSync(pcmPath)) {
+            const pcmBuf = await fs.promises.readFile(pcmPath);
+            if (pcmBuf.length >= 640) {
+              const clipDur = Math.max(0.4, Number((pcmBuf.length / 32000).toFixed(2)));
+              const rms = computeRmsEnvelope10ms(pcmBuf);
+              const speechWindows = detectSpeechSegments10ms(rms, clipDur);
+              const wavBuf = pcmToWavBuffer(pcmBuf, 16000);
+              localAudioPrep = {
+                wavBase64: wavBuf.toString("base64"),
+                rms,
+                speechWindows,
+                clipDur,
+              };
+            }
+          }
+        } catch {
+          localAudioPrep = null;
+        }
+      } else if (Array.isArray(clipsAudio) && clipsAudio.length > 0) {
+        const pcmBuffers: Buffer[] = [];
+        for (let i = 0; i < clipsAudio.length; i++) {
+          const clip = clipsAudio[i];
+          const dur = Math.max(0.2, Number(clip.durationSec) || 1);
+          const ext = clip.mimeType?.includes("wav") ? ".wav" : ".m4a";
+          const inClip = path.join(tmpDir, `inline-rng-${i}${ext}`);
+          const scPcmPath = path.join(tmpDir, `inline-rng-${i}.pcm`);
+          try {
+            await fs.promises.writeFile(inClip, Buffer.from(clip.audioBase64, "base64"));
+            await execFileAsync(
+              "ffmpeg",
+              [
+                "-y",
+                "-ss",
+                Math.max(0, Number(clip.trimLeadSec) || 0).toFixed(4),
+                "-i",
+                inClip,
+                "-t",
+                dur.toFixed(3),
+                "-vn",
+                "-sn",
+                "-dn",
+                "-af",
+                "aresample=async=1:first_pts=0",
+                "-f",
+                "s16le",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                scPcmPath,
+              ],
+              FFMPEG_EXEC_OPTS
+            );
+            if (fs.existsSync(scPcmPath)) {
+              pcmBuffers.push(await fs.promises.readFile(scPcmPath));
+            }
+          } catch {
+            const silentBytes = Math.max(320, Math.round(dur * 16000) * 2);
+            pcmBuffers.push(Buffer.alloc(silentBytes));
+          }
+        }
+        const cutPcm = Buffer.concat(pcmBuffers);
+        if (cutPcm.length >= 640) {
+          const clipDur = Math.max(0.4, Number((cutPcm.length / 32000).toFixed(2)));
+          const rms = computeRmsEnvelope10ms(cutPcm);
+          const speechWindows = detectSpeechSegments10ms(rms, clipDur);
+          const wavBuf = pcmToWavBuffer(cutPcm, 16000);
+          localAudioPrep = {
+            wavBase64: wavBuf.toString("base64"),
+            rms,
+            speechWindows,
+            clipDur,
+          };
+        }
+      } else {
+        if (!uploadId) {
+          res.status(404).json({ error: "Uploaded video session not found." });
+          return;
+        }
+        localAudioPrep = await withUploadSessionLock(uploadId, async (uploadedPath) => {
+          const slices: Array<{ srcStart: number; dur: number }> = [];
+          if (normalizedScenes.length > 0) {
+            let cutAcc = 0;
+            for (const sc of normalizedScenes) {
+              const scCutStart = cutAcc;
+              const scCutEnd = cutAcc + sc.durationSec;
+              const ovStart = Math.max(paddedCutStart, scCutStart);
+              const ovEnd = Math.min(paddedCutEnd, scCutEnd);
+              if (ovEnd - ovStart > 0.02) {
+                slices.push({
+                  srcStart: Number((sc.startSec + (ovStart - scCutStart)).toFixed(3)),
+                  dur: Number((ovEnd - ovStart).toFixed(3)),
+                });
+              }
+              cutAcc = scCutEnd;
+            }
+          } else {
+            slices.push({
+              srcStart: paddedCutStart,
+              dur: Number(targetDur.toFixed(3)),
+            });
+          }
+
+          const pcmBuffers: Buffer[] = [];
+          for (let i = 0; i < slices.length; i++) {
+            const sl = slices[i];
+            const slPcmPath = path.join(tmpDir, `range-sl-${i}.pcm`);
+            try {
+              await execFileAsync(
+                "ffmpeg",
+                [
+                  "-y",
+                  "-ss",
+                  sl.srcStart.toFixed(3),
+                  "-i",
+                  uploadedPath,
+                  "-t",
+                  sl.dur.toFixed(3),
+                  "-vn",
+                  "-sn",
+                  "-dn",
+                  "-af",
+                  "aresample=async=1:first_pts=0",
+                  "-f",
+                  "s16le",
+                  "-ac",
+                  "1",
+                  "-ar",
+                  "16000",
+                  slPcmPath,
+                ],
+                FFMPEG_EXEC_OPTS
+              );
+              if (fs.existsSync(slPcmPath)) {
+                pcmBuffers.push(await fs.promises.readFile(slPcmPath));
+              }
+            } catch {
+              const silentBytes = Math.max(320, Math.round(sl.dur * 16000) * 2);
+              pcmBuffers.push(Buffer.alloc(silentBytes));
+            }
+          }
+
+          const pcmBuf = Buffer.concat(pcmBuffers);
+          if (pcmBuf.length < 640) return null;
+          const clipDur = Math.max(0.4, Number((pcmBuf.length / 32000).toFixed(2)));
+          const rms = computeRmsEnvelope10ms(pcmBuf);
+          const speechWindows = detectSpeechSegments10ms(rms, clipDur);
+          const wavBuf = pcmToWavBuffer(pcmBuf, 16000);
+          return {
+            wavBase64: wavBuf.toString("base64"),
+            rms,
+            speechWindows,
+            clipDur,
+          };
+        });
+      }
+
+      if (!localAudioPrep) {
+        res.status(404).json({ error: "Uploaded video audio segment could not be extracted." });
+        return;
+      }
+    } else if (sourceType === "youtube" && videoId) {
+      const mappedStart = mapCutTimeToSourceServer(normalizedScenes, reqStart).sourceSec;
+      const mappedEnd = mapCutTimeToSourceServer(normalizedScenes, reqEnd).sourceSec;
+      const srcReqStart = Math.min(mappedStart, mappedEnd);
+      const srcReqEnd = Math.max(srcReqStart + 0.25, mappedEnd);
+      const metaStart = Math.max(0, Math.floor(srcReqStart - PAD_SEC));
+      const metaEnd = Math.max(metaStart + 2, Math.ceil(srcReqEnd + PAD_SEC));
+      ytMeta = {
+        metaStart,
+        metaEnd,
+        metaDur: metaEnd - metaStart,
+        srcReqStart,
+        srcReqEnd,
+      };
+    } else {
+      res.status(400).json({ error: "No local or YouTube audio source available for range transcription." });
+      return;
+    }
+
+    let rawRes: RawSceneUtterances;
+    if (localAudioPrep) {
+      const vadWindows = localAudioPrep.speechWindows
+        .filter((w) => w.endSec > focusStartInClip - 0.15 && w.startSec < focusEndInClip + 0.15)
+        .map((w) => ({
+          startSec: Number(Math.max(0, w.startSec).toFixed(2)),
+          endSec: Number(Math.min(localAudioPrep!.clipDur, w.endSec).toFixed(2)),
+        }));
+
+      const vadBlock =
+        vadWindows.length > 0
+          ? `\nWAVEFORM-DETECTED SPEECH WINDOWS (seconds relative to 0.0s start of this clip):\n${vadWindows
+              .map((w, i) => `  [${i + 1}] ${w.startSec.toFixed(2)}s – ${w.endSec.toFixed(2)}s`)
+              .join("\n")}\n`
+          : "";
+
+      const prompt = `Listen carefully to this ${localAudioPrep.clipDur.toFixed(2)}-second audio clip.
+The user wants to fill missed subtitle(s) specifically for the TARGET WINDOW [${focusStartInClip.toFixed(2)}s – ${focusEndInClip.toFixed(2)}s] inside this clip (there is ~${padLead.toFixed(2)}s leading context buffer and trailing buffer around it so boundary syllables stay intact).
+${vadBlock}${contextBlock}
+CRITICAL RULES:
+- ONLY transcribe and translate spoken dialogue actually heard inside (or primarily spanning) the target window [${focusStartInClip.toFixed(2)}s – ${focusEndInClip.toFixed(2)}s].
+- Do NOT repeat or duplicate the Previous/Next surrounding context lines if only their edges appear in the padding buffer.
+- If there is NO spoken human dialogue in the target window (only silence, background noise, or music), set "hasDialogue": false and return an empty "utterances" array.
+- Report ALL "startSec" and "endSec" values relative to 0.0s start of this audio clip (${localAudioPrep.clipDur.toFixed(2)}s total) with sub-second precision.
+- Split into multiple chronological, non-overlapping utterances if multiple distinct sentences are spoken.
+
+${getTranslationToneInstruction(tone)}
+
+For each spoken utterance:
+- "originalSpokenText": Exact verbatim words spoken.
+- "thaiScript": Verbatim Thai script if spoken in Thai, otherwise natural Thai translation.
+- "thaiPhonetic": Clear English phonetic pronunciation of the Thai speech (e.g. "Sa-wat-dee khrap").
+- "burmese": Accurate Burmese translation (မြန်မာဘာသာပြန်) matching the tone and surrounding context.
+- "words": Split "thaiPhonetic" into space-separated word tokens with matching "thai", a 1-2 word "burmeseGloss" for content words ("" for particles), and clip-relative "startSec"/"endSec".`;
+
+      const resp = await generateGroundedWithFailover(
+        ai,
+        {
+          parts: [
+            { inlineData: { mimeType: "audio/wav", data: localAudioPrep.wavBase64 } },
+            { text: prompt },
+          ],
+        },
+        sceneTranscriptSchema,
+        ThinkingLevel.HIGH
+      );
+      const parsed = JSON.parse((resp.text || "{}").trim()) as RawSceneUtterances;
+      rawRes = refineUtterancesWithEnvelope(
+        parsed,
+        localAudioPrep.rms,
+        localAudioPrep.clipDur,
+        localAudioPrep.speechWindows
+      );
+    } else if (ytMeta && videoId) {
+      const ytFocusStart = Number((ytMeta.srcReqStart - ytMeta.metaStart).toFixed(2));
+      const ytFocusEnd = Number((ytMeta.srcReqEnd - ytMeta.metaStart).toFixed(2));
+      const prompt = `Listen carefully to the YouTube video segment from ${ytMeta.metaStart}s to ${ytMeta.metaEnd}s (clip duration ${ytMeta.metaDur.toFixed(1)}s).
+The user wants to fill missed subtitle(s) specifically for the TARGET RANGE [${ytFocusStart.toFixed(2)}s – ${ytFocusEnd.toFixed(2)}s] relative to the start of this clip (${ytMeta.srcReqStart.toFixed(2)}s – ${ytMeta.srcReqEnd.toFixed(2)}s in the video).
+${contextBlock}
+CRITICAL RULES:
+- ONLY transcribe and translate spoken dialogue actually heard inside the target range.
+- Do NOT duplicate Previous/Next surrounding context lines if their edges bleed into the clip padding.
+- If there is NO spoken dialogue in the target range (only silence or music), set "hasDialogue": false and return an empty "utterances" array.
+- Report ALL utterance and word "startSec"/"endSec" relative to the start of this clip (0.0s to ${ytMeta.metaDur.toFixed(1)}s), chronological and non-overlapping.
+
+${getTranslationToneInstruction(tone)}
+
+For each spoken utterance:
+- "originalSpokenText", "thaiScript", "thaiPhonetic", "burmese", and "words" (space-separated tokens matching "thaiPhonetic" with "phonetic", "thai", "burmeseGloss", "startSec", "endSec").`;
+
+      const resp = await generateGroundedWithFailover(
+        ai,
+        [
+          {
+            role: "user",
+            parts: [
+              {
+                fileData: { fileUri: `https://www.youtube.com/watch?v=${videoId}` },
+                videoMetadata: {
+                  startOffset: `${ytMeta.metaStart}s`,
+                  endOffset: `${ytMeta.metaEnd}s`,
+                  fps: 0.5,
+                },
+              },
+              { text: prompt },
+            ],
+          },
+        ],
+        sceneTranscriptSchema,
+        ThinkingLevel.HIGH
+      );
+      rawRes = JSON.parse((resp.text || "{}").trim()) as RawSceneUtterances;
+    } else {
+      res.status(400).json({ error: "Audio source could not be prepared." });
+      return;
+    }
+
+    if (rawRes.hasDialogue === false || !Array.isArray(rawRes.utterances) || rawRes.utterances.length === 0) {
+      res.json({
+        hasSpeech: false,
+        usedAudio: true,
+        message: `No spoken dialogue was detected between ${reqStart.toFixed(1)}s and ${reqEnd.toFixed(1)}s.`,
+        subtitles: [],
+      });
+      return;
+    }
+
+    const ytLooksAbsolute =
+      Boolean(ytMeta) &&
+      ytMeta!.metaStart > 2 &&
+      rawRes.utterances.some((u) => Number(u.endSec) > ytMeta!.metaDur + 0.8) &&
+      rawRes.utterances.every(
+        (u) =>
+          Number(u.startSec) >= ytMeta!.metaStart - 1 &&
+          Number(u.endSec) <= ytMeta!.metaEnd + 1.5
+      );
+
+    interface MappedRangeUtt {
+      cutStart: number;
+      cutEnd: number;
+      rawCutStart: number;
+      rawCutEnd: number;
+      u: NonNullable<RawSceneUtterances["utterances"]>[number];
+    }
+
+    const mappedUtts: MappedRangeUtt[] = [];
+    for (const u of rawRes.utterances) {
+      const hasText = Boolean(
+        (u.thaiPhonetic || "").trim() ||
+          (u.thaiScript || "").trim() ||
+          (u.burmese || "").trim() ||
+          (u.originalSpokenText || "").trim()
+      );
+      if (!hasText) continue;
+
+      let rawCutStart = 0;
+      let rawCutEnd = 0;
+      if (localAudioPrep) {
+        rawCutStart = paddedCutStart + (Number(u.startSec) || 0);
+        rawCutEnd = paddedCutStart + Math.max((Number(u.startSec) || 0) + 0.25, Number(u.endSec) || 0);
+      } else if (ytMeta) {
+        const srcS = ytLooksAbsolute
+          ? Number(u.startSec) || ytMeta.srcReqStart
+          : ytMeta.metaStart + (Number(u.startSec) || 0);
+        const srcE = ytLooksAbsolute
+          ? Number(u.endSec) || srcS + 0.5
+          : ytMeta.metaStart + Math.max((Number(u.startSec) || 0) + 0.25, Number(u.endSec) || 0);
+        rawCutStart = mapSourceTimeToCutServer(normalizedScenes, srcS, reqStart, ytMeta.srcReqStart);
+        rawCutEnd = mapSourceTimeToCutServer(normalizedScenes, srcE, reqStart, ytMeta.srcReqStart);
+      }
+
+      const ovStart = Math.max(reqStart - 0.12, rawCutStart);
+      const ovEnd = Math.min(reqEnd + 0.12, rawCutEnd);
+      if (ovEnd - ovStart < 0.18) continue;
+
+      const clampedStart = Number(Math.max(reqStart, Math.min(reqEnd - 0.25, rawCutStart)).toFixed(2));
+      const clampedEnd = Number(Math.max(clampedStart + 0.25, Math.min(reqEnd, rawCutEnd)).toFixed(2));
+      mappedUtts.push({
+        cutStart: clampedStart,
+        cutEnd: clampedEnd,
+        rawCutStart,
+        rawCutEnd: Math.max(rawCutStart + 0.25, rawCutEnd),
+        u,
+      });
+    }
+
+    mappedUtts.sort((a, b) => a.cutStart - b.cutStart || a.cutEnd - b.cutEnd);
+    for (let i = 1; i < mappedUtts.length; i++) {
+      const prev = mappedUtts[i - 1];
+      const curr = mappedUtts[i];
+      if (curr.cutStart < prev.cutEnd + 0.02) {
+        const mid = Number(((prev.cutEnd + curr.cutStart) / 2).toFixed(2));
+        prev.cutEnd = Number(Math.max(prev.cutStart + 0.25, mid - 0.01).toFixed(2));
+        curr.cutStart = Number(Math.max(prev.cutEnd + 0.02, curr.cutStart).toFixed(2));
+        curr.cutEnd = Number(Math.max(curr.cutStart + 0.25, Math.min(reqEnd, curr.cutEnd)).toFixed(2));
+      }
+    }
+
+    const generatedSubtitles: SubtitleItem[] = mappedUtts.map((entry, idx) => {
+      const { u, cutStart, cutEnd, rawCutStart } = entry;
+      const dur = Math.max(0.25, Number((cutEnd - cutStart).toFixed(2)));
+      const thaiPhonetic = (u.thaiPhonetic || "").trim() || (u.thaiScript || "").trim();
+      const rawWords: RawSceneWord[] =
+        Array.isArray(u.words) && u.words.length > 0
+          ? u.words
+          : thaiPhonetic
+              .split(/\s+/)
+              .filter(Boolean)
+              .map((w) => ({ phonetic: w, thai: w, burmeseGloss: "" }));
+
+      // Shift Gemini word timestamps to be relative to cutStart when clip-relative
+      const rawOriginInClip = localAudioPrep
+        ? rawCutStart - paddedCutStart
+        : ytMeta
+          ? ytLooksAbsolute
+            ? mapCutTimeToSourceServer(normalizedScenes, rawCutStart).sourceSec
+            : mapCutTimeToSourceServer(normalizedScenes, rawCutStart).sourceSec - ytMeta.metaStart
+          : 0;
+      const firstWordStart = rawWords.find((w) => typeof w.startSec === "number")?.startSec;
+      const wordsAreClipOrAbs =
+        typeof firstWordStart === "number" &&
+        rawOriginInClip > 0.35 &&
+        firstWordStart >= rawOriginInClip - 0.35;
+      const clampShift = cutStart - rawCutStart;
+      const adjustedRawWords = rawWords.map((w) => {
+        if (typeof w.startSec !== "number" || typeof w.endSec !== "number") return w;
+        const shift = (wordsAreClipOrAbs ? rawOriginInClip : 0) + clampShift;
+        return {
+          ...w,
+          startSec: Number((w.startSec - shift).toFixed(2)),
+          endSec: Number((w.endSec - shift).toFixed(2)),
+        };
+      });
+
+      const words = buildAlignedWords(adjustedRawWords, 0, dur, false, 0);
+      const mappedSrcStart = mapCutTimeToSourceServer(normalizedScenes, cutStart);
+      const mappedSrcEnd = mapCutTimeToSourceServer(normalizedScenes, cutEnd);
+
+      return {
+        id: `sub-range-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 6)}`,
+        sceneIndex: mappedSrcStart.sceneIndex,
+        startTime: cutStart,
+        endTime: cutEnd,
+        sourceStartSec: mappedSrcStart.sourceSec,
+        sourceEndSec: mappedSrcEnd.sourceSec,
+        originalSpokenText: (u.originalSpokenText || "").trim() || thaiPhonetic,
+        thaiPhonetic,
+        thaiScript: (u.thaiScript || "").trim() || thaiPhonetic,
+        burmese: (u.burmese || "").trim(),
+        words,
+        isManuallyEdited: false,
+      };
+    });
+
+    if (generatedSubtitles.length === 0) {
+      res.json({
+        hasSpeech: false,
+        usedAudio: true,
+        message: `No spoken dialogue was detected between ${reqStart.toFixed(1)}s and ${reqEnd.toFixed(1)}s.`,
+        subtitles: [],
+      });
+      return;
+    }
+
+    res.json({
+      hasSpeech: true,
+      usedAudio: true,
+      subtitles: generatedSubtitles,
+    });
+  } catch (err) {
+    console.error("Transcribe range error:", err);
+    const formatted = formatGeminiError(err, "Failed to transcribe range with AI.");
+    res.status(formatted.status).json({ error: formatted.message });
+  } finally {
+    await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
 // Proxy YouTube storyboard/thumbnail images cleanly with CORS for canvas export
 app.get("/api/image-proxy", async (req, res) => {
   try {
@@ -5031,15 +5667,19 @@ function buildTopVideoFfmpegFilter(
   if (flipV) parts.push("vflip");
   if (Math.abs(rotateDeg) >= 0.5) {
     const rad = ((rotateDeg * Math.PI) / 180).toFixed(5);
-    parts.push(`rotate=${rad}:fillcolor=0x111111`);
+    parts.push(`rotate=${rad}:ow='rotw(${rad})':oh='roth(${rad})':fillcolor=0x111111`);
   }
 
-  // Always pad to at least width x topVideoH, then safely clamped crop to exact width x topVideoH
+  // Pad with pan-offset margins so zoom<=1, contain, and extreme pan match Canvas #111111 matte 1:1
+  const shiftX = Math.round(panXRatio * width);
+  const shiftY = Math.round(panYRatio * topVideoH);
+  const padMarginX = 2 * Math.abs(shiftX);
+  const padMarginY = 2 * Math.abs(shiftY);
   parts.push(
-    `pad=w='max(iw,${width})':h='max(ih,${topVideoH})':x='(ow-iw)/2':y='(oh-ih)/2':color=0x111111`
+    `pad=w='max(iw,${width})+${padMarginX}':h='max(ih,${topVideoH})+${padMarginY}':x='(ow-iw)/2':y='(oh-ih)/2':color=0x111111`
   );
   parts.push(
-    `crop=w=${width}:h=${topVideoH}:x='max(0,min(iw-${width},(iw-${width})/2-(${panXRatio.toFixed(4)})*${width}))':y='max(0,min(ih-${topVideoH},(ih-${topVideoH})/2-(${panYRatio.toFixed(4)})*${topVideoH}))'`
+    `crop=w=${width}:h=${topVideoH}:x='(iw-${width})/2-(${shiftX})':y='(ih-${topVideoH})/2-(${shiftY})'`
   );
 
   // Optional color/filter adjustments (only appended when non-default for max speed)

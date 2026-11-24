@@ -181,12 +181,40 @@ export const YouTubeScenePlayer = memo(
       suppressUntilMs: 0,
     });
 
+  const localStageRef = useRef<HTMLDivElement | null>(null);
   const [autoMutedFallback, setAutoMutedFallback] = useState(false);
   const [ytReady, setYtReady] = useState(false);
   const [ytActualPlaying, setYtActualPlaying] = useState(false);
   const [needsDirectYtTap, setNeedsDirectYtTap] = useState(false);
   const [ytEmbedError, setYtEmbedError] = useState<string | null>(null);
   const [localPlayError, setLocalPlayError] = useState<string | null>(null);
+  const [localVideoDims, setLocalVideoDims] = useState<{ w: number; h: number } | null>(null);
+  const [localViewportDims, setLocalViewportDims] = useState<{ w: number; h: number } | null>(null);
+
+  useEffect(() => {
+    setLocalVideoDims(null);
+  }, [localUrl]);
+
+  useEffect(() => {
+    if (sourceType !== "local") return;
+    const host = localStageRef.current;
+    if (!host) return;
+    const updateSize = () => {
+      const rect = host.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        setLocalViewportDims((prev) =>
+          prev && Math.abs(prev.w - rect.width) < 0.5 && Math.abs(prev.h - rect.height) < 0.5
+            ? prev
+            : { w: rect.width, h: rect.height }
+        );
+      }
+    };
+    updateSize();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(updateSize);
+    ro.observe(host);
+    return () => ro.disconnect();
+  }, [sourceType, localUrl]);
 
   const hasVoiceEffects =
     Math.abs(voiceSettings.pitchSemitones) >= 0.08 ||
@@ -1103,31 +1131,67 @@ export const YouTubeScenePlayer = memo(
       );
     }
 
+    const fittedLocalVideoSize =
+      localVideoDims && localViewportDims && localVideoDims.w > 0 && localVideoDims.h > 0
+        ? (() => {
+            const baseScale =
+              editSettings.fitMode === "contain"
+                ? Math.min(
+                    localViewportDims.w / localVideoDims.w,
+                    localViewportDims.h / localVideoDims.h
+                  )
+                : Math.max(
+                    localViewportDims.w / localVideoDims.w,
+                    localViewportDims.h / localVideoDims.h
+                  );
+            return {
+              w: localVideoDims.w * baseScale,
+              h: localVideoDims.h * baseScale,
+            };
+          })()
+        : null;
+
     return (
       <div
+        ref={localStageRef}
         onClick={() => {
           const vid = localVideoRef.current;
           if (!vid || vid.paused || vid.ended || vid.error) startLocalPlayback();
           else pauseLocalPlayback();
         }}
-        className="relative w-full h-full overflow-hidden bg-neutral-950 cursor-pointer group"
+        className="relative w-full h-full overflow-hidden bg-[#111111] cursor-pointer group"
       >
-        <video
-          key={localUrl}
-          ref={localVideoRef}
-          src={localUrl}
-          preload="auto"
-          playsInline
-          muted={muted || autoMutedFallback}
-          onLoadedData={() => setLocalPlayError(null)}
-          onLoadedMetadata={(e) => {
-            setLocalPlayError(null);
-            applyPendingLocalSeekAndPlay(e.currentTarget);
+        <div
+          className="absolute inset-0 origin-center pointer-events-none"
+          style={{
+            ...(transformCss !== "none" ? { transform: transformCss } : {}),
+            ...(filterCss !== "none" ? { filter: filterCss } : {}),
           }}
-          onCanPlay={(e) => {
-            setLocalPlayError(null);
-            applyPendingLocalSeekAndPlay(e.currentTarget);
-          }}
+        >
+          <video
+            key={localUrl}
+            ref={localVideoRef}
+            src={localUrl}
+            preload="auto"
+            playsInline
+            muted={muted || autoMutedFallback}
+            onLoadedData={() => setLocalPlayError(null)}
+            onLoadedMetadata={(e) => {
+              const v = e.currentTarget;
+              if (v.videoWidth > 0 && v.videoHeight > 0) {
+                setLocalVideoDims({ w: v.videoWidth, h: v.videoHeight });
+              }
+              setLocalPlayError(null);
+              applyPendingLocalSeekAndPlay(v);
+            }}
+            onCanPlay={(e) => {
+              const v = e.currentTarget;
+              if (!localVideoDims && v.videoWidth > 0 && v.videoHeight > 0) {
+                setLocalVideoDims({ w: v.videoWidth, h: v.videoHeight });
+              }
+              setLocalPlayError(null);
+              applyPendingLocalSeekAndPlay(v);
+            }}
           onSeeked={(e) => {
             seekSettleUntilRef.current = 0;
             applyPendingLocalSeekAndPlay(e.currentTarget);
@@ -1201,14 +1265,29 @@ export const YouTubeScenePlayer = memo(
             onPlayingChangeRef.current(false);
             setLocalPlayError("Could not play this video file.");
           }}
-          style={{
-            ...(transformCss !== "none" ? { transform: transformCss } : {}),
-            ...(filterCss !== "none" ? { filter: filterCss } : {}),
-          }}
-          className={`w-full h-full bg-neutral-950 origin-center ${
-            editSettings.fitMode === "contain" ? "object-contain" : "object-cover"
-          }`}
-        />
+            style={
+              fittedLocalVideoSize
+                ? {
+                    position: "absolute",
+                    left: "50%",
+                    top: "50%",
+                    width: `${fittedLocalVideoSize.w}px`,
+                    height: `${fittedLocalVideoSize.h}px`,
+                    maxWidth: "none",
+                    maxHeight: "none",
+                    transform: "translate(-50%, -50%)",
+                  }
+                : undefined
+            }
+            className={
+              fittedLocalVideoSize
+                ? "block bg-[#111111]"
+                : `w-full h-full bg-[#111111] ${
+                    editSettings.fitMode === "contain" ? "object-contain" : "object-cover"
+                  }`
+            }
+          />
+        </div>
         <AdversarialNoiseOverlay
           enabled={editSettings.adversarialNoise}
           strength={editSettings.adversarialStrength}
@@ -1248,7 +1327,7 @@ export const YouTubeScenePlayer = memo(
           pauseYouTubePlayback();
         }
       }}
-      className="relative w-full h-full overflow-hidden bg-neutral-950"
+      className="relative w-full h-full overflow-hidden bg-[#111111]"
     >
       <div
         className="w-full h-full origin-center"
@@ -1269,9 +1348,9 @@ export const YouTubeScenePlayer = memo(
         )}
         <div
           ref={containerRef}
-          className={`relative w-full h-full ${
+          className={`relative w-full h-full scale-100 ${
             ytActualPlaying && !needsDirectYtTap ? "pointer-events-none" : "pointer-events-auto"
-          } ${editSettings.fitMode === "cover" ? "scale-[1.06]" : "scale-100"}`}
+          }`}
         />
       </div>
       <AdversarialNoiseOverlay

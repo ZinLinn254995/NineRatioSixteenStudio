@@ -5,6 +5,10 @@ import type { SubtitleItem, VideoEditSettings, VideoProject, VoiceSettings } fro
 import { YouTubeScenePlayer, type YouTubeScenePlayerHandle } from "./YouTubeScenePlayer";
 import { getEffectivePlaybackSpeed } from "../utils/voicePresets";
 import { findActiveSubtitle, getScrollAnchorSubtitle } from "../utils/projectTimeline";
+import {
+  clampAndSnapVideoHeightPct,
+  isStageCleanClick,
+} from "../utils/subtitleState";
 import { AppErrorBoundary } from "./AppErrorBoundary";
 
 function getActiveWordHighlightKey(sub: SubtitleItem | undefined, highlightTime: number): string {
@@ -99,10 +103,13 @@ interface Stage9x16Props {
   onTimeUpdate: (newCutTime: number) => void;
   onEnded: () => void;
   onToggleMute: () => void;
+  selectedSubtitleId?: string | null;
+  onSelectSubtitle?: (id: string, startTime: number) => void;
   compactMobile?: boolean;
   fitContainerHeight?: boolean;
   previewScale?: number;
   onChangePreviewScale?: (scale: number) => void;
+  onChangeVideoHeightPct?: (pct: number) => void;
 }
 
 function formatSec(sec: number): string {
@@ -129,10 +136,13 @@ export function Stage9x16({
   onTimeUpdate,
   onEnded,
   onToggleMute,
+  selectedSubtitleId = null,
+  onSelectSubtitle,
   compactMobile = false,
   fitContainerHeight = false,
   previewScale = DEFAULT_STAGE_PREVIEW_SCALE,
   onChangePreviewScale,
+  onChangeVideoHeightPct,
 }: Stage9x16Props) {
   const playerRef = useRef<YouTubeScenePlayerHandle | null>(null);
   const stageOuterRef = useRef<HTMLDivElement | null>(null);
@@ -142,6 +152,13 @@ export function Stage9x16({
   const timeTextRef = useRef<HTMLSpanElement | null>(null);
   const pctTextRef = useRef<HTMLSpanElement | null>(null);
   const itemRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const cardPointerDownRef = useRef<{
+    id: string;
+    clientX: number;
+    clientY: number;
+    at: number;
+  } | null>(null);
+  const suppressNextCardClickIdRef = useRef<string | null>(null);
   const dragStartRef = useRef<{
     startY: number;
     startHeightPx: number;
@@ -165,6 +182,16 @@ export function Stage9x16({
   const [outerWidth, setOuterWidth] = useState<number>(0);
   const [containerHeight, setContainerHeight] = useState<number>(0);
   const [isResizing, setIsResizing] = useState(false);
+  const [dragVideoHeightPct, setDragVideoHeightPct] = useState<number | null>(null);
+  const [isDraggingSplit, setIsDraggingSplit] = useState(false);
+  const [isSplitSnapped, setIsSplitSnapped] = useState(false);
+  const splitDragCleanupRef = useRef<(() => void) | null>(null);
+  const splitRafRef = useRef<number | null>(null);
+  const pendingSplitRef = useRef<{ pct: number; snapped: boolean } | null>(null);
+  const onChangeVideoHeightPctRef = useRef(onChangeVideoHeightPct);
+  onChangeVideoHeightPctRef.current = onChangeVideoHeightPct;
+  const dragVideoHeightPctRef = useRef<number | null>(null);
+  dragVideoHeightPctRef.current = dragVideoHeightPct;
   const [viewportMetrics, setViewportMetrics] = useState<{
     width: number;
     height: number;
@@ -360,11 +387,10 @@ export function Stage9x16({
     const el = itemRefs.current[scrollTargetSub.id];
     if (!el) return;
 
-    const cHeight = container.clientHeight;
-    const targetTop = el.offsetTop + el.clientHeight * 0.5 - cHeight * 0.42;
+    const targetTop = Math.max(0, el.offsetTop - 34);
     try {
       container.scrollTo({
-        top: Math.max(0, targetTop),
+        top: targetTop,
         behavior: "smooth",
       });
     } catch {
@@ -599,12 +625,133 @@ export function Stage9x16({
     }
   };
 
+  useEffect(() => {
+    return () => {
+      splitDragCleanupRef.current?.();
+      if (splitRafRef.current !== null) {
+        cancelAnimationFrame(splitRafRef.current);
+      }
+    };
+  }, []);
+
   // Match exportVideo.ts 720x1280 split geometry verbatim
   const hasSubtitles = Boolean(project && project.subtitles.length > 0);
-  const clampedHeightPct = Math.max(26, Math.min(52, editSettings.videoHeightPct || 35));
+  const activeVideoHeightPct = dragVideoHeightPct ?? (editSettings.videoHeightPct || 35);
+  const clampedHeightPct = Math.max(26, Math.min(52, activeVideoHeightPct));
   const exportTopVideoH = hasSubtitles ? Math.round((1280 * clampedHeightPct) / 100) : 1280;
   const exportListH = Math.max(1, 1280 - exportTopVideoH);
   const topVideoHeightPct = (exportTopVideoH / 1280) * 100;
+  const snapGuideTopPct = (Math.round((1280 * 35) / 100) / 1280) * 100;
+
+  const scheduleSplitPreview = (clientY: number) => {
+    const frameEl = stageFrameRef.current;
+    if (!frameEl) return;
+    const rect = frameEl.getBoundingClientRect();
+    if (rect.height <= 0) return;
+    const rawPct = ((clientY - rect.top) / rect.height) * 100;
+    const next = clampAndSnapVideoHeightPct(rawPct, 1.0);
+    pendingSplitRef.current = next;
+    if (splitRafRef.current === null) {
+      splitRafRef.current = requestAnimationFrame(() => {
+        splitRafRef.current = null;
+        if (pendingSplitRef.current) {
+          setDragVideoHeightPct(pendingSplitRef.current.pct);
+          setIsSplitSnapped(pendingSplitRef.current.snapped);
+        }
+      });
+    }
+  };
+
+  const endSplitDrag = () => {
+    splitDragCleanupRef.current?.();
+    splitDragCleanupRef.current = null;
+    if (splitRafRef.current !== null) {
+      cancelAnimationFrame(splitRafRef.current);
+      splitRafRef.current = null;
+    }
+    const finalPct =
+      pendingSplitRef.current?.pct ??
+      dragVideoHeightPctRef.current ??
+      Math.round(clampedHeightPct);
+    pendingSplitRef.current = null;
+    setDragVideoHeightPct(null);
+    setIsDraggingSplit(false);
+    setIsSplitSnapped(false);
+    onChangeVideoHeightPctRef.current?.(Math.max(26, Math.min(52, Math.round(finalPct))));
+  };
+
+  const handleSplitPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!hasSubtitles || !onChangeVideoHeightPct) return;
+    if (e.button !== 0 && e.pointerType === "mouse") return;
+    e.preventDefault();
+    e.stopPropagation();
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      // ignore if capture unavailable
+    }
+
+    splitDragCleanupRef.current?.();
+    const pointerId = e.pointerId;
+    setIsDraggingSplit(true);
+    scheduleSplitPreview(e.clientY);
+
+    const onWinPointerMove = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointerId) return;
+      if (ev.cancelable) ev.preventDefault();
+      scheduleSplitPreview(ev.clientY);
+    };
+    const onWinPointerUp = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointerId) return;
+      endSplitDrag();
+    };
+    const onWinTouchMove = (ev: TouchEvent) => {
+      if (ev.cancelable) ev.preventDefault();
+      if (ev.touches.length > 0) {
+        scheduleSplitPreview(ev.touches[0].clientY);
+      }
+    };
+    const onWinTouchEnd = () => {
+      endSplitDrag();
+    };
+
+    window.addEventListener("pointermove", onWinPointerMove, { passive: false });
+    window.addEventListener("pointerup", onWinPointerUp);
+    window.addEventListener("pointercancel", onWinPointerUp);
+    window.addEventListener("touchmove", onWinTouchMove, { passive: false });
+    window.addEventListener("touchend", onWinTouchEnd);
+    window.addEventListener("touchcancel", onWinTouchEnd);
+
+    splitDragCleanupRef.current = () => {
+      window.removeEventListener("pointermove", onWinPointerMove);
+      window.removeEventListener("pointerup", onWinPointerUp);
+      window.removeEventListener("pointercancel", onWinPointerUp);
+      window.removeEventListener("touchmove", onWinTouchMove);
+      window.removeEventListener("touchend", onWinTouchEnd);
+      window.removeEventListener("touchcancel", onWinTouchEnd);
+    };
+  };
+
+  const handleSplitKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!hasSubtitles || !onChangeVideoHeightPct) return;
+    const basePct = Math.round(clampedHeightPct);
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      onChangeVideoHeightPct(Math.max(26, basePct - 1));
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      onChangeVideoHeightPct(Math.min(52, basePct + 1));
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      onChangeVideoHeightPct(26);
+    } else if (e.key === "End") {
+      e.preventDefault();
+      onChangeVideoHeightPct(52);
+    } else if (e.key === "Enter" || e.key === "0") {
+      e.preventDefault();
+      onChangeVideoHeightPct(35);
+    }
+  };
 
   return (
     <div
@@ -690,6 +837,62 @@ export function Stage9x16({
                 />
               </AppErrorBoundary>
             </div>
+
+            {/* Visual 35% Snap Guide & Draggable Video/Caption Split Handle */}
+            {hasSubtitles && onChangeVideoHeightPct && (
+              <>
+                {isDraggingSplit && (
+                  <div
+                    aria-hidden="true"
+                    style={{ top: `${snapGuideTopPct}%` }}
+                    className={`pointer-events-none absolute inset-x-0 z-20 border-t border-dashed transition-colors ${
+                      isSplitSnapped
+                        ? "border-amber-500 dark:border-amber-300"
+                        : "border-teal-600/55 dark:border-teal-400/55"
+                    }`}
+                  />
+                )}
+                <div
+                  role="slider"
+                  tabIndex={0}
+                  aria-label="Adjust top video height percentage (26% to 52%, double-click for 35%)"
+                  aria-orientation="vertical"
+                  aria-valuemin={26}
+                  aria-valuemax={52}
+                  aria-valuenow={Math.round(clampedHeightPct)}
+                  title="Drag up/down to adjust video height (26%–52%) · Double-click for 35%"
+                  style={{ top: `${topVideoHeightPct}%` }}
+                  onPointerDown={handleSplitPointerDown}
+                  onDoubleClick={(e) => {
+                    e.stopPropagation();
+                    onChangeVideoHeightPct(35);
+                  }}
+                  onKeyDown={handleSplitKeyDown}
+                  className="group absolute inset-x-0 -translate-y-1/2 h-4 z-30 flex items-center justify-center cursor-ns-resize touch-none select-none focus-visible:outline-none"
+                >
+                  <span
+                    className={`h-1 rounded-full transition-all shadow-xs ${
+                      isDraggingSplit
+                        ? isSplitSnapped
+                          ? "w-14 bg-amber-500 dark:bg-amber-300"
+                          : "w-14 bg-teal-600 dark:bg-teal-400"
+                        : "w-9 bg-[#94a3b8]/85 dark:bg-[#4b588c]/85 group-hover:w-12 group-hover:bg-teal-600 dark:group-hover:bg-teal-400 group-focus-visible:w-14 group-focus-visible:bg-teal-600"
+                    }`}
+                  />
+                  {isDraggingSplit && (
+                    <span
+                      className={`pointer-events-none absolute -top-6 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded text-[10px] font-mono-tabular font-semibold whitespace-nowrap shadow-sm ${
+                        isSplitSnapped
+                          ? "bg-amber-500 text-[#0c1026] dark:bg-amber-300"
+                          : "bg-teal-700 text-white dark:bg-teal-400 dark:text-[#060918]"
+                      }`}
+                    >
+                      {isSplitSnapped ? "35% · Snap" : `${Math.round(clampedHeightPct)}%`}
+                    </span>
+                  )}
+                </div>
+              </>
+            )}
 
             {/* Bottom Scrolling List Item View — fixed 720px coordinate system matching exportVideo.ts, scaled uniformly with preview */}
             {hasSubtitles && (() => {
@@ -903,6 +1106,7 @@ export function Stage9x16({
                   >
                     {project.subtitles.map((sub, subIdx) => {
                       const isActive = activeSub?.id === sub.id;
+                      const isStageSelected = selectedSubtitleId === sub.id;
                       const localElapsed = Math.max(0, highlightTime - sub.startTime);
 
                       return (
@@ -912,14 +1116,60 @@ export function Stage9x16({
                             itemRefs.current[sub.id] = node;
                           }}
                           type="button"
-                          onClick={() => onSeek(sub.startTime)}
+                          aria-pressed={isStageSelected}
+                          onPointerDown={(e) => {
+                            if (e.button !== 0 && e.pointerType === "mouse") return;
+                            suppressNextCardClickIdRef.current = null;
+                            cardPointerDownRef.current = {
+                              id: sub.id,
+                              clientX: e.clientX,
+                              clientY: e.clientY,
+                              at: performance.now(),
+                            };
+                          }}
+                          onPointerUp={(e) => {
+                            const down = cardPointerDownRef.current;
+                            cardPointerDownRef.current = null;
+                            if (!down || down.id !== sub.id) return;
+                            const dx = e.clientX - down.clientX;
+                            const dy = e.clientY - down.clientY;
+                            const durationMs = performance.now() - down.at;
+                            suppressNextCardClickIdRef.current = sub.id;
+                            if (isStageCleanClick(dx, dy, durationMs)) {
+                              if (onSelectSubtitle) {
+                                onSelectSubtitle(sub.id, sub.startTime);
+                              } else {
+                                onSeek(sub.startTime);
+                              }
+                            }
+                          }}
+                          onPointerCancel={() => {
+                            cardPointerDownRef.current = null;
+                          }}
+                          onClick={(e) => {
+                            if (suppressNextCardClickIdRef.current === sub.id) {
+                              suppressNextCardClickIdRef.current = null;
+                              return;
+                            }
+                            if (e.detail === 0) {
+                              if (onSelectSubtitle) {
+                                onSelectSubtitle(sub.id, sub.startTime);
+                              } else {
+                                onSeek(sub.startTime);
+                              }
+                            }
+                          }}
                           style={{
                             borderRadius: "18px",
                             padding: "16px 26px 20px 32px",
                           }}
                           className={`relative w-full text-left shrink-0 overflow-hidden focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1c3db8] dark:focus-visible:ring-[#4e7ef7] ${getCardThemeClass(
                             isActive
-                          )}`}
+                          )} ${
+                            isStageSelected
+                              ? "ring-2 ring-amber-500/90 dark:ring-amber-300/90 shadow-md"
+                              : ""
+                          }`}
                         >
                           {/* Educational Left Accent Bar matching exportVideo.ts (x=32, w=5) */}
                           <span
@@ -1006,7 +1256,7 @@ export function Stage9x16({
                                 marginTop: `${Math.round(12 * fontMultiplier)}px`,
                                 paddingLeft: "4px",
                                 fontSize: `${thaiPx}px`,
-                                fontFamily: "'Noto Sans Thai', 'Plus Jakarta Sans', sans-serif",
+                                fontFamily: "'Noto Sans Thai', 'DM Sans', sans-serif",
                                 lineHeight: 1.4,
                               }}
                               className={`min-w-0 break-words ${getThaiScriptClass(isActive)}`}
@@ -1053,7 +1303,7 @@ export function Stage9x16({
                       );
                     })}
                     <div
-                      style={{ height: `${Math.round(exportListH * 0.45)}px` }}
+                      style={{ height: `${Math.max(160, exportListH)}px` }}
                       className="shrink-0"
                       aria-hidden="true"
                     />

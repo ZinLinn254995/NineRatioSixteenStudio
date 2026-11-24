@@ -209,6 +209,7 @@ export function remapSubtitlesToScenes(
         sourceStartSec: Number(ovStart.toFixed(2)),
         sourceEndSec: Number(ovEnd.toFixed(2)),
         words,
+        isManuallyEdited: Boolean(sub.isManuallyEdited),
       });
     });
   }

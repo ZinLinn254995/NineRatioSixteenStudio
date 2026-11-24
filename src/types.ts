@@ -62,6 +62,7 @@ export interface SubtitleItem {
   thaiScript: string;
   burmese: string;
   words: SubtitleWord[];
+  isManuallyEdited?: boolean;
 }
 
 export interface ActiveMediaSource {

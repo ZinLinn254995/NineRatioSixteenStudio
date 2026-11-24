@@ -317,7 +317,7 @@ function measureSubtitleList(
     const cardTop = cursorY;
     let y = 28;
 
-    ctx.font = `600 ${phoneticFontPx}px 'Plus Jakarta Sans', sans-serif`;
+    ctx.font = `600 ${phoneticFontPx}px 'DM Sans', 'Noto Sans Myanmar', 'Noto Sans Thai', sans-serif`;
     let lineX = 0;
     const rowGap = showWordGloss ? Math.round(56 * fs) : Math.round(42 * fs);
     const wordLayouts: MeasuredCard["wordLayouts"] = [];
@@ -346,7 +346,7 @@ function measureSubtitleList(
     let thaiLines: string[] = [];
     let thaiStartY = cardTop + y;
     if (showThaiScript && sub.thaiScript && sub.thaiScript.trim()) {
-      ctx.font = `500 ${thaiFontPx}px 'Noto Sans Thai', 'Plus Jakarta Sans', sans-serif`;
+      ctx.font = `500 ${thaiFontPx}px 'Noto Sans Thai', 'DM Sans', sans-serif`;
       thaiLines = wrapTextLines(ctx, sub.thaiScript.trim(), maxInnerW - 10);
       y += 4;
       thaiStartY = cardTop + y;
@@ -358,7 +358,7 @@ function measureSubtitleList(
     let burmeseLines: string[] = [];
     let burmeseStartY = cardTop + y;
     if (showBurmeseLine) {
-      ctx.font = `500 ${burmeseFontPx}px 'Noto Sans Myanmar', 'Plus Jakarta Sans', sans-serif`;
+      ctx.font = `500 ${burmeseFontPx}px 'Noto Sans Myanmar', 'DM Sans', sans-serif`;
       burmeseLines = wrapTextLines(ctx, sub.burmese, maxInnerW - 34);
       burmeseStartY = cardTop + y;
       y += burmeseLines.length * burmeseLineH + 22;
@@ -676,11 +676,24 @@ export async function exportProjectToMp4(
 
     throwIfAborted(signal);
 
-    // Ensure fonts are loaded before measuring canvas text, with a hard 2.5s timeout
-    if (document.fonts && document.fonts.ready) {
-      await Promise.race([
+    // Explicitly preload all font families, weights & Unicode subsets (Latin, Myanmar, Thai, Mono)
+    // before measuring subtitle cards, because document.fonts.ready skips lazy unicode-range faces.
+    if (typeof document !== "undefined" && document.fonts) {
+      const fontLoads: Promise<unknown>[] = [
         document.fonts.ready.catch(() => undefined),
-        new Promise<void>((resolve) => window.setTimeout(resolve, 2500)),
+      ];
+      if (typeof document.fonts.load === "function") {
+        fontLoads.push(
+          document.fonts.load("600 28px 'DM Sans'", "Sa-wat-dee khrap").catch(() => []),
+          document.fonts.load("500 22px 'DM Sans'", "AaBbCc0123").catch(() => []),
+          document.fonts.load("500 22px 'Noto Sans Myanmar'", "မင်္ဂလာပါ ကျေးဇူး").catch(() => []),
+          document.fonts.load("500 20px 'Noto Sans Thai'", "สวัสดีครับ").catch(() => []),
+          document.fonts.load("600 15px 'JetBrains Mono'", "0123456789").catch(() => [])
+        );
+      }
+      await Promise.race([
+        Promise.allSettled(fontLoads),
+        new Promise<void>((resolve) => window.setTimeout(resolve, 3000)),
       ]);
     }
 
@@ -759,8 +772,7 @@ export async function exportProjectToMp4(
           }
           const active = cards[Math.max(0, anchorIdx)];
           if (!active) return 0;
-          const desiredCenter = active.topY + active.height * 0.5 - listH * 0.42;
-          return Math.max(0, desiredCenter);
+          return Math.max(0, active.topY - 34);
         };
 
         let subScrollY = 0;
@@ -882,7 +894,7 @@ export async function exportProjectToMp4(
                 subCtx.fill();
               }
 
-              subCtx.font = `600 ${phoneticPx}px 'Plus Jakarta Sans', sans-serif`;
+              subCtx.font = `600 ${phoneticPx}px 'DM Sans', 'Noto Sans Myanmar', 'Noto Sans Thai', sans-serif`;
               if (isSpoken) {
                 subCtx.fillStyle = pillTextFill;
               } else if (isActive) {
@@ -934,7 +946,7 @@ export async function exportProjectToMp4(
             }
 
             if (card.thaiLines.length > 0) {
-              subCtx.font = `500 ${thaiPx}px 'Noto Sans Thai', 'Plus Jakarta Sans', sans-serif`;
+              subCtx.font = `500 ${thaiPx}px 'Noto Sans Thai', 'DM Sans', sans-serif`;
               subCtx.fillStyle = isActive
                 ? isDarkPanel
                   ? "#e2e8f0"
@@ -980,7 +992,7 @@ export async function exportProjectToMp4(
                     : "#94a3b8";
               subCtx.fillText(String(ci + 1).padStart(2, "0"), 54, card.burmeseStartY - 1);
 
-              subCtx.font = `500 ${burmesePx}px 'Noto Sans Myanmar', 'Plus Jakarta Sans', sans-serif`;
+              subCtx.font = `500 ${burmesePx}px 'Noto Sans Myanmar', 'DM Sans', sans-serif`;
               subCtx.fillStyle = isActive
                 ? isDarkPanel
                   ? "#99b8ff"
@@ -1485,8 +1497,7 @@ export async function exportProjectToMp4(
       }
       const active = cards[Math.max(0, anchorIdx)];
       if (!active) return 0;
-      const desiredCenter = active.topY + active.height * 0.5 - listH * 0.42;
-      return Math.max(0, desiredCenter);
+      return Math.max(0, active.topY - 34);
     };
 
     let currentScrollY = 0;
@@ -1524,14 +1535,18 @@ export async function exportProjectToMp4(
         const dh = sh * baseScale * extraZoom;
 
         ctx.save();
-        const cx = width / 2 + (editSettings.panX / 100) * width + extraPanX;
-        const cy = topVideoH / 2 + (editSettings.panY / 100) * topVideoH;
+        const safePanX = Math.max(-50, Math.min(50, Number(editSettings.panX) || 0));
+        const safePanY = Math.max(-50, Math.min(50, Number(editSettings.panY) || 0));
+        const safeZoom = Math.max(0.5, Math.min(3, Number(editSettings.zoom) || 1));
+        const safeRotate = Number(editSettings.rotateDeg) || 0;
+        const cx = width / 2 + (safePanX / 100) * width + extraPanX;
+        const cy = topVideoH / 2 + (safePanY / 100) * topVideoH;
         ctx.translate(cx, cy);
         ctx.scale(
-          editSettings.zoom * (editSettings.flipH ? -1 : 1),
-          editSettings.zoom * (editSettings.flipV ? -1 : 1)
+          safeZoom * (editSettings.flipH ? -1 : 1),
+          safeZoom * (editSettings.flipV ? -1 : 1)
         );
-        ctx.rotate((editSettings.rotateDeg * Math.PI) / 180);
+        ctx.rotate((safeRotate * Math.PI) / 180);
         if (hasCssFilter) {
           ctx.filter = cssFilterStr;
         }
@@ -1738,7 +1753,7 @@ export async function exportProjectToMp4(
               ctx.fill();
             }
 
-            ctx.font = `600 ${phoneticPx}px 'Plus Jakarta Sans', sans-serif`;
+            ctx.font = `600 ${phoneticPx}px 'DM Sans', 'Noto Sans Myanmar', 'Noto Sans Thai', sans-serif`;
             if (isSpoken) {
               ctx.fillStyle = pillTextFill;
             } else if (isActive) {
@@ -1790,7 +1805,7 @@ export async function exportProjectToMp4(
           }
 
           if (card.thaiLines.length > 0) {
-            ctx.font = `500 ${thaiPx}px 'Noto Sans Thai', 'Plus Jakarta Sans', sans-serif`;
+            ctx.font = `500 ${thaiPx}px 'Noto Sans Thai', 'DM Sans', sans-serif`;
             ctx.fillStyle = isActive
               ? isDarkPanel
                 ? "#e2e8f0"
@@ -1836,7 +1851,7 @@ export async function exportProjectToMp4(
                   : "#94a3b8";
             ctx.fillText(String(ci + 1).padStart(2, "0"), 54, card.burmeseStartY - 1);
 
-            ctx.font = `500 ${burmesePx}px 'Noto Sans Myanmar', 'Plus Jakarta Sans', sans-serif`;
+            ctx.font = `500 ${burmesePx}px 'Noto Sans Myanmar', 'DM Sans', sans-serif`;
             ctx.fillStyle = isActive
               ? isDarkPanel
                 ? "#99b8ff"

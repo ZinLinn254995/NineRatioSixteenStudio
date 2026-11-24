@@ -1,7 +1,10 @@
 import {
+  useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
+  type FocusEvent as ReactFocusEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
@@ -9,9 +12,11 @@ import {
   type TouchEvent as ReactTouchEvent,
 } from "react";
 import {
+  AlertTriangle,
   BookOpen,
   Captions,
   Check,
+  ClipboardPaste,
   Clock,
   Copy,
   Download,
@@ -20,9 +25,8 @@ import {
   Loader2,
   LocateFixed,
   Merge,
-  MessageSquarePlus,
   Mic,
-  Palette,
+  MoreHorizontal,
   Plus,
   Redo2,
   RefreshCw,
@@ -45,11 +49,8 @@ import type {
   SavedProjectRecord,
   SceneSelection,
   SpeakingScene,
-  SubtitleFontScale,
   SubtitleGenerationProgress,
-  SubtitleHighlightColor,
   SubtitleItem,
-  SubtitleTheme,
   TranslationTone,
   VideoEditSettings,
   VideoProject,
@@ -61,6 +62,7 @@ import { ScenePicker } from "./ScenePicker";
 import { YouTubePreviewPanel } from "./YouTubePreviewPanel";
 import { VideoEditPanel, getVideoEditDirtyMap } from "./VideoEditPanel";
 import { ProjectTimelineEditor } from "./ProjectTimelineEditor";
+import { SubtitleStylePanel } from "./SubtitleStylePanel";
 import {
   boundsValueToScale,
   DEFAULT_STAGE_PREVIEW_SCALE,
@@ -69,10 +71,24 @@ import {
   scaleToBoundsValue,
 } from "./Stage9x16";
 import { SavedProjectsPanel } from "./SavedProjectsPanel";
+import { PasteTranscriptModal } from "./PasteTranscriptModal";
+import {
+  SubtitleListViewport,
+  type SubtitleListViewportHandle,
+} from "./SubtitleListViewport";
 import { DEFAULT_VOICE_SETTINGS, getEffectivePlaybackSpeed } from "../utils/voicePresets";
 import { findActiveSubtitle, getSceneDurationSec } from "../utils/projectTimeline";
+import {
+  computeSubtitleQualityMap,
+  findUnmatchedSpeechGaps,
+  suggestTranscribeRange,
+  type AutoFollowState,
+  type SubtitleQualityIssue,
+} from "../utils/subtitleState";
+import type { CutSpeechRegion } from "../utils/audioSpeechAnalyzer";
 import { DEFAULT_VIDEO_EDIT } from "../utils/videoFilters";
 import {
+  buildAiChatTranscriptContent,
   buildSrtContent,
   buildStudyTextContent,
   buildVttContent,
@@ -181,9 +197,10 @@ interface WorkspaceSidebarProps {
     toneOverride?: TranslationTone
   ) => void;
   onCancelRegenerateSubtitle?: (id: string) => void;
-  onRetranslateAll: (tone: TranslationTone) => void;
+  onRetranslateAll: (tone: TranslationTone, options?: { skipManuallyEdited?: boolean }) => void;
   onCancelRetranslateAll?: () => void;
   regeneratingSubIds?: string[];
+  retranslatingSubIds?: string[];
   isRetranslatingAll?: boolean;
   subtitleRegenError?: string | null;
   onClearSubtitleRegenError?: () => void;
@@ -208,6 +225,37 @@ interface WorkspaceSidebarProps {
   studioSection: StudioSectionId;
   onChangeStudioSection: (section: StudioSectionId) => void;
   showMobileTimelineTab?: boolean;
+  selectedSubtitleId?: string | null;
+  onSelectSubtitle?: (id: string | null) => void;
+  captionTab?: "script" | "style" | "sync";
+  onChangeCaptionTab?: (tab: "script" | "style" | "sync") => void;
+  isSubtitleSearchOpen?: boolean;
+  onChangeSubtitleSearchOpen?: (open: boolean) => void;
+  autoFollowState?: AutoFollowState;
+  onChangeAutoFollowState?: (next: AutoFollowState) => void;
+  stageSelectRequest?: { id: string; focusPhonetic?: boolean; nonce: number } | null;
+  cutSpeechRegions?: CutSpeechRegion[];
+  onUpdateWordChip?: (
+    subId: string,
+    wordIndex: number,
+    patch: { phonetic?: string; thai?: string; burmeseGloss?: string }
+  ) => void;
+  onMergeWordChips?: (subId: string, leftIndex: number) => void;
+  onSplitWordChip?: (
+    subId: string,
+    wordIndex: number,
+    partA: string,
+    partB: string,
+    partAGloss?: string,
+    partBGloss?: string
+  ) => void;
+  onFillMissingGlosses?: (subIds: string[]) => void;
+  onTranscribeRange?: (
+    startSec: number,
+    endSec: number
+  ) => Promise<{ addedCount: number; message?: string } | void>;
+  transcribingRange?: { startSec: number; endSec: number } | null;
+  onApplyPasteTranscriptSync?: (nextSubtitles: SubtitleItem[], changedCount: number) => void;
 }
 
 const SUBTITLE_TONE_OPTIONS: { id: TranslationTone; label: string }[] = [
@@ -312,6 +360,7 @@ export function WorkspaceSidebar({
   onRetranslateAll,
   onCancelRetranslateAll,
   regeneratingSubIds = [],
+  retranslatingSubIds = [],
   isRetranslatingAll = false,
   subtitleRegenError = null,
   onClearSubtitleRegenError,
@@ -336,6 +385,23 @@ export function WorkspaceSidebar({
   studioSection,
   onChangeStudioSection,
   showMobileTimelineTab = false,
+  selectedSubtitleId: controlledSelectedSubId,
+  onSelectSubtitle,
+  captionTab: controlledCaptionTab,
+  onChangeCaptionTab,
+  isSubtitleSearchOpen: controlledSearchOpen,
+  onChangeSubtitleSearchOpen,
+  autoFollowState: controlledAutoFollow,
+  onChangeAutoFollowState,
+  stageSelectRequest = null,
+  cutSpeechRegions = [],
+  onUpdateWordChip,
+  onMergeWordChips,
+  onSplitWordChip,
+  onFillMissingGlosses,
+  onTranscribeRange,
+  transcribingRange = null,
+  onApplyPasteTranscriptSync,
 }: WorkspaceSidebarProps) {
   const scrollRootRef = useRef<HTMLDivElement | null>(null);
   const loadMoreSentinelRef = useRef<HTMLDivElement | null>(null);
@@ -368,15 +434,37 @@ export function WorkspaceSidebar({
   const [newSubEnd, setNewSubEnd] = useState("2.5");
   const [newSubPhonetic, setNewSubPhonetic] = useState("");
   const [newSubBurmese, setNewSubBurmese] = useState("");
+  const [rangeFeedback, setRangeFeedback] = useState<{
+    type: "info" | "error";
+    text: string;
+  } | null>(null);
   const [editingTimeId, setEditingTimeId] = useState<string | null>(null);
   const [editStartVal, setEditStartVal] = useState("");
   const [editEndVal, setEditEndVal] = useState("");
-  const [hintOpenId, setHintOpenId] = useState<string | null>(null);
+  const [localSelectedSubId, setLocalSelectedSubId] = useState<string | null>(null);
+  const [localCaptionTab, setLocalCaptionTab] = useState<"script" | "style" | "sync">("script");
+  const [aiPopoverId, setAiPopoverId] = useState<string | null>(null);
+  const [moreMenuId, setMoreMenuId] = useState<string | null>(null);
   const [hintDrafts, setHintDrafts] = useState<Record<string, string>>({});
-  const [editingWordsId, setEditingWordsId] = useState<string | null>(null);
+  const [collapsedWordBarSubIds, setCollapsedWordBarSubIds] = useState<Record<string, boolean>>({});
+  const [activeWordChip, setActiveWordChip] = useState<{
+    subId: string;
+    wordIndex: number;
+  } | null>(null);
+  const [chipPhoneticDraft, setChipPhoneticDraft] = useState("");
+  const [chipThaiDraft, setChipThaiDraft] = useState("");
+  const [chipGlossDraft, setChipGlossDraft] = useState("");
+  const [chipSplitMode, setChipSplitMode] = useState(false);
+  const [chipSplitA, setChipSplitA] = useState("");
+  const [chipSplitB, setChipSplitB] = useState("");
+  const [qualityFilter, setQualityFilter] = useState<"all" | SubtitleQualityIssue>("all");
+  const [confirmQualityAction, setConfirmQualityAction] = useState<"resync" | "gloss" | null>(
+    null
+  );
 
-  // Subtitle Search / Find-Replace, Style Customization & Multi-format Export
-  const [showSubSearch, setShowSubSearch] = useState(false);
+  // Subtitle Search / Find-Replace, Tone Confirmation & Multi-format Export
+  const [localSearchOpen, setLocalSearchOpen] = useState(false);
+  const [localAutoFollow, setLocalAutoFollow] = useState<AutoFollowState>("following");
   const [subSearchQuery, setSubSearchQuery] = useState("");
   const [showReplaceRow, setShowReplaceRow] = useState(false);
   const [subReplaceText, setSubReplaceText] = useState("");
@@ -384,11 +472,263 @@ export function WorkspaceSidebar({
     "all" | "burmese" | "thaiPhonetic" | "thaiScript"
   >("all");
   const [replaceFeedback, setReplaceFeedback] = useState<string | null>(null);
-  const [showSubStyle, setShowSubStyle] = useState(false);
+  const [showToneConfirm, setShowToneConfirm] = useState(false);
+  const [skipManualOnToneApply, setSkipManualOnToneApply] = useState(true);
+  const [showResyncConfirm, setShowResyncConfirm] = useState(false);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [copiedTranscript, setCopiedTranscript] = useState(false);
+  const [showPasteSyncModal, setShowPasteSyncModal] = useState(false);
   const exportMenuRef = useRef<HTMLDivElement | null>(null);
+  const aiPopoverRef = useRef<HTMLDivElement | null>(null);
+  const moreMenuRef = useRef<HTMLDivElement | null>(null);
+  const timePopoverRef = useRef<HTMLDivElement | null>(null);
+  const wordChipPopoverRef = useRef<HTMLDivElement | null>(null);
+  const subSearchInputRef = useRef<HTMLInputElement | null>(null);
   const subCardRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const subtitleViewportRef = useRef<SubtitleListViewportHandle | null>(null);
+  const selectedPhoneticInputRef = useRef<HTMLInputElement | null>(null);
+  const suppressNextFocusPauseRef = useRef(false);
+
+  const suggestChipSplitParts = useCallback((phonetic: string): [string, string] => {
+    const clean = phonetic.trim();
+    if (!clean) return ["", ""];
+    const spaceParts = clean.split(/\s+/).filter(Boolean);
+    if (spaceParts.length >= 2) {
+      const mid = Math.max(1, Math.floor(spaceParts.length / 2));
+      return [spaceParts.slice(0, mid).join(" "), spaceParts.slice(mid).join(" ")];
+    }
+    const hyphenParts = clean.split("-").filter(Boolean);
+    if (hyphenParts.length >= 2) {
+      const mid = Math.max(1, Math.floor(hyphenParts.length / 2));
+      return [hyphenParts.slice(0, mid).join("-"), hyphenParts.slice(mid).join("-")];
+    }
+    const chars = Array.from(clean);
+    if (chars.length < 2) return [clean, clean];
+    const cut = Math.max(1, Math.floor(chars.length / 2));
+    return [chars.slice(0, cut).join(""), chars.slice(cut).join("")];
+  }, []);
+
+  const qualityMap = useMemo(
+    () =>
+      computeSubtitleQualityMap(project?.subtitles ?? [], {
+        cutSpeechRegions,
+        showWordGloss: editSettings.showWordGloss,
+      }),
+    [project?.subtitles, cutSpeechRegions, editSettings.showWordGloss]
+  );
+
+  const qualitySummary = useMemo(() => {
+    const subs = project?.subtitles ?? [];
+    let overlapCount = 0;
+    let tooFastCount = 0;
+    let silentMismatchCount = 0;
+    let missingGlossCount = 0;
+    const missingGlossSubIds: string[] = [];
+    for (const sub of subs) {
+      const flags = qualityMap[sub.id];
+      if (!flags) continue;
+      if (flags.overlap) overlapCount++;
+      if (flags.too_fast) tooFastCount++;
+      if (flags.silent_mismatch) silentMismatchCount++;
+      if (flags.missing_gloss) {
+        missingGlossCount++;
+        missingGlossSubIds.push(sub.id);
+      }
+    }
+    return {
+      overlapCount,
+      tooFastCount,
+      silentMismatchCount,
+      missingGlossCount,
+      missingGlossSubIds,
+      totalFlagged:
+        overlapCount + tooFastCount + silentMismatchCount + missingGlossCount,
+    };
+  }, [project?.subtitles, qualityMap]);
+
+  const unmatchedSpeechGaps = useMemo(
+    () =>
+      project
+        ? findUnmatchedSpeechGaps(project.subtitles, cutSpeechRegions, project.targetDurationSec)
+        : [],
+    [project, cutSpeechRegions]
+  );
+
+  useEffect(() => {
+    if (qualityFilter === "all") return;
+    if (
+      (qualityFilter === "overlap" && qualitySummary.overlapCount === 0) ||
+      (qualityFilter === "too_fast" && qualitySummary.tooFastCount === 0) ||
+      (qualityFilter === "silent_mismatch" && qualitySummary.silentMismatchCount === 0) ||
+      (qualityFilter === "missing_gloss" && qualitySummary.missingGlossCount === 0)
+    ) {
+      setQualityFilter("all");
+    }
+  }, [qualityFilter, qualitySummary]);
+
+  const selectedSubtitleId =
+    controlledSelectedSubId !== undefined ? controlledSelectedSubId : localSelectedSubId;
+  const setSelectedSubtitleId = useCallback(
+    (id: string | null) => {
+      if (onSelectSubtitle) {
+        onSelectSubtitle(id);
+      } else {
+        setLocalSelectedSubId(id);
+      }
+    },
+    [onSelectSubtitle]
+  );
+
+  const captionTab = controlledCaptionTab ?? localCaptionTab;
+  const setCaptionTab = useCallback(
+    (tab: "script" | "style" | "sync") => {
+      if (onChangeCaptionTab) {
+        onChangeCaptionTab(tab);
+      } else {
+        setLocalCaptionTab(tab);
+      }
+    },
+    [onChangeCaptionTab]
+  );
+
+  const isSearchOpen = controlledSearchOpen ?? localSearchOpen;
+  const setIsSearchOpen = useCallback(
+    (open: boolean) => {
+      if (onChangeSubtitleSearchOpen) {
+        onChangeSubtitleSearchOpen(open);
+      } else {
+        setLocalSearchOpen(open);
+      }
+    },
+    [onChangeSubtitleSearchOpen]
+  );
+
+  const autoFollowState = controlledAutoFollow ?? localAutoFollow;
+  const setAutoFollowState = useCallback(
+    (next: AutoFollowState) => {
+      if (onChangeAutoFollowState) {
+        onChangeAutoFollowState(next);
+      } else {
+        setLocalAutoFollow(next);
+      }
+    },
+    [onChangeAutoFollowState]
+  );
+  const autoFollowStateRef = useRef(autoFollowState);
+  autoFollowStateRef.current = autoFollowState;
+
+  const [livePlayingSubId, setLivePlayingSubId] = useState<string | null>(() =>
+    project ? findActiveSubtitle(project.subtitles, cutTime)?.id ?? null : null
+  );
+  const projectSubtitlesRef = useRef(project?.subtitles ?? []);
+  projectSubtitlesRef.current = project?.subtitles ?? [];
+
+  useEffect(() => {
+    const subs = project?.subtitles ?? [];
+    setLivePlayingSubId(findActiveSubtitle(subs, cutTime)?.id ?? null);
+  }, [project?.subtitles, cutTime]);
+
+  useEffect(() => {
+    if (!subscribeCutTime) return;
+    return subscribeCutTime((sec) => {
+      const nextId = findActiveSubtitle(projectSubtitlesRef.current, sec)?.id ?? null;
+      setLivePlayingSubId((cur) => (cur === nextId ? cur : nextId));
+    });
+  }, [subscribeCutTime]);
+
+  useEffect(() => {
+    if (!selectedSubtitleId && autoFollowStateRef.current === "paused_by_editing") {
+      setAutoFollowState("following");
+    }
+    if (editingTimeId && editingTimeId !== selectedSubtitleId) {
+      setEditingTimeId(null);
+    }
+    if (aiPopoverId && aiPopoverId !== selectedSubtitleId) {
+      setAiPopoverId(null);
+    }
+    if (moreMenuId && moreMenuId !== selectedSubtitleId) {
+      setMoreMenuId(null);
+    }
+    if (activeWordChip && activeWordChip.subId !== selectedSubtitleId) {
+      setActiveWordChip(null);
+      setChipSplitMode(false);
+    }
+  }, [selectedSubtitleId, editingTimeId, aiPopoverId, moreMenuId, activeWordChip, setAutoFollowState]);
+
+  useEffect(() => {
+    if (!stageSelectRequest) return;
+    if (studioSection !== "captions" || captionTab !== "script") return;
+    if (subSearchQuery.trim()) {
+      setSubSearchQuery("");
+    }
+    if (qualityFilter !== "all") {
+      setQualityFilter("all");
+    }
+    let innerRaf = 0;
+    const outerRaf = requestAnimationFrame(() => {
+      innerRaf = requestAnimationFrame(() => {
+        subtitleViewportRef.current?.scrollToSubtitle(stageSelectRequest.id, "smooth");
+        if (stageSelectRequest.focusPhonetic && selectedPhoneticInputRef.current) {
+          suppressNextFocusPauseRef.current = true;
+          selectedPhoneticInputRef.current.focus({ preventScroll: true });
+        }
+      });
+    });
+    return () => {
+      cancelAnimationFrame(outerRaf);
+      if (innerRaf) cancelAnimationFrame(innerRaf);
+    };
+  }, [stageSelectRequest, studioSection, captionTab, subSearchQuery, qualityFilter]);
+
+  const handleExpandedCardFocusCapture = useCallback(
+    (e: ReactFocusEvent<HTMLDivElement>) => {
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      const tag = target.tagName;
+      if (tag !== "INPUT" && tag !== "TEXTAREA" && tag !== "SELECT") return;
+      if (suppressNextFocusPauseRef.current) {
+        suppressNextFocusPauseRef.current = false;
+        return;
+      }
+      if (autoFollowStateRef.current === "following") {
+        setAutoFollowState("paused_by_editing");
+      }
+    },
+    [setAutoFollowState]
+  );
+
+  const handleExpandedCardInputActivity = useCallback(
+    (e: React.FormEvent<HTMLDivElement>) => {
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      const tag = target.tagName;
+      if (tag !== "INPUT" && tag !== "TEXTAREA" && tag !== "SELECT") return;
+      if (autoFollowStateRef.current === "following") {
+        setAutoFollowState("paused_by_editing");
+      }
+    },
+    [setAutoFollowState]
+  );
+
+  const handleExpandedCardBlurCapture = useCallback(
+    (e: ReactFocusEvent<HTMLDivElement>) => {
+      const cardEl = e.currentTarget;
+      requestAnimationFrame(() => {
+        const active = document.activeElement;
+        const stillEditing = Boolean(
+          active &&
+            cardEl.contains(active) &&
+            (active.tagName === "INPUT" ||
+              active.tagName === "TEXTAREA" ||
+              active.tagName === "SELECT")
+        );
+        if (!stillEditing && autoFollowStateRef.current === "paused_by_editing") {
+          setAutoFollowState("following");
+        }
+      });
+    },
+    [setAutoFollowState]
+  );
 
   useEffect(() => {
     if (!showExportMenu) return;
@@ -400,6 +740,74 @@ export function WorkspaceSidebar({
     document.addEventListener("mousedown", onPointerDown);
     return () => document.removeEventListener("mousedown", onPointerDown);
   }, [showExportMenu]);
+
+  useEffect(() => {
+    if (!aiPopoverId && !moreMenuId && !editingTimeId && !activeWordChip) return;
+    const onPointerDown = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (aiPopoverId && aiPopoverRef.current && !aiPopoverRef.current.contains(target)) {
+        setAiPopoverId(null);
+      }
+      if (moreMenuId && moreMenuRef.current && !moreMenuRef.current.contains(target)) {
+        setMoreMenuId(null);
+      }
+      if (editingTimeId && timePopoverRef.current && !timePopoverRef.current.contains(target)) {
+        setEditingTimeId(null);
+      }
+      if (
+        activeWordChip &&
+        wordChipPopoverRef.current &&
+        !wordChipPopoverRef.current.contains(target)
+      ) {
+        setActiveWordChip(null);
+        setChipSplitMode(false);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setAiPopoverId(null);
+        setMoreMenuId(null);
+        setEditingTimeId(null);
+        setActiveWordChip(null);
+        setChipSplitMode(false);
+      }
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [aiPopoverId, moreMenuId, editingTimeId, activeWordChip]);
+
+  useEffect(() => {
+    if (
+      !isWorkspaceVisible ||
+      activeTab !== "studio" ||
+      studioSection !== "captions" ||
+      !project ||
+      captionTab !== "script"
+    ) {
+      return;
+    }
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        !e.shiftKey &&
+        !e.altKey &&
+        e.key.toLowerCase() === "f" &&
+        !isSearchOpen
+      ) {
+        e.preventDefault();
+        setIsSearchOpen(true);
+        requestAnimationFrame(() => {
+          subSearchInputRef.current?.focus();
+        });
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isWorkspaceVisible, activeTab, studioSection, project, captionTab, isSearchOpen]);
 
   useEffect(() => {
     if (!replaceFeedback) return;
@@ -610,29 +1018,44 @@ export function WorkspaceSidebar({
       project.subtitles.find((s) => s.startTime >= cutTime) ||
       project.subtitles[0];
     if (!target) return;
-    const el = subCardRefs.current[target.id];
-    if (el) {
-      el.scrollIntoView({ behavior: "smooth", block: "center" });
+    if (autoFollowState === "paused_by_scroll") {
+      setAutoFollowState("following");
+    }
+    if (subtitleViewportRef.current) {
+      subtitleViewportRef.current.scrollToSubtitle(target.id, "smooth");
+    } else {
+      const el = subCardRefs.current[target.id];
+      el?.scrollIntoView({ behavior: "smooth", block: "nearest" });
     }
   };
 
   const openAddSubtitleForm = () => {
     if (!project) return;
     const maxDur = Math.max(0.5, project.targetDurationSec || 10);
-    const lastEnd =
-      project.subtitles.length > 0
-        ? project.subtitles[project.subtitles.length - 1].endTime
-        : 0;
-    const defaultStart =
-      cutTime > 0.05
-        ? Math.min(maxDur - 0.5, cutTime)
-        : Math.min(maxDur - 0.5, lastEnd);
-    const defaultEnd = Math.min(maxDur, Math.max(defaultStart + 0.5, defaultStart + 2.5));
-    setNewSubStart(defaultStart.toFixed(1));
-    setNewSubEnd(defaultEnd.toFixed(1));
+    const suggested = suggestTranscribeRange(
+      project.subtitles,
+      cutSpeechRegions,
+      cutTime,
+      maxDur
+    );
+    setNewSubStart(suggested.startSec.toFixed(1));
+    setNewSubEnd(suggested.endSec.toFixed(1));
     setNewSubPhonetic("");
     setNewSubBurmese("");
+    setRangeFeedback(null);
     setShowAddSub(true);
+  };
+
+  const triggerRangeTranscription = async (startSec: number, endSec: number) => {
+    if (!onTranscribeRange || transcribingRange) return;
+    setRangeFeedback(null);
+    const res = await onTranscribeRange(startSec, endSec);
+    if (res && res.addedCount > 0) {
+      setShowAddSub(false);
+      setRangeFeedback(null);
+    } else if (res && res.message) {
+      setRangeFeedback({ type: "info", text: res.message });
+    }
   };
 
   useEffect(() => {
@@ -1256,7 +1679,13 @@ export function WorkspaceSidebar({
           </div>
 
           {/* Flat Edge-to-Edge Studio Body */}
-          <div className="flex-1 overflow-y-auto overscroll-y-contain studio-scrollbar min-h-0">
+          <div
+            className={
+              studioSection === "captions" && project && captionTab === "script"
+                ? "flex-1 min-h-0 flex flex-col overflow-hidden"
+                : "flex-1 overflow-y-auto overscroll-y-contain studio-scrollbar min-h-0"
+            }
+          >
             {(isProcessing || Boolean(regeneratingClipId)) && (() => {
               const stage = generationProgress?.stage ?? "extracting";
               const percent = Math.max(0, Math.min(100, generationProgress?.percent ?? 5));
@@ -1420,239 +1849,283 @@ export function WorkspaceSidebar({
               </div>
             )}
 
-            {studioSection === "captions" && project && (
-              <div className="flex flex-col">
-                {/* Compact Scenes Jump + Undo/Redo + Add Row */}
-                <div className="px-3.5 py-2 border-b border-[#d2dcf0] dark:border-[#21284c] flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex flex-wrap gap-1">
-                    {project.scenes.map((sc, idx) => {
-                      let sceneCutStart = 0;
-                      for (let i = 0; i < idx; i++) {
-                        sceneCutStart += getSceneDurationSec(project.scenes[i]);
-                      }
-                      const sceneDur = getSceneDurationSec(sc);
-                      const isSceneActive =
-                        cutTime >= sceneCutStart && cutTime < sceneCutStart + sceneDur;
+            {studioSection === "captions" && project && (() => {
+              const effectiveSpd = getEffectivePlaybackSpeed(
+                project.sourceType,
+                editSettings.playbackSpeed,
+                voiceSettings.speed
+              );
+              const exportOpts = {
+                speed: effectiveSpd,
+                showThaiScript: editSettings.showThaiScript,
+                showWordGloss: editSettings.showWordGloss,
+                showBurmeseLine: editSettings.showBurmeseLine,
+              };
+              const slug = makeSafeFileSlug(project.title);
+              const manuallyEditedCount = project.subtitles.filter((s) =>
+                Boolean(s.isManuallyEdited)
+              ).length;
 
-                      return (
-                        <button
-                          key={sc.index}
-                          type="button"
-                          onClick={() => onSeek(sceneCutStart)}
-                          className={`px-2 py-1 rounded-sm text-[11px] font-mono-tabular border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
-                            isSceneActive
-                              ? "bg-teal-700 text-white border-teal-700 dark:bg-teal-400 dark:text-[#060918] dark:border-teal-400 font-semibold"
-                              : "bg-[#f3f5fc] dark:bg-[#141933] text-[#0c1026] dark:text-[#f3f5fc] border-[#d2dcf0] dark:border-[#21284c] hover:border-[#b4c2e3] dark:hover:border-[#2f3866]"
-                          }`}
-                        >
-                          {idx + 1}. {formatRangeSec(sc.startSec)}–{formatRangeSec(sc.endSec)}
-                        </button>
-                      );
-                    })}
-                  </div>
-
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    <div className="inline-flex items-center border border-[#d2dcf0] dark:border-[#21284c] rounded-sm overflow-hidden bg-white dark:bg-[#141933]">
-                      <button
-                        type="button"
-                        disabled={!canUndoSubtitles || !onUndoSubtitles}
-                        onClick={onUndoSubtitles}
-                        title="Undo subtitle edit (Ctrl+Z)"
-                        aria-label="Undo subtitle edit"
-                        className="h-7 px-2 flex items-center gap-1 text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors whitespace-nowrap"
-                      >
-                        <Undo2 className="w-3 h-3" />
-                        <span>Undo</span>
-                      </button>
-                      <button
-                        type="button"
-                        disabled={!canRedoSubtitles || !onRedoSubtitles}
-                        onClick={onRedoSubtitles}
-                        title="Redo subtitle edit (Ctrl+Shift+Z)"
-                        aria-label="Redo subtitle edit"
-                        className="h-7 px-2 flex items-center gap-1 text-[11px] font-medium border-l border-[#d2dcf0] dark:border-[#21284c] text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors whitespace-nowrap"
-                      >
-                        <Redo2 className="w-3 h-3" />
-                        <span>Redo</span>
-                      </button>
+              return (
+                <div
+                  className={
+                    captionTab === "script"
+                      ? "flex-1 min-h-0 flex flex-col overflow-hidden"
+                      : "flex flex-col"
+                  }
+                >
+                  {/* Persistent Captions Header: 3-Tab Segmented Control + Undo/Redo + Export */}
+                  <div className="shrink-0 px-3.5 py-2 border-b border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc]/70 dark:bg-[#070814]/60 flex flex-wrap items-center justify-between gap-2">
+                    <div
+                      role="tablist"
+                      aria-label="Captions inspector tabs"
+                      className="inline-flex items-center p-0.5 rounded-sm bg-[#e7ecf8] dark:bg-[#141933] border border-[#d2dcf0] dark:border-[#21284c]"
+                    >
+                      {(
+                        [
+                          { id: "script", label: "Script" },
+                          { id: "style", label: "Style" },
+                          { id: "sync", label: "Sync" },
+                        ] as const
+                      ).map((tab) => {
+                        const active = captionTab === tab.id;
+                        return (
+                          <button
+                            key={tab.id}
+                            type="button"
+                            role="tab"
+                            aria-selected={active}
+                            onClick={() => {
+                              setCaptionTab(tab.id);
+                              setAiPopoverId(null);
+                              setMoreMenuId(null);
+                            }}
+                            className={`px-3 py-1 rounded-xs text-[11px] font-semibold whitespace-nowrap transition-colors cursor-pointer ${
+                              active
+                                ? "bg-white dark:bg-[#0d1022] text-teal-700 dark:text-teal-400 shadow-xs"
+                                : "text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
+                            }`}
+                          >
+                            {tab.label}
+                          </button>
+                        );
+                      })}
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={() => (showAddSub ? setShowAddSub(false) : openAddSubtitleForm())}
-                      className="h-7 px-2.5 rounded-sm bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] text-[11px] font-semibold flex items-center gap-1 whitespace-nowrap shrink-0 transition-colors cursor-pointer"
-                    >
-                      {showAddSub ? <X className="w-3 h-3" /> : <Plus className="w-3 h-3" />}
-                      <span>{showAddSub ? "Close" : "Add"}</span>
-                    </button>
-                  </div>
-                </div>
-
-                {/* Flat Hairline Captions Controls Bar (Zero Nested Card Container) */}
-                <div className="px-3.5 py-2 border-b border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc]/60 dark:bg-[#070814]/50 space-y-2">
-                  {/* Line 1: Tone & Thai Script Toggle */}
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <span className="text-[11px] font-medium text-[#4d597d] dark:text-[#919ec4] whitespace-nowrap">
-                        Tone
-                      </span>
-                      <div
-                        role="group"
-                        aria-label="Translation tone"
-                        className="inline-flex items-center p-0.5 rounded-sm bg-[#e7ecf8] dark:bg-[#141933] border border-[#d2dcf0] dark:border-[#21284c]"
-                      >
-                        {SUBTITLE_TONE_OPTIONS.map((opt) => {
-                          const active = editSettings.translationTone === opt.id;
-                          return (
-                            <button
-                              key={opt.id}
-                              type="button"
-                              onClick={() =>
-                                onChangeEditSettings({
-                                  ...editSettings,
-                                  translationTone: opt.id,
-                                })
-                              }
-                              className={`px-2 py-0.5 rounded-xs text-[11px] font-medium whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
-                                active
-                                  ? "bg-white dark:bg-[#0d1022] text-teal-700 dark:text-teal-400 font-semibold shadow-xs"
-                                  : "text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
-                              }`}
-                            >
-                              {opt.label}
-                            </button>
-                          );
-                        })}
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <div className="inline-flex items-center border border-[#d2dcf0] dark:border-[#21284c] rounded-sm overflow-hidden bg-white dark:bg-[#141933]">
+                        <button
+                          type="button"
+                          disabled={!canUndoSubtitles || !onUndoSubtitles}
+                          onClick={onUndoSubtitles}
+                          title="Undo subtitle edit"
+                          aria-label="Undo subtitle edit"
+                          className="h-7 px-2 flex items-center gap-1 text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors whitespace-nowrap"
+                        >
+                          <Undo2 className="w-3 h-3" />
+                          <span>Undo</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={!canRedoSubtitles || !onRedoSubtitles}
+                          onClick={onRedoSubtitles}
+                          title="Redo subtitle edit"
+                          aria-label="Redo subtitle edit"
+                          className="h-7 px-2 flex items-center gap-1 text-[11px] font-medium border-l border-[#d2dcf0] dark:border-[#21284c] text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors whitespace-nowrap"
+                        >
+                          <Redo2 className="w-3 h-3" />
+                          <span>Redo</span>
+                        </button>
                       </div>
 
                       {project.subtitles.length > 0 && (
-                        isRetranslatingAll ? (
-                          <div className="inline-flex items-center gap-1">
-                            <span className="h-6 px-2 rounded-sm border border-teal-300 dark:border-teal-500/40 bg-teal-50 dark:bg-teal-950/50 text-teal-800 dark:text-teal-200 text-[11px] font-medium flex items-center gap-1 whitespace-nowrap">
-                              <Loader2 className="w-3 h-3 animate-spin" />
-                              <span>Applying</span>
-                            </span>
-                            {onCancelRetranslateAll && (
-                              <button
-                                type="button"
-                                onClick={onCancelRetranslateAll}
-                                title="Stop Apply Tone"
-                                aria-label="Stop Apply Tone"
-                                className="h-6 px-2 rounded-sm border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/60 hover:bg-red-100 dark:hover:bg-red-900/70 text-[11px] font-semibold text-red-700 dark:text-red-300 flex items-center gap-1 whitespace-nowrap cursor-pointer transition-colors"
-                              >
-                                <Square className="w-2.5 h-2.5 fill-current" />
-                                <span>Stop</span>
-                              </button>
-                            )}
-                          </div>
-                        ) : (
+                        <div ref={exportMenuRef} className="relative">
                           <button
                             type="button"
-                            disabled={isResyncingTimings}
-                            onClick={() => onRetranslateAll(editSettings.translationTone)}
-                            title="Re-translate all subtitles using selected tone"
-                            className="h-6 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:border-teal-600/60 dark:hover:border-teal-400/60 hover:text-teal-700 dark:hover:text-teal-400 text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50 transition-colors"
+                            onClick={() => setShowExportMenu((v) => !v)}
+                            title="Export .SRT, .VTT, -study.txt or Copy"
+                            aria-label="Export captions"
+                            className="h-7 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center gap-1 cursor-pointer whitespace-nowrap transition-colors"
                           >
-                            <Sparkles className="w-3 h-3" />
-                            <span>Apply</span>
+                            {copiedTranscript ? (
+                              <>
+                                <Check className="w-3 h-3 text-emerald-600 dark:text-emerald-400" />
+                                <span className="text-emerald-700 dark:text-emerald-300">Copied</span>
+                              </>
+                            ) : (
+                              <>
+                                <Download className="w-3 h-3" />
+                                <span>Export</span>
+                              </>
+                            )}
                           </button>
-                        )
+
+                          {showExportMenu && (
+                            <div className="absolute right-0 mt-1 w-48 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] shadow-lg p-1 z-30 space-y-0.5">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  downloadTextFile(
+                                    `${slug}.srt`,
+                                    buildSrtContent(project.subtitles, exportOpts),
+                                    "application/x-subrip;charset=utf-8"
+                                  );
+                                  setShowExportMenu(false);
+                                }}
+                                className="w-full px-2.5 py-1.5 rounded-sm text-left text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] flex items-center gap-2 cursor-pointer"
+                              >
+                                <FileText className="w-3.5 h-3.5 text-[#4d597d] dark:text-[#919ec4]" />
+                                <span>Download .SRT</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  downloadTextFile(
+                                    `${slug}.vtt`,
+                                    buildVttContent(project.subtitles, exportOpts),
+                                    "text/vtt;charset=utf-8"
+                                  );
+                                  setShowExportMenu(false);
+                                }}
+                                className="w-full px-2.5 py-1.5 rounded-sm text-left text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] flex items-center gap-2 cursor-pointer"
+                              >
+                                <FileText className="w-3.5 h-3.5 text-[#4d597d] dark:text-[#919ec4]" />
+                                <span>Download .VTT</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  downloadTextFile(
+                                    `${slug}-study.txt`,
+                                    buildStudyTextContent(project.title, project.subtitles, exportOpts),
+                                    "text/plain;charset=utf-8"
+                                  );
+                                  setShowExportMenu(false);
+                                }}
+                                className="w-full px-2.5 py-1.5 rounded-sm text-left text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] flex items-center gap-2 cursor-pointer"
+                              >
+                                <BookOpen className="w-3.5 h-3.5 text-[#4d597d] dark:text-[#919ec4]" />
+                                <span>Study Sheet .TXT</span>
+                              </button>
+                              <div className="my-1 border-t border-[#d2dcf0] dark:border-[#21284c]" />
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  try {
+                                    await navigator.clipboard.writeText(
+                                      buildAiChatTranscriptContent(project.title, project.subtitles, exportOpts)
+                                    );
+                                    setCopiedTranscript(true);
+                                    setTimeout(() => setCopiedTranscript(false), 2000);
+                                  } catch {
+                                    // ignore clipboard permission failure
+                                  }
+                                  setShowExportMenu(false);
+                                }}
+                                className="w-full px-2.5 py-1.5 rounded-sm text-left text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] flex items-center gap-2 cursor-pointer"
+                              >
+                                <Sparkles className="w-3.5 h-3.5 text-teal-700 dark:text-teal-400" />
+                                <span>Copy for AI Chat</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  try {
+                                    await navigator.clipboard.writeText(
+                                      buildStudyTextContent(project.title, project.subtitles, exportOpts)
+                                    );
+                                    setCopiedTranscript(true);
+                                    setTimeout(() => setCopiedTranscript(false), 2000);
+                                  } catch {
+                                    // ignore clipboard permission failure
+                                  }
+                                  setShowExportMenu(false);
+                                }}
+                                className="w-full px-2.5 py-1.5 rounded-sm text-left text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] flex items-center gap-2 cursor-pointer"
+                              >
+                                <Copy className="w-3.5 h-3.5 text-[#4d597d] dark:text-[#919ec4]" />
+                                <span>Copy Transcript</span>
+                              </button>
+                              {onApplyPasteTranscriptSync && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setShowExportMenu(false);
+                                    setShowPasteSyncModal(true);
+                                  }}
+                                  className="w-full px-2.5 py-1.5 rounded-sm text-left text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] flex items-center gap-2 cursor-pointer"
+                                >
+                                  <ClipboardPaste className="w-3.5 h-3.5 text-teal-700 dark:text-teal-400" />
+                                  <span>Paste &amp; Sync</span>
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </div>
                       )}
                     </div>
-
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={editSettings.showThaiScript}
-                      onClick={() =>
-                        onChangeEditSettings({
-                          ...editSettings,
-                          showThaiScript: !editSettings.showThaiScript,
-                        })
-                      }
-                      title="Show or hide Thai script in editor, 9:16 preview, and MP4 export"
-                      className={`h-6 px-2 rounded-sm border text-[11px] font-medium flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
-                        editSettings.showThaiScript
-                          ? "border-teal-600/70 bg-teal-50/80 text-teal-800 dark:border-teal-400/70 dark:bg-teal-950/50 dark:text-teal-200"
-                          : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
-                      }`}
-                    >
-                      <span>Thai Script</span>
-                      <span
-                        aria-hidden="true"
-                        className={`w-5 h-3 rounded-full p-0.5 transition-colors flex items-center ${
-                          editSettings.showThaiScript
-                            ? "bg-teal-700 dark:bg-teal-400 justify-end"
-                            : "bg-[#bcc9e6] dark:bg-[#2e3644] justify-start"
-                        }`}
-                      >
-                        <span className="w-2 h-2 rounded-full bg-white shadow-xs" />
-                      </span>
-                    </button>
                   </div>
 
-                  {/* Line 2: Timing Sync & Subtitle Utilities */}
-                  {project.subtitles.length > 0 && (() => {
-                    const subStyleCustomized =
-                      editSettings.subtitleFontScale !== DEFAULT_VIDEO_EDIT.subtitleFontScale ||
-                      editSettings.subtitleTheme !== DEFAULT_VIDEO_EDIT.subtitleTheme ||
-                      editSettings.subtitleHighlightColor !== DEFAULT_VIDEO_EDIT.subtitleHighlightColor ||
-                      editSettings.showWordGloss !== DEFAULT_VIDEO_EDIT.showWordGloss ||
-                      editSettings.showBurmeseLine !== DEFAULT_VIDEO_EDIT.showBurmeseLine;
+                  {/* TAB 1: SCRIPT */}
+                  {captionTab === "script" && (
+                    <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+                      {/* Compact Top Bar: Search Toggle + Tone Selector/Apply + Follow/Jump + Add */}
+                      <div className="shrink-0 px-3.5 py-2 border-b border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc]/40 dark:bg-[#070814]/40 flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const next = !isSearchOpen;
+                              setIsSearchOpen(next);
+                              if (next) {
+                                requestAnimationFrame(() => subSearchInputRef.current?.focus());
+                              }
+                            }}
+                            title="Search & Replace (Ctrl/Cmd+F)"
+                            aria-label="Search subtitles"
+                            aria-expanded={isSearchOpen}
+                            className={`h-7 w-7 rounded-sm border flex items-center justify-center cursor-pointer transition-colors ${
+                              isSearchOpen || subSearchQuery.trim()
+                                ? "border-teal-600/80 bg-teal-50/90 text-teal-800 dark:border-teal-400/80 dark:bg-teal-950/60 dark:text-teal-200"
+                                : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
+                            }`}
+                          >
+                            <Search className="w-3.5 h-3.5" />
+                          </button>
 
-                    const effectiveSpd = getEffectivePlaybackSpeed(
-                      project.sourceType,
-                      editSettings.playbackSpeed,
-                      voiceSettings.speed
-                    );
-                    const exportOpts = {
-                      speed: effectiveSpd,
-                      showThaiScript: editSettings.showThaiScript,
-                      showWordGloss: editSettings.showWordGloss,
-                      showBurmeseLine: editSettings.showBurmeseLine,
-                    };
-                    const slug = makeSafeFileSlug(project.title);
+                          <div className="flex items-center gap-1">
+                            <select
+                              value={editSettings.translationTone}
+                              onChange={(e) =>
+                                onChangeEditSettings({
+                                  ...editSettings,
+                                  translationTone: e.target.value as TranslationTone,
+                                })
+                              }
+                              aria-label="Translation tone"
+                              className="h-7 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] cursor-pointer focus:outline-none focus:border-teal-700 dark:focus:border-teal-400"
+                            >
+                              {SUBTITLE_TONE_OPTIONS.map((opt) => (
+                                <option key={opt.id} value={opt.id}>
+                                  Tone: {opt.label}
+                                </option>
+                              ))}
+                            </select>
 
-                    return (
-                      <div className="space-y-2">
-                        <div className="flex flex-wrap items-center justify-between gap-1.5">
-                          <div className="flex flex-wrap items-center gap-1">
-                            {[-0.5, -0.1, 0.1, 0.5].map((delta) => (
-                              <button
-                                key={delta}
-                                type="button"
-                                onClick={() => onShiftAllSubtitles(delta)}
-                                title={`Shift all subtitles by ${delta > 0 ? `+${delta}` : delta}s`}
-                                className="h-6 px-1.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[10px] font-mono-tabular font-medium text-[#0c1026] dark:text-[#f3f5fc] cursor-pointer whitespace-nowrap transition-colors"
-                              >
-                                {delta > 0 ? `+${delta}s` : `${delta}s`}
-                              </button>
-                            ))}
-                            {onAutoFixSubtitleTimings && (
-                              <button
-                                type="button"
-                                onClick={onAutoFixSubtitleTimings}
-                                title="Automatically fix overlaps, flicker gaps, and out-of-range subtitle timings"
-                                className="h-6 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:border-teal-600/70 hover:text-teal-700 dark:hover:border-teal-400/70 dark:hover:text-teal-400 text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center gap-1 cursor-pointer whitespace-nowrap transition-colors"
-                              >
-                                <Wand2 className="w-3 h-3" />
-                                <span>Fix</span>
-                              </button>
-                            )}
-                            {onAiResyncSubtitles && (
-                              isResyncingTimings ? (
+                            {project.subtitles.length > 0 && (
+                              isRetranslatingAll ? (
                                 <div className="inline-flex items-center gap-1">
-                                  <span className="h-6 px-2 rounded-sm border border-teal-300 dark:border-teal-500/40 bg-teal-50 dark:bg-teal-950/50 text-teal-800 dark:text-teal-200 text-[11px] font-medium flex items-center gap-1 whitespace-nowrap">
+                                  <span className="h-7 px-2 rounded-sm border border-teal-300 dark:border-teal-500/40 bg-teal-50 dark:bg-teal-950/50 text-teal-800 dark:text-teal-200 text-[11px] font-medium flex items-center gap-1 whitespace-nowrap">
                                     <Loader2 className="w-3 h-3 animate-spin" />
-                                    <span>Sync</span>
+                                    <span>Applying</span>
                                   </span>
-                                  {onCancelAiResync && (
+                                  {onCancelRetranslateAll && (
                                     <button
                                       type="button"
-                                      onClick={onCancelAiResync}
-                                      title="Cancel AI timing sync"
-                                      aria-label="Cancel AI timing sync"
-                                      className="h-6 px-1.5 rounded-sm border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/60 hover:bg-red-100 dark:hover:bg-red-900/70 text-[11px] font-semibold text-red-700 dark:text-red-300 flex items-center gap-1 cursor-pointer whitespace-nowrap transition-colors"
+                                      onClick={onCancelRetranslateAll}
+                                      title="Stop Apply Tone"
+                                      aria-label="Stop Apply Tone"
+                                      className="h-7 px-2 rounded-sm border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/60 hover:bg-red-100 dark:hover:bg-red-900/70 text-[11px] font-semibold text-red-700 dark:text-red-300 flex items-center gap-1 whitespace-nowrap cursor-pointer transition-colors"
                                     >
                                       <Square className="w-2.5 h-2.5 fill-current" />
                                       <span>Stop</span>
@@ -1662,160 +2135,603 @@ export function WorkspaceSidebar({
                               ) : (
                                 <button
                                   type="button"
-                                  disabled={isRetranslatingAll}
-                                  onClick={onAiResyncSubtitles}
-                                  title="AI listens to audio and aligns subtitle timings"
-                                  className="h-6 px-2 rounded-sm border border-teal-600/50 dark:border-teal-400/50 bg-teal-50/80 dark:bg-teal-950/50 hover:bg-teal-100 dark:hover:bg-teal-900/60 text-[11px] font-semibold text-teal-800 dark:text-teal-200 flex items-center gap-1 cursor-pointer whitespace-nowrap disabled:opacity-50 transition-colors"
+                                  disabled={isResyncingTimings}
+                                  onClick={() => {
+                                    if (manuallyEditedCount > 0) {
+                                      setSkipManualOnToneApply(true);
+                                      setShowToneConfirm(true);
+                                    } else {
+                                      onRetranslateAll(editSettings.translationTone, {
+                                        skipManuallyEdited: false,
+                                      });
+                                    }
+                                  }}
+                                  title="Apply selected translation tone to subtitles"
+                                  className="h-7 px-2.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:border-teal-600/60 dark:hover:border-teal-400/60 hover:text-teal-700 dark:hover:text-teal-400 text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50 transition-colors"
                                 >
-                                  <RefreshCw className="w-3 h-3" />
-                                  <span>AI Sync</span>
+                                  <Sparkles className="w-3 h-3" />
+                                  <span>Apply</span>
                                 </button>
                               )
                             )}
                           </div>
+                        </div>
 
-                          <div className="flex items-center gap-1">
-                            <button
-                              type="button"
-                              onClick={() => setShowSubSearch((v) => !v)}
-                              title="Search & Replace subtitles"
-                              className={`h-6 px-2 rounded-sm border text-[11px] font-medium flex items-center gap-1 cursor-pointer whitespace-nowrap transition-colors ${
-                                showSubSearch || subSearchQuery.trim()
-                                  ? "border-teal-600/80 bg-teal-50/80 text-teal-800 dark:border-teal-400/80 dark:bg-teal-950/60 dark:text-teal-200"
-                                  : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142]"
-                              }`}
-                            >
-                              <Search className="w-3 h-3" />
-                              <span>Find</span>
-                            </button>
-
-                            <button
-                              type="button"
-                              onClick={() => setShowSubStyle((v) => !v)}
-                              title="Customize 9:16 subtitle theme, font size, highlight & visibility"
-                              className={`h-6 px-2 rounded-sm border text-[11px] font-medium flex items-center gap-1 cursor-pointer whitespace-nowrap transition-colors ${
-                                showSubStyle || subStyleCustomized
-                                  ? "border-teal-600/80 bg-teal-50/80 text-teal-800 dark:border-teal-400/80 dark:bg-teal-950/60 dark:text-teal-200"
-                                  : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142]"
-                              }`}
-                            >
-                              <Palette className="w-3 h-3" />
-                              <span>Style</span>
-                            </button>
-
-                            <button
-                              type="button"
-                              onClick={jumpToActiveSubtitle}
-                              title="Scroll to currently active subtitle at playhead"
-                              className="h-6 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center gap-1 cursor-pointer whitespace-nowrap transition-colors"
-                            >
-                              <LocateFixed className="w-3 h-3" />
-                              <span>Jump</span>
-                            </button>
-
-                            <div ref={exportMenuRef} className="relative">
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {project.subtitles.length > 0 && (
+                            <>
                               <button
                                 type="button"
-                                onClick={() => setShowExportMenu((v) => !v)}
-                                title="Export SRT / VTT / Study Sheet"
-                                className="h-6 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center gap-1 cursor-pointer whitespace-nowrap transition-colors"
+                                aria-pressed={autoFollowState !== "off"}
+                                onClick={() => {
+                                  if (autoFollowState === "off") {
+                                    setAutoFollowState("following");
+                                    if (livePlayingSubId) {
+                                      requestAnimationFrame(() => {
+                                        subtitleViewportRef.current?.scrollToSubtitle(
+                                          livePlayingSubId,
+                                          "smooth"
+                                        );
+                                      });
+                                    }
+                                  } else {
+                                    setAutoFollowState("off");
+                                  }
+                                }}
+                                title={
+                                  autoFollowState === "off"
+                                    ? "Enable Auto-Follow during playback"
+                                    : "Auto-Follow enabled (click to turn off)"
+                                }
+                                className={`h-7 px-2 rounded-sm border text-[11px] font-medium flex items-center gap-1 cursor-pointer whitespace-nowrap transition-colors ${
+                                  autoFollowState !== "off"
+                                    ? "border-teal-600/60 bg-teal-50/80 text-teal-800 dark:border-teal-400/60 dark:bg-teal-950/50 dark:text-teal-200"
+                                    : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
+                                }`}
                               >
-                                {copiedTranscript ? (
+                                <span>{autoFollowState === "off" ? "Follow: Off" : "Follow"}</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={jumpToActiveSubtitle}
+                                title="Scroll to currently active subtitle at playhead"
+                                aria-label="Jump to active subtitle"
+                                className="h-7 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center gap-1 cursor-pointer whitespace-nowrap transition-colors"
+                              >
+                                <LocateFixed className="w-3 h-3" />
+                                <span>Jump</span>
+                              </button>
+                              {onApplyPasteTranscriptSync && (
+                                <button
+                                  type="button"
+                                  onClick={() => setShowPasteSyncModal(true)}
+                                  title="Paste AI-edited transcript and sync translations without losing timing"
+                                  className="h-7 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:border-teal-600/60 dark:hover:border-teal-400/60 hover:text-teal-700 dark:hover:text-teal-400 text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0 transition-colors"
+                                >
+                                  <ClipboardPaste className="w-3 h-3" />
+                                  <span>Paste &amp; Sync</span>
+                                </button>
+                              )}
+                            </>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => (showAddSub ? setShowAddSub(false) : openAddSubtitleForm())}
+                            className="h-7 px-2.5 rounded-sm bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] text-[11px] font-semibold flex items-center gap-1 whitespace-nowrap shrink-0 transition-colors cursor-pointer"
+                          >
+                            {showAddSub ? <X className="w-3 h-3" /> : <Plus className="w-3 h-3" />}
+                            <span>{showAddSub ? "Close" : "Add"}</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Quality Summary, Filter & Explicit Repair Bar */}
+                      {project.subtitles.length > 0 &&
+                        (qualitySummary.totalFlagged > 0 || qualityFilter !== "all") && (
+                          <div className="shrink-0 px-3.5 py-1.5 border-b border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc]/55 dark:bg-[#070814]/55 space-y-1.5">
+                            <div className="flex flex-wrap items-center justify-between gap-1.5">
+                              <div className="flex flex-wrap items-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => setQualityFilter("all")}
+                                  className={`h-6 px-2 rounded-sm border text-[11px] font-medium cursor-pointer transition-colors ${
+                                    qualityFilter === "all"
+                                      ? "border-teal-600/80 bg-teal-50 text-teal-800 dark:border-teal-400/80 dark:bg-teal-950/60 dark:text-teal-200 font-semibold"
+                                      : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
+                                  }`}
+                                >
+                                  All ({project.subtitles.length})
+                                </button>
+                                {(qualitySummary.overlapCount > 0 ||
+                                  qualityFilter === "overlap") && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setQualityFilter((cur) =>
+                                        cur === "overlap" ? "all" : "overlap"
+                                      )
+                                    }
+                                    className={`h-6 px-2 rounded-sm border text-[11px] font-medium inline-flex items-center gap-1 cursor-pointer transition-colors ${
+                                      qualityFilter === "overlap"
+                                        ? "border-rose-500 bg-rose-50 text-rose-800 dark:border-rose-400 dark:bg-rose-950/60 dark:text-rose-200 font-semibold"
+                                        : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#0c1026] dark:text-[#f3f5fc]"
+                                    }`}
+                                  >
+                                    <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
+                                    <span>Overlap ({qualitySummary.overlapCount})</span>
+                                  </button>
+                                )}
+                                {(qualitySummary.tooFastCount > 0 ||
+                                  qualityFilter === "too_fast") && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setQualityFilter((cur) =>
+                                        cur === "too_fast" ? "all" : "too_fast"
+                                      )
+                                    }
+                                    className={`h-6 px-2 rounded-sm border text-[11px] font-medium inline-flex items-center gap-1 cursor-pointer transition-colors ${
+                                      qualityFilter === "too_fast"
+                                        ? "border-amber-500 bg-amber-50 text-amber-900 dark:border-amber-400 dark:bg-amber-950/60 dark:text-amber-200 font-semibold"
+                                        : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#0c1026] dark:text-[#f3f5fc]"
+                                    }`}
+                                  >
+                                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                                    <span>Too Fast ({qualitySummary.tooFastCount})</span>
+                                  </button>
+                                )}
+                                {(qualitySummary.silentMismatchCount > 0 ||
+                                  qualityFilter === "silent_mismatch") && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setQualityFilter((cur) =>
+                                        cur === "silent_mismatch" ? "all" : "silent_mismatch"
+                                      )
+                                    }
+                                    className={`h-6 px-2 rounded-sm border text-[11px] font-medium inline-flex items-center gap-1 cursor-pointer transition-colors ${
+                                      qualityFilter === "silent_mismatch"
+                                        ? "border-orange-500 bg-orange-50 text-orange-900 dark:border-orange-400 dark:bg-orange-950/60 dark:text-orange-200 font-semibold"
+                                        : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#0c1026] dark:text-[#f3f5fc]"
+                                    }`}
+                                  >
+                                    <span className="w-1.5 h-1.5 rounded-full bg-orange-500" />
+                                    <span>Silent ({qualitySummary.silentMismatchCount})</span>
+                                  </button>
+                                )}
+                                {(qualitySummary.missingGlossCount > 0 ||
+                                  qualityFilter === "missing_gloss") && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setQualityFilter((cur) =>
+                                        cur === "missing_gloss" ? "all" : "missing_gloss"
+                                      )
+                                    }
+                                    className={`h-6 px-2 rounded-sm border text-[11px] font-medium inline-flex items-center gap-1 cursor-pointer transition-colors ${
+                                      qualityFilter === "missing_gloss"
+                                        ? "border-sky-500 bg-sky-50 text-sky-900 dark:border-sky-400 dark:bg-sky-950/60 dark:text-sky-200 font-semibold"
+                                        : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#0c1026] dark:text-[#f3f5fc]"
+                                    }`}
+                                  >
+                                    <span className="w-1.5 h-1.5 rounded-full bg-sky-500" />
+                                    <span>No Gloss ({qualitySummary.missingGlossCount})</span>
+                                  </button>
+                                )}
+                              </div>
+
+                              <div className="flex flex-wrap items-center gap-1">
+                                {qualitySummary.overlapCount > 0 && onAutoFixSubtitleTimings && (
+                                  <button
+                                    type="button"
+                                    disabled={isResyncingTimings || isRetranslatingAll}
+                                    onClick={onAutoFixSubtitleTimings}
+                                    className="h-6 px-2 rounded-sm border border-rose-300 dark:border-rose-700 bg-rose-50/90 dark:bg-rose-950/50 hover:bg-rose-100 dark:hover:bg-rose-900/60 text-[11px] font-semibold text-rose-800 dark:text-rose-200 inline-flex items-center gap-1 cursor-pointer disabled:opacity-45"
+                                  >
+                                    <Wand2 className="w-3 h-3" />
+                                    <span>Fix Overlaps (Local)</span>
+                                  </button>
+                                )}
+                                {qualitySummary.silentMismatchCount > 0 && onAiResyncSubtitles && (
+                                  <button
+                                    type="button"
+                                    disabled={isResyncingTimings || isRetranslatingAll}
+                                    onClick={() =>
+                                      setConfirmQualityAction((cur) =>
+                                        cur === "resync" ? null : "resync"
+                                      )
+                                    }
+                                    className="h-6 px-2 rounded-sm border border-orange-300 dark:border-orange-700 bg-orange-50/90 dark:bg-orange-950/50 hover:bg-orange-100 dark:hover:bg-orange-900/60 text-[11px] font-semibold text-orange-800 dark:text-orange-200 inline-flex items-center gap-1 cursor-pointer disabled:opacity-45"
+                                  >
+                                    <RefreshCw
+                                      className={`w-3 h-3 ${isResyncingTimings ? "animate-spin" : ""}`}
+                                    />
+                                    <span>AI Resync</span>
+                                  </button>
+                                )}
+                                {qualitySummary.missingGlossCount > 0 && onFillMissingGlosses && (
+                                  <button
+                                    type="button"
+                                    disabled={isResyncingTimings || isRetranslatingAll}
+                                    onClick={() =>
+                                      setConfirmQualityAction((cur) =>
+                                        cur === "gloss" ? null : "gloss"
+                                      )
+                                    }
+                                    className="h-6 px-2 rounded-sm border border-sky-300 dark:border-sky-700 bg-sky-50/90 dark:bg-sky-950/50 hover:bg-sky-100 dark:hover:bg-sky-900/60 text-[11px] font-semibold text-sky-800 dark:text-sky-200 inline-flex items-center gap-1 cursor-pointer disabled:opacity-45"
+                                  >
+                                    <Sparkles className="w-3 h-3" />
+                                    <span>Fill Missing Gloss (AI)</span>
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+
+                            {confirmQualityAction === "resync" && onAiResyncSubtitles && (
+                              <div className="p-2 rounded-sm border border-orange-300/80 dark:border-orange-600/50 bg-orange-50/85 dark:bg-orange-950/40 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                                <span className="text-orange-950 dark:text-orange-100">
+                                  Re-align subtitle timings to spoken audio via AI ({qualitySummary.silentMismatchCount} mismatch{qualitySummary.silentMismatchCount === 1 ? "" : "es"})?
+                                </span>
+                                <div className="flex items-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => setConfirmQualityAction(null)}
+                                    className="h-6 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#4d597d] dark:text-[#919ec4] cursor-pointer"
+                                  >
+                                    Cancel
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={isResyncingTimings || isRetranslatingAll}
+                                    onClick={() => {
+                                      setConfirmQualityAction(null);
+                                      onAiResyncSubtitles();
+                                    }}
+                                    className="h-6 px-2.5 rounded-sm bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:text-[#060918] font-semibold cursor-pointer"
+                                  >
+                                    Confirm AI Resync
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+
+                            {confirmQualityAction === "gloss" && onFillMissingGlosses && (
+                              <div className="p-2 rounded-sm border border-sky-300/80 dark:border-sky-600/50 bg-sky-50/85 dark:bg-sky-950/40 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                                <span className="text-sky-950 dark:text-sky-100">
+                                  Fill missing word glosses via AI for {qualitySummary.missingGlossCount}{" "}
+                                  {qualitySummary.missingGlossCount === 1 ? "line" : "lines"}?
+                                </span>
+                                <div className="flex items-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => setConfirmQualityAction(null)}
+                                    className="h-6 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#4d597d] dark:text-[#919ec4] cursor-pointer"
+                                  >
+                                    Cancel
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={isRetranslatingAll || isResyncingTimings}
+                                    onClick={() => {
+                                      setConfirmQualityAction(null);
+                                      onFillMissingGlosses(qualitySummary.missingGlossSubIds);
+                                    }}
+                                    className="h-6 px-2.5 rounded-sm bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:text-[#060918] font-semibold cursor-pointer"
+                                  >
+                                    Confirm Fill Gloss
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                      {/* Inline Tone Apply Confirmation when manually edited rows exist */}
+                      {showToneConfirm && !isRetranslatingAll && manuallyEditedCount > 0 && (
+                        <div className="shrink-0 px-3.5 py-2.5 border-b border-teal-200/80 dark:border-teal-500/30 bg-teal-50/70 dark:bg-teal-950/35 space-y-2">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <label className="inline-flex items-center gap-2 text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] cursor-pointer select-none">
+                              <input
+                                type="checkbox"
+                                checked={skipManualOnToneApply}
+                                onChange={(e) => setSkipManualOnToneApply(e.target.checked)}
+                                className="rounded-xs border-[#bcc9e6] dark:border-[#2f3866] text-teal-700 dark:text-teal-400 focus:ring-teal-600"
+                              />
+                              <span>
+                                Skip manually edited ({manuallyEditedCount}{" "}
+                                {manuallyEditedCount === 1 ? "line" : "lines"})
+                              </span>
+                            </label>
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => setShowToneConfirm(false)}
+                                className="h-6 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[11px] font-medium text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] cursor-pointer"
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                type="button"
+                                disabled={
+                                  skipManualOnToneApply &&
+                                  manuallyEditedCount >= project.subtitles.length
+                                }
+                                onClick={() => {
+                                  setShowToneConfirm(false);
+                                  onRetranslateAll(editSettings.translationTone, {
+                                    skipManuallyEdited: skipManualOnToneApply,
+                                  });
+                                }}
+                                className="h-6 px-2.5 rounded-sm bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] text-[11px] font-semibold disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer transition-colors"
+                              >
+                                Apply Tone
+                              </button>
+                            </div>
+                          </div>
+                          {skipManualOnToneApply &&
+                            manuallyEditedCount >= project.subtitles.length && (
+                              <p className="text-[11px] text-amber-800 dark:text-amber-200">
+                                All lines are manually edited. Uncheck to re-translate them.
+                              </p>
+                            )}
+                        </div>
+                      )}
+
+                      {/* Missed Speech Gaps Quick AI Fill Bar */}
+                      {unmatchedSpeechGaps.length > 0 && onTranscribeRange && (
+                        <div className="shrink-0 px-3.5 py-1.5 border-b border-[#d2dcf0] dark:border-[#21284c] bg-amber-50/70 dark:bg-amber-950/25 flex flex-wrap items-center gap-1.5">
+                          <span className="text-[11px] font-semibold text-amber-900 dark:text-amber-200 inline-flex items-center gap-1 shrink-0">
+                            <Sparkles className="w-3 h-3" />
+                            <span>
+                              Missed Speech ({unmatchedSpeechGaps.length}):
+                            </span>
+                          </span>
+                          <div className="flex flex-wrap items-center gap-1">
+                            {unmatchedSpeechGaps.slice(0, 6).map((gap) => {
+                              const isBusy =
+                                Boolean(transcribingRange) &&
+                                Math.abs(transcribingRange!.startSec - gap.startSec) < 0.15 &&
+                                Math.abs(transcribingRange!.endSec - gap.endSec) < 0.15;
+                              return (
+                                <button
+                                  key={`gap-${gap.startSec}-${gap.endSec}`}
+                                  type="button"
+                                  disabled={Boolean(transcribingRange) || isResyncingTimings}
+                                  onClick={() => {
+                                    onSeek(gap.startSec);
+                                    void triggerRangeTranscription(gap.startSec, gap.endSec);
+                                  }}
+                                  title={`AI transcribe missed speech from ${gap.startSec.toFixed(1)}s to ${gap.endSec.toFixed(1)}s`}
+                                  className="h-6 px-2 rounded-sm border border-amber-400/80 dark:border-amber-500/50 bg-white/95 dark:bg-[#0d1022] hover:bg-amber-100/80 dark:hover:bg-amber-900/40 text-[11px] font-mono-tabular font-medium text-amber-950 dark:text-amber-100 inline-flex items-center gap-1 cursor-pointer disabled:opacity-50 transition-colors"
+                                >
+                                  {isBusy ? (
+                                    <Loader2 className="w-3 h-3 animate-spin text-teal-700 dark:text-teal-400" />
+                                  ) : (
+                                    <Sparkles className="w-3 h-3 text-teal-700 dark:text-teal-400" />
+                                  )}
+                                  <span>
+                                    {gap.startSec.toFixed(1)}–{gap.endSec.toFixed(1)}s
+                                  </span>
+                                  <span className="font-sans font-semibold text-teal-700 dark:text-teal-400">
+                                    {isBusy ? "Filling..." : "AI Fill"}
+                                  </span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Inline Add Subtitle / AI Transcribe Range Form */}
+                      {showAddSub && (
+                        <form
+                          onSubmit={(e) => {
+                            e.preventDefault();
+                            if (!newSubPhonetic.trim() && !newSubBurmese.trim()) return;
+                            const s = parseFloat(newSubStart);
+                            const en = parseFloat(newSubEnd);
+                            onAddSubtitle({
+                              startTime: Number.isFinite(s) ? s : cutTime,
+                              endTime: Number.isFinite(en) ? en : (Number.isFinite(s) ? s : cutTime) + 2.5,
+                              thaiPhonetic: newSubPhonetic,
+                              burmese: newSubBurmese,
+                            });
+                            setShowAddSub(false);
+                            setNewSubPhonetic("");
+                            setNewSubBurmese("");
+                          }}
+                          className="shrink-0 px-3.5 py-3 border-b border-[#d2dcf0] dark:border-[#21284c] bg-[#e7ecf8]/60 dark:bg-[#141933] space-y-2.5"
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span className="font-display text-xs font-semibold text-[#0c1026] dark:text-[#f3f5fc]">
+                              Add / AI Transcribe Range
+                            </span>
+                            <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                              <label className="flex items-center gap-1 text-[#4d597d] dark:text-[#919ec4]">
+                                <span>Start</span>
+                                <input
+                                  type="number"
+                                  step="0.1"
+                                  min={0}
+                                  max={project.targetDurationSec}
+                                  value={newSubStart}
+                                  onChange={(e) => setNewSubStart(e.target.value)}
+                                  className="w-16 h-6 px-1.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#0c1026] dark:text-[#f3f5fc] font-mono-tabular text-xs"
+                                />
+                              </label>
+                              <label className="flex items-center gap-1 text-[#4d597d] dark:text-[#919ec4]">
+                                <span>End</span>
+                                <input
+                                  type="number"
+                                  step="0.1"
+                                  min={0.2}
+                                  max={project.targetDurationSec}
+                                  value={newSubEnd}
+                                  onChange={(e) => setNewSubEnd(e.target.value)}
+                                  className="w-16 h-6 px-1.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#0c1026] dark:text-[#f3f5fc] font-mono-tabular text-xs"
+                                />
+                              </label>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const maxDur = Math.max(0.5, project.targetDurationSec || 10);
+                                  const s = Math.min(maxDur - 0.5, Math.max(0, cutTime));
+                                  setNewSubStart(s.toFixed(1));
+                                  setNewSubEnd(Math.min(maxDur, s + 2.5).toFixed(1));
+                                }}
+                                className="h-6 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] cursor-pointer whitespace-nowrap transition-colors"
+                              >
+                                Use playhead
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const maxDur = Math.max(0.5, project.targetDurationSec || 10);
+                                  const suggested = suggestTranscribeRange(
+                                    project.subtitles,
+                                    cutSpeechRegions,
+                                    cutTime,
+                                    maxDur
+                                  );
+                                  setNewSubStart(suggested.startSec.toFixed(1));
+                                  setNewSubEnd(suggested.endSec.toFixed(1));
+                                }}
+                                className="h-6 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] cursor-pointer whitespace-nowrap transition-colors"
+                              >
+                                Nearest gap
+                              </button>
+                            </div>
+                          </div>
+
+                          {onTranscribeRange && (
+                            <div className="p-2 rounded-sm border border-teal-300/70 dark:border-teal-500/35 bg-teal-50/75 dark:bg-teal-950/30 flex flex-wrap items-center justify-between gap-2">
+                              <span className="text-[11px] text-[#0c1026] dark:text-[#f3f5fc]">
+                                Generate Thai & Burmese subtitles directly from audio for this range.
+                              </span>
+                              <button
+                                type="button"
+                                disabled={Boolean(transcribingRange) || isResyncingTimings}
+                                onClick={() => {
+                                  const s = parseFloat(newSubStart);
+                                  const en = parseFloat(newSubEnd);
+                                  if (!Number.isFinite(s) || !Number.isFinite(en) || en <= s + 0.2) {
+                                    setRangeFeedback({
+                                      type: "error",
+                                      text: "Enter a valid start and end range (at least 0.25s).",
+                                    });
+                                    return;
+                                  }
+                                  void triggerRangeTranscription(s, en);
+                                }}
+                                className="h-7 px-3 rounded-sm bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] text-xs font-semibold inline-flex items-center gap-1.5 disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer transition-colors"
+                              >
+                                {transcribingRange ? (
                                   <>
-                                    <Check className="w-3 h-3 text-emerald-600 dark:text-emerald-400" />
-                                    <span className="text-emerald-700 dark:text-emerald-300">Copied</span>
+                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                    <span>Transcribing...</span>
                                   </>
                                 ) : (
                                   <>
-                                    <Download className="w-3 h-3" />
-                                    <span>SRT</span>
+                                    <Sparkles className="w-3.5 h-3.5" />
+                                    <span>AI Transcribe Range</span>
                                   </>
                                 )}
                               </button>
-
-                              {showExportMenu && (
-                                <div className="absolute right-0 mt-1 w-44 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] shadow-lg p-1 z-30 space-y-0.5">
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      downloadTextFile(
-                                        `${slug}.srt`,
-                                        buildSrtContent(project.subtitles, exportOpts),
-                                        "application/x-subrip;charset=utf-8"
-                                      );
-                                      setShowExportMenu(false);
-                                    }}
-                                    className="w-full px-2.5 py-1.5 rounded-sm text-left text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] flex items-center gap-2 cursor-pointer"
-                                  >
-                                    <FileText className="w-3.5 h-3.5 text-[#4d597d] dark:text-[#919ec4]" />
-                                    <span>Download .SRT</span>
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      downloadTextFile(
-                                        `${slug}.vtt`,
-                                        buildVttContent(project.subtitles, exportOpts),
-                                        "text/vtt;charset=utf-8"
-                                      );
-                                      setShowExportMenu(false);
-                                    }}
-                                    className="w-full px-2.5 py-1.5 rounded-sm text-left text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] flex items-center gap-2 cursor-pointer"
-                                  >
-                                    <FileText className="w-3.5 h-3.5 text-[#4d597d] dark:text-[#919ec4]" />
-                                    <span>Download .VTT</span>
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      downloadTextFile(
-                                        `${slug}-study.txt`,
-                                        buildStudyTextContent(project.title, project.subtitles, exportOpts),
-                                        "text/plain;charset=utf-8"
-                                      );
-                                      setShowExportMenu(false);
-                                    }}
-                                    className="w-full px-2.5 py-1.5 rounded-sm text-left text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] flex items-center gap-2 cursor-pointer"
-                                  >
-                                    <BookOpen className="w-3.5 h-3.5 text-[#4d597d] dark:text-[#919ec4]" />
-                                    <span>Study Sheet .TXT</span>
-                                  </button>
-                                  <div className="my-1 border-t border-[#d2dcf0] dark:border-[#21284c]" />
-                                  <button
-                                    type="button"
-                                    onClick={async () => {
-                                      try {
-                                        await navigator.clipboard.writeText(
-                                          buildStudyTextContent(project.title, project.subtitles, exportOpts)
-                                        );
-                                        setCopiedTranscript(true);
-                                        setTimeout(() => setCopiedTranscript(false), 2000);
-                                      } catch {
-                                        // ignore clipboard permission failure
-                                      }
-                                      setShowExportMenu(false);
-                                    }}
-                                    className="w-full px-2.5 py-1.5 rounded-sm text-left text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] flex items-center gap-2 cursor-pointer"
-                                  >
-                                    <Copy className="w-3.5 h-3.5 text-[#4d597d] dark:text-[#919ec4]" />
-                                    <span>Copy Transcript</span>
-                                  </button>
-                                </div>
-                              )}
                             </div>
-                          </div>
-                        </div>
+                          )}
 
-                        {/* Inline Search & Find/Replace Drawer */}
-                        {showSubSearch && (
-                          <div className="pt-2 border-t border-[#d2dcf0] dark:border-[#21284c] space-y-1.5">
+                          {rangeFeedback && (
+                            <p
+                              className={`text-[11px] px-2 py-1 rounded-sm ${
+                                rangeFeedback.type === "error"
+                                  ? "bg-red-50 text-red-700 dark:bg-red-950/40 dark:text-red-300"
+                                  : "bg-amber-50 text-amber-900 dark:bg-amber-950/40 dark:text-amber-200"
+                              }`}
+                            >
+                              {rangeFeedback.text}
+                            </p>
+                          )}
+
+                          <div className="space-y-1.5 pt-0.5">
+                            <span className="block text-[10px] font-medium uppercase tracking-wide text-[#4d597d] dark:text-[#919ec4]">
+                              Or Type Manually
+                            </span>
+                            <input
+                              type="text"
+                              value={newSubPhonetic}
+                              onChange={(e) => setNewSubPhonetic(e.target.value)}
+                              placeholder="Thai phonetic (e.g. Sa-wat-dee khrap)"
+                              aria-label="New Thai phonetic subtitle"
+                              className="w-full h-8 px-2.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] placeholder:text-[#4d597d] dark:placeholder:text-[#919ec4] focus:outline-none focus:border-teal-700 dark:focus:border-teal-400"
+                            />
+
+                            <input
+                              type="text"
+                              value={newSubBurmese}
+                              onChange={(e) => setNewSubBurmese(e.target.value)}
+                              placeholder="မြန်မာဘာသာပြန်..."
+                              aria-label="New Burmese translation subtitle"
+                              className="w-full h-8 px-2.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] font-myanmar text-xs text-[#0c1026] dark:text-[#f3f5fc] placeholder:text-[#4d597d] dark:placeholder:text-[#919ec4] focus:outline-none focus:border-teal-700 dark:focus:border-teal-400"
+                            />
+                          </div>
+
+                          <div className="flex items-center justify-end gap-1.5 pt-0.5">
+                            <button
+                              type="button"
+                              onClick={() => setShowAddSub(false)}
+                              className="h-7 px-2.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] cursor-pointer transition-colors"
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              type="submit"
+                              disabled={!newSubPhonetic.trim() && !newSubBurmese.trim()}
+                              className="h-7 px-3 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-xs font-semibold text-[#0c1026] dark:text-[#f3f5fc] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
+                            >
+                              Add Manual Line
+                            </button>
+                          </div>
+                        </form>
+                      )}
+
+                      {subtitleRegenError && (
+                        <div className="shrink-0 px-3.5 py-2 border-b border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-950/40 text-xs text-red-700 dark:text-red-300 flex items-center justify-between gap-2">
+                          <span className="min-w-0 break-words">{subtitleRegenError}</span>
+                          {onClearSubtitleRegenError && (
+                            <button
+                              type="button"
+                              onClick={onClearSubtitleRegenError}
+                              aria-label="Dismiss error"
+                              className="p-1 rounded hover:bg-red-100 dark:hover:bg-red-900/50 cursor-pointer shrink-0"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      )}
+
+                      <SubtitleListViewport
+                        ref={subtitleViewportRef}
+                        playingSubtitleId={livePlayingSubId}
+                        autoFollowState={autoFollowState}
+                        onChangeAutoFollowState={setAutoFollowState}
+                      >
+                        {/* Sticky Floating Find & Replace Bar */}
+                        {isSearchOpen && (
+                          <div className="sticky top-0 z-20 px-3.5 py-2 border-b border-[#d2dcf0] dark:border-[#21284c] bg-white/95 dark:bg-[#0d1022]/95 backdrop-blur-sm shadow-sm space-y-1.5">
                             <div className="flex items-center gap-1.5">
                               <div className="relative flex-1 min-w-0">
                                 <Search className="w-3.5 h-3.5 text-[#4d597d] dark:text-[#919ec4] absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" />
                                 <input
+                                  ref={subSearchInputRef}
                                   type="text"
                                   value={subSearchQuery}
                                   onChange={(e) => setSubSearchQuery(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Escape") {
+                                      setIsSearchOpen(false);
+                                    }
+                                  }}
                                   placeholder="Filter or find in phonetic, Thai, Burmese..."
                                   aria-label="Search subtitles"
                                   className="w-full h-7 pl-7 pr-6 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] text-xs text-[#0c1026] dark:text-[#f3f5fc] placeholder:text-[#4d597d] dark:placeholder:text-[#919ec4] focus:outline-none focus:border-teal-700 dark:focus:border-teal-400"
@@ -1843,6 +2759,15 @@ export function WorkspaceSidebar({
                               >
                                 <Replace className="w-3 h-3" />
                                 <span>Replace</span>
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() => setIsSearchOpen(false)}
+                                aria-label="Close search bar"
+                                className="h-7 w-7 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] flex items-center justify-center cursor-pointer"
+                              >
+                                <X className="w-3.5 h-3.5" />
                               </button>
                             </div>
 
@@ -1900,754 +2825,1211 @@ export function WorkspaceSidebar({
                           </div>
                         )}
 
-                        {/* Inline Subtitle Style Drawer */}
-                        {showSubStyle && (
-                          <div className="pt-2 border-t border-[#d2dcf0] dark:border-[#21284c] space-y-2">
-                            <div className="flex flex-wrap items-center justify-between gap-2">
-                              <div className="flex flex-wrap items-center gap-1.5">
-                                <span className="text-[11px] font-medium text-[#4d597d] dark:text-[#919ec4]">
-                                  Theme
-                                </span>
-                                <div className="inline-flex items-center p-0.5 rounded-sm bg-white dark:bg-[#141933] border border-[#d2dcf0] dark:border-[#21284c]">
-                                  {(
-                                    [
-                                      { id: "auto", label: "Auto" },
-                                      { id: "light", label: "Light" },
-                                      { id: "dark", label: "Dark" },
-                                      { id: "warm", label: "Warm" },
-                                    ] as { id: SubtitleTheme; label: string }[]
-                                  ).map((t) => (
-                                    <button
-                                      key={t.id}
-                                      type="button"
-                                      onClick={() =>
-                                        onChangeEditSettings({ ...editSettings, subtitleTheme: t.id })
-                                      }
-                                      className={`px-2 py-0.5 rounded-xs text-[11px] font-medium cursor-pointer transition-colors ${
-                                        editSettings.subtitleTheme === t.id
-                                          ? "bg-[#e7ecf8] dark:bg-[#21284c] text-teal-700 dark:text-teal-400 font-semibold"
-                                          : "text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
-                                      }`}
-                                    >
-                                      {t.label}
-                                    </button>
-                                  ))}
-                                </div>
-                              </div>
+                        {/* Compact Scenes Jump Strip */}
+                        {project.scenes.length > 1 && (
+                          <div className="px-3.5 py-1.5 border-b border-[#d2dcf0] dark:border-[#21284c] flex flex-wrap items-center gap-1">
+                            {project.scenes.map((sc, idx) => {
+                              let sceneCutStart = 0;
+                              for (let i = 0; i < idx; i++) {
+                                sceneCutStart += getSceneDurationSec(project.scenes[i]);
+                              }
+                              const sceneDur = getSceneDurationSec(sc);
+                              const isSceneActive =
+                                cutTime >= sceneCutStart && cutTime < sceneCutStart + sceneDur;
 
-                              <div className="flex items-center gap-1.5">
-                                <span className="text-[11px] font-medium text-[#4d597d] dark:text-[#919ec4]">
-                                  Size
-                                </span>
-                                <div className="inline-flex items-center p-0.5 rounded-sm bg-white dark:bg-[#141933] border border-[#d2dcf0] dark:border-[#21284c]">
-                                  {(
-                                    [
-                                      { id: "sm", label: "S" },
-                                      { id: "md", label: "M" },
-                                      { id: "lg", label: "L" },
-                                    ] as { id: SubtitleFontScale; label: string }[]
-                                  ).map((sz) => (
-                                    <button
-                                      key={sz.id}
-                                      type="button"
-                                      onClick={() =>
-                                        onChangeEditSettings({
-                                          ...editSettings,
-                                          subtitleFontScale: sz.id,
-                                        })
-                                      }
-                                      className={`px-2 py-0.5 rounded-xs text-[11px] font-semibold cursor-pointer transition-colors ${
-                                        editSettings.subtitleFontScale === sz.id
-                                          ? "bg-[#e7ecf8] dark:bg-[#21284c] text-teal-700 dark:text-teal-400"
-                                          : "text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
-                                      }`}
-                                    >
-                                      {sz.label}
-                                    </button>
-                                  ))}
-                                </div>
-                              </div>
-                            </div>
-
-                            <div className="flex flex-wrap items-center justify-between gap-2">
-                              <div className="flex items-center gap-1.5">
-                                <span className="text-[11px] font-medium text-[#4d597d] dark:text-[#919ec4] mr-0.5">
-                                  Highlight
-                                </span>
-                                {(
-                                  [
-                                    { id: "indigo", swatch: "bg-[#1c3db8]", label: "Blue" },
-                                    { id: "rose", swatch: "bg-[#8b2574]", label: "Orchid" },
-                                    { id: "amber", swatch: "bg-[#b86310]", label: "Amber" },
-                                    { id: "emerald", swatch: "bg-[#0f7d5d]", label: "Emerald" },
-                                  ] as { id: SubtitleHighlightColor; swatch: string; label: string }[]
-                                ).map((c) => {
-                                  const selected = editSettings.subtitleHighlightColor === c.id;
-                                  return (
-                                    <button
-                                      key={c.id}
-                                      type="button"
-                                      title={c.label}
-                                      aria-label={`Highlight color ${c.label}`}
-                                      onClick={() =>
-                                        onChangeEditSettings({
-                                          ...editSettings,
-                                          subtitleHighlightColor: c.id,
-                                        })
-                                      }
-                                      className={`w-4 h-4 rounded-full ${c.swatch} cursor-pointer transition-transform ${
-                                        selected
-                                          ? "ring-2 ring-offset-1 ring-teal-700 dark:ring-teal-400 dark:ring-offset-[#0d1022] scale-110"
-                                          : "opacity-75 hover:opacity-100"
-                                      }`}
-                                    />
-                                  );
-                                })}
-                              </div>
-
-                              <div className="flex flex-wrap items-center gap-1.5">
+                              return (
                                 <button
+                                  key={sc.index}
                                   type="button"
-                                  role="switch"
-                                  aria-checked={editSettings.showWordGloss}
-                                  onClick={() =>
-                                    onChangeEditSettings({
-                                      ...editSettings,
-                                      showWordGloss: !editSettings.showWordGloss,
-                                    })
-                                  }
-                                  className={`h-6 px-2 rounded-sm border text-[11px] font-medium cursor-pointer transition-colors ${
-                                    editSettings.showWordGloss
-                                      ? "border-teal-600/80 bg-teal-50/80 text-teal-800 dark:border-teal-400/80 dark:bg-teal-950/60 dark:text-teal-200"
-                                      : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] text-[#4d597d] dark:text-[#919ec4]"
+                                  onClick={() => onSeek(sceneCutStart)}
+                                  className={`px-2 py-0.5 rounded-sm text-[11px] font-mono-tabular border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                                    isSceneActive
+                                      ? "bg-teal-700 text-white border-teal-700 dark:bg-teal-400 dark:text-[#060918] dark:border-teal-400 font-semibold"
+                                      : "bg-[#f3f5fc] dark:bg-[#141933] text-[#0c1026] dark:text-[#f3f5fc] border-[#d2dcf0] dark:border-[#21284c] hover:border-[#b4c2e3] dark:hover:border-[#2f3866]"
                                   }`}
                                 >
-                                  Word Gloss
+                                  {idx + 1}. {formatRangeSec(sc.startSec)}–{formatRangeSec(sc.endSec)}
                                 </button>
-                                <button
-                                  type="button"
-                                  role="switch"
-                                  aria-checked={editSettings.showBurmeseLine}
-                                  onClick={() =>
-                                    onChangeEditSettings({
-                                      ...editSettings,
-                                      showBurmeseLine: !editSettings.showBurmeseLine,
-                                    })
-                                  }
-                                  className={`h-6 px-2 rounded-sm border text-[11px] font-medium cursor-pointer transition-colors ${
-                                    editSettings.showBurmeseLine
-                                      ? "border-teal-600/80 bg-teal-50/80 text-teal-800 dark:border-teal-400/80 dark:bg-teal-950/60 dark:text-teal-200"
-                                      : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] text-[#4d597d] dark:text-[#919ec4]"
-                                  }`}
-                                >
-                                  Burmese
-                                </button>
-                                {subStyleCustomized && (
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      onChangeEditSettings({
-                                        ...editSettings,
-                                        subtitleFontScale: DEFAULT_VIDEO_EDIT.subtitleFontScale,
-                                        subtitleTheme: DEFAULT_VIDEO_EDIT.subtitleTheme,
-                                        subtitleHighlightColor:
-                                          DEFAULT_VIDEO_EDIT.subtitleHighlightColor,
-                                        showWordGloss: DEFAULT_VIDEO_EDIT.showWordGloss,
-                                        showBurmeseLine: DEFAULT_VIDEO_EDIT.showBurmeseLine,
-                                      })
-                                    }
-                                    className="h-6 px-1.5 rounded-sm text-[11px] font-medium text-[#4d597d] dark:text-[#919ec4] hover:text-teal-700 dark:hover:text-teal-400 underline cursor-pointer"
-                                  >
-                                    Reset
-                                  </button>
-                                )}
-                              </div>
-                            </div>
+                              );
+                            })}
                           </div>
                         )}
-                      </div>
-                    );
-                  })()}
-                </div>
 
-                {/* Inline Add Subtitle Form */}
-                {showAddSub && (
-                  <form
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      if (!newSubPhonetic.trim() && !newSubBurmese.trim()) return;
-                      const s = parseFloat(newSubStart);
-                      const en = parseFloat(newSubEnd);
-                      onAddSubtitle({
-                        startTime: Number.isFinite(s) ? s : cutTime,
-                        endTime: Number.isFinite(en) ? en : (Number.isFinite(s) ? s : cutTime) + 2.5,
-                        thaiPhonetic: newSubPhonetic,
-                        burmese: newSubBurmese,
-                      });
-                      setShowAddSub(false);
-                      setNewSubPhonetic("");
-                      setNewSubBurmese("");
-                    }}
-                    className="px-3.5 py-3 border-b border-[#d2dcf0] dark:border-[#21284c] bg-[#e7ecf8]/60 dark:bg-[#141933] space-y-2"
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <span className="font-display text-xs font-semibold text-[#0c1026] dark:text-[#f3f5fc]">
-                        New Subtitle
-                      </span>
-                      <div className="flex items-center gap-1.5 text-xs">
-                        <label className="flex items-center gap-1 text-[#4d597d] dark:text-[#919ec4]">
-                          <span>Start</span>
-                          <input
-                            type="number"
-                            step="0.1"
-                            min={0}
-                            max={project.targetDurationSec}
-                            value={newSubStart}
-                            onChange={(e) => setNewSubStart(e.target.value)}
-                            className="w-16 h-6 px-1.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#0c1026] dark:text-[#f3f5fc] font-mono-tabular text-xs"
-                          />
-                        </label>
-                        <label className="flex items-center gap-1 text-[#4d597d] dark:text-[#919ec4]">
-                          <span>End</span>
-                          <input
-                            type="number"
-                            step="0.1"
-                            min={0.2}
-                            max={project.targetDurationSec}
-                            value={newSubEnd}
-                            onChange={(e) => setNewSubEnd(e.target.value)}
-                            className="w-16 h-6 px-1.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#0c1026] dark:text-[#f3f5fc] font-mono-tabular text-xs"
-                          />
-                        </label>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const maxDur = Math.max(0.5, project.targetDurationSec || 10);
-                            const s = Math.min(maxDur - 0.5, Math.max(0, cutTime));
-                            setNewSubStart(s.toFixed(1));
-                            setNewSubEnd(Math.min(maxDur, s + 2.5).toFixed(1));
-                          }}
-                          className="h-6 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] cursor-pointer whitespace-nowrap transition-colors"
-                        >
-                          Use playhead
-                        </button>
-                      </div>
-                    </div>
-
-                    <input
-                      type="text"
-                      value={newSubPhonetic}
-                      onChange={(e) => setNewSubPhonetic(e.target.value)}
-                      placeholder="Thai phonetic (e.g. Sa-wat-dee khrap)"
-                      aria-label="New Thai phonetic subtitle"
-                      className="w-full h-8 px-2.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] placeholder:text-[#4d597d] dark:placeholder:text-[#919ec4] focus:outline-none focus:border-teal-700 dark:focus:border-teal-400"
-                    />
-
-                    <input
-                      type="text"
-                      value={newSubBurmese}
-                      onChange={(e) => setNewSubBurmese(e.target.value)}
-                      placeholder="မြန်မာဘာသာပြန်..."
-                      aria-label="New Burmese translation subtitle"
-                      className="w-full h-8 px-2.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] font-myanmar text-xs text-[#0c1026] dark:text-[#f3f5fc] placeholder:text-[#4d597d] dark:placeholder:text-[#919ec4] focus:outline-none focus:border-teal-700 dark:focus:border-teal-400"
-                    />
-
-                    <div className="flex items-center justify-end gap-1.5 pt-0.5">
-                      <button
-                        type="button"
-                        onClick={() => setShowAddSub(false)}
-                        className="h-7 px-2.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] cursor-pointer transition-colors"
-                      >
-                        Cancel
-                      </button>
-                      <button
-                        type="submit"
-                        disabled={!newSubPhonetic.trim() && !newSubBurmese.trim()}
-                        className="h-7 px-3 rounded-sm bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] text-xs font-semibold disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
-                      >
-                        Add
-                      </button>
-                    </div>
-                  </form>
-                )}
-
-                {subtitleRegenError && (
-                  <div className="px-3.5 py-2 border-b border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-950/40 text-xs text-red-700 dark:text-red-300 flex items-center justify-between gap-2">
-                    <span className="min-w-0 break-words">{subtitleRegenError}</span>
-                    {onClearSubtitleRegenError && (
-                      <button
-                        type="button"
-                        onClick={onClearSubtitleRegenError}
-                        aria-label="Dismiss error"
-                        className="p-1 rounded hover:bg-red-100 dark:hover:bg-red-900/50 cursor-pointer shrink-0"
-                      >
-                        <X className="w-3.5 h-3.5" />
-                      </button>
-                    )}
-                  </div>
-                )}
-
-                {/* Full-Bleed Hairline Subtitle Rows */}
-                {project.subtitles.length === 0 ? (
-                  <div className="p-6 text-center space-y-2.5">
-                    <p className="text-xs text-[#4d597d] dark:text-[#919ec4]">
-                      No subtitles in this video yet.
-                    </p>
-                    <button
-                      type="button"
-                      onClick={openAddSubtitleForm}
-                      className="h-8 px-3.5 rounded-sm bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer transition-colors"
-                    >
-                      <Plus className="w-3.5 h-3.5" />
-                      <span>Add Subtitle</span>
-                    </button>
-                  </div>
-                ) : (
-                  <div className="divide-y divide-[#d2dcf0] dark:divide-[#21284c] bg-white dark:bg-[#0d1022]">
-                    {(() => {
-                      const activeSubId = findActiveSubtitle(project.subtitles, cutTime)?.id;
-                      const needle = subSearchQuery.trim().toLowerCase();
-                      const visibleSubs = needle
-                        ? project.subtitles.filter((s) => {
-                            const hay = `${s.thaiPhonetic} ${s.thaiScript} ${s.burmese} ${s.originalSpokenText} ${s.words
-                              .map((w) => `${w.phonetic} ${w.burmeseGloss || ""}`)
-                              .join(" ")}`.toLowerCase();
-                            return hay.includes(needle);
-                          })
-                        : project.subtitles;
-
-                      if (visibleSubs.length === 0) {
-                        return (
-                          <div className="p-6 text-center space-y-2 bg-white dark:bg-[#0d1022]">
-                            <p className="text-xs text-[#4d597d] dark:text-[#919ec4]">
-                              No subtitles match “{subSearchQuery}”.
-                            </p>
-                            <button
-                              type="button"
-                              onClick={() => setSubSearchQuery("")}
-                              className="text-xs font-medium underline text-teal-700 dark:text-teal-400 cursor-pointer"
-                            >
-                              Clear filter
-                            </button>
-                          </div>
-                        );
-                      }
-
-                      return (
-                        <>
-                          {needle && (
-                            <div className="px-3.5 py-1.5 bg-[#e7ecf8]/70 dark:bg-[#141933] text-[11px] text-[#4d597d] dark:text-[#919ec4] flex items-center justify-between">
-                              <span>
-                                Showing {visibleSubs.length} of {project.subtitles.length} subtitles
-                              </span>
+                      {/* Full-Bleed Hairline Subtitle Rows */}
+                      {project.subtitles.length === 0 ? (
+                        <div className="p-6 text-center space-y-2.5">
+                          <p className="text-xs text-[#4d597d] dark:text-[#919ec4]">
+                            No subtitles in this video yet.
+                          </p>
+                          <div className="flex flex-wrap items-center justify-center gap-2">
+                            {onTranscribeRange && (
                               <button
                                 type="button"
-                                onClick={() => setSubSearchQuery("")}
-                                className="underline hover:text-[#0c1026] dark:hover:text-[#f3f5fc] cursor-pointer"
-                              >
-                                Show all
-                              </button>
-                            </div>
-                          )}
-                          {visibleSubs.map((sub: SubtitleItem) => {
-                            const subIdx = project.subtitles.findIndex((item) => item.id === sub.id);
-                            const isCurrent = sub.id === activeSubId;
-                            const isLooping = loopingSubId === sub.id;
-                            const isEditingTime = editingTimeId === sub.id;
-                            const isHintOpen = hintOpenId === sub.id;
-                            const isEditingWords = editingWordsId === sub.id;
-                            const isRegenerating = regeneratingSubIds.includes(sub.id);
-                            const canSplitSub = sub.endTime - sub.startTime >= 0.45;
-                            const canMergeNext = subIdx >= 0 && subIdx < project.subtitles.length - 1;
-                            const hintValue = hintDrafts[sub.id] ?? "";
-                            return (
-                              <div
-                                key={sub.id}
-                                ref={(node) => {
-                                  subCardRefs.current[sub.id] = node;
+                                disabled={Boolean(transcribingRange)}
+                                onClick={() => {
+                                  const maxDur = Math.max(0.5, project.targetDurationSec || 10);
+                                  const suggested = suggestTranscribeRange(
+                                    project.subtitles,
+                                    cutSpeechRegions,
+                                    cutTime,
+                                    maxDur
+                                  );
+                                  void triggerRangeTranscription(
+                                    suggested.startSec,
+                                    suggested.endSec
+                                  );
                                 }}
-                                className={`px-3.5 py-2.5 border-l-2 transition-colors ${
-                                  isLooping
-                                    ? "border-l-emerald-500 bg-emerald-50/45 dark:bg-emerald-950/20"
-                                    : isCurrent
-                                      ? "border-l-teal-700 dark:border-l-teal-400 bg-teal-50/40 dark:bg-teal-950/20"
-                                      : "border-l-transparent bg-white dark:bg-[#0d1022]"
-                                }`}
+                                className="h-8 px-3.5 rounded-sm bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50 transition-colors"
                               >
-                                <div className="flex flex-wrap items-center justify-between gap-1.5 mb-1">
-                                  <div className="flex items-center gap-2 min-w-0">
-                                    <button
-                                      type="button"
-                                      onClick={() => onSeek(sub.startTime)}
-                                      className={`text-[11px] font-mono-tabular cursor-pointer shrink-0 transition-colors ${
-                                        isCurrent
-                                          ? "text-teal-700 dark:text-teal-400 font-semibold"
-                                          : "text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
-                                      }`}
-                                    >
-                                      {(() => {
-                                        const spd = getEffectivePlaybackSpeed(
-                                          project.sourceType,
-                                          editSettings.playbackSpeed,
-                                          voiceSettings.speed
-                                        );
-                                        return `${formatRangeSec(sub.startTime / spd)} – ${formatRangeSec(
-                                          sub.endTime / spd
-                                        )}`;
-                                      })()}
-                                    </button>
-                                    <span className="text-[11px] text-[#4d597d]/75 dark:text-[#919ec4]/75 truncate">
-                                      {sub.originalSpokenText}
-                                    </span>
-                                  </div>
+                                {transcribingRange ? (
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                ) : (
+                                  <Sparkles className="w-3.5 h-3.5" />
+                                )}
+                                <span>
+                                  {transcribingRange ? "Transcribing..." : "AI Transcribe Range"}
+                                </span>
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={openAddSubtitleForm}
+                              className="h-8 px-3.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-xs font-semibold text-[#0c1026] dark:text-[#f3f5fc] inline-flex items-center gap-1.5 cursor-pointer transition-colors"
+                            >
+                              <Plus className="w-3.5 h-3.5" />
+                              <span>Add Subtitle</span>
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="divide-y divide-[#d2dcf0] dark:divide-[#21284c] bg-white dark:bg-[#0d1022]">
+                          {(() => {
+                            const needle = subSearchQuery.trim().toLowerCase();
+                            const visibleSubs = project.subtitles.filter((s) => {
+                              if (qualityFilter !== "all") {
+                                const qf = qualityMap[s.id];
+                                if (!qf || !qf[qualityFilter]) return false;
+                              }
+                              if (!needle) return true;
+                              const hay = `${s.thaiPhonetic} ${s.thaiScript} ${s.burmese} ${s.originalSpokenText} ${s.words
+                                .map((w) => `${w.phonetic} ${w.burmeseGloss || ""}`)
+                                .join(" ")}`.toLowerCase();
+                              return hay.includes(needle);
+                            });
 
-                                  <div className="flex flex-wrap items-center gap-1 shrink-0">
+                            if (visibleSubs.length === 0) {
+                              return (
+                                <div className="p-6 text-center space-y-2 bg-white dark:bg-[#0d1022]">
+                                  <p className="text-xs text-[#4d597d] dark:text-[#919ec4]">
+                                    {needle
+                                      ? `No subtitles match “${subSearchQuery}”.`
+                                      : "No subtitles match the selected quality filter."}
+                                  </p>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setSubSearchQuery("");
+                                      setQualityFilter("all");
+                                    }}
+                                    className="text-xs font-medium underline text-teal-700 dark:text-teal-400 cursor-pointer"
+                                  >
+                                    Clear filter
+                                  </button>
+                                </div>
+                              );
+                            }
+
+                            return (
+                              <>
+                                {(needle || qualityFilter !== "all") && (
+                                  <div className="px-3.5 py-1.5 bg-[#e7ecf8]/70 dark:bg-[#141933] text-[11px] text-[#4d597d] dark:text-[#919ec4] flex items-center justify-between">
+                                    <span>
+                                      Showing {visibleSubs.length} of {project.subtitles.length} subtitles
+                                    </span>
                                     <button
                                       type="button"
-                                      onClick={() => onToggleLoopSubtitle(sub.id)}
-                                      title={isLooping ? "Stop looping this line" : "Loop play this subtitle"}
-                                      aria-label={isLooping ? "Stop looping this line" : "Loop play this subtitle"}
-                                      className={`h-6 px-1.5 rounded-sm flex items-center gap-1 text-[11px] font-medium border transition-colors cursor-pointer whitespace-nowrap ${
-                                        isLooping
-                                          ? "border-emerald-500 bg-emerald-100/90 dark:bg-emerald-950/70 text-emerald-800 dark:text-emerald-200"
-                                          : "border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
-                                      }`}
+                                      onClick={() => {
+                                        setSubSearchQuery("");
+                                        setQualityFilter("all");
+                                      }}
+                                      className="underline hover:text-[#0c1026] dark:hover:text-[#f3f5fc] cursor-pointer"
                                     >
-                                      {isLooping && isPlaying ? (
-                                        <Square className="w-2.5 h-2.5 fill-current" />
-                                      ) : (
-                                        <Repeat className="w-3 h-3" />
-                                      )}
-                                      <span>{isLooping ? "Stop" : "Loop"}</span>
+                                      Show all
                                     </button>
-                                    {isRegenerating ? (
-                                      <button
-                                        type="button"
-                                        onClick={() => onCancelRegenerateSubtitle?.(sub.id)}
-                                        title="Cancel AI regeneration for this subtitle"
-                                        aria-label="Cancel AI regeneration for this subtitle"
-                                        className="h-6 px-1.5 rounded-sm flex items-center gap-1 text-[11px] font-semibold border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/60 hover:bg-red-100 dark:hover:bg-red-900/70 text-red-700 dark:text-red-300 transition-colors cursor-pointer whitespace-nowrap"
-                                      >
-                                        <Loader2 className="w-3 h-3 animate-spin" />
-                                        <span>Stop</span>
-                                      </button>
-                                    ) : (
-                                      <button
-                                        type="button"
-                                        disabled={isRetranslatingAll || isResyncingTimings}
-                                        onClick={() => onRegenerateSubtitle(sub.id, hintValue)}
-                                        title="Regenerate this subtitle with AI"
-                                        aria-label="Regenerate this subtitle with AI"
-                                        className="h-6 px-1.5 rounded-sm flex items-center gap-1 text-[11px] font-medium border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] text-[#4d597d] dark:text-[#919ec4] hover:border-teal-600/60 dark:hover:border-teal-400/60 hover:text-teal-700 dark:hover:text-teal-400 transition-colors cursor-pointer whitespace-nowrap disabled:opacity-50"
-                                      >
-                                        <Sparkles className="w-3 h-3" />
-                                        <span>AI</span>
-                                      </button>
-                                    )}
-                                    <button
-                                      type="button"
-                                      onClick={() =>
-                                        setHintOpenId((cur) => (cur === sub.id ? null : sub.id))
-                                      }
-                                      title="Regenerate with AI hint"
-                                      aria-label="Regenerate with AI hint"
-                                      className={`h-6 px-1.5 rounded-sm flex items-center gap-1 text-[11px] font-medium border transition-colors cursor-pointer whitespace-nowrap ${
-                                        isHintOpen || hintValue.trim()
-                                          ? "border-teal-600/70 dark:border-teal-400/70 bg-teal-50/80 dark:bg-teal-950/50 text-teal-800 dark:text-teal-200"
-                                          : "border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
-                                      }`}
-                                    >
-                                      <MessageSquarePlus className="w-3 h-3" />
-                                      <span>Hint</span>
-                                    </button>
-                                    {sub.words.length > 0 && (
-                                      <button
-                                        type="button"
-                                        onClick={() =>
-                                          setEditingWordsId((cur) => (cur === sub.id ? null : sub.id))
-                                        }
-                                        title="Edit word-by-word Burmese glosses"
-                                        aria-label="Edit word-by-word Burmese glosses"
-                                        className={`h-6 px-1.5 rounded-sm flex items-center gap-1 text-[11px] font-medium border transition-colors cursor-pointer whitespace-nowrap ${
-                                          isEditingWords
-                                            ? "border-teal-600/70 dark:border-teal-400/70 bg-teal-50/80 dark:bg-teal-950/50 text-teal-800 dark:text-teal-200"
-                                            : "border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
+                                  </div>
+                                )}
+                                {visibleSubs.map((sub: SubtitleItem) => {
+                                  const subIdx = project.subtitles.findIndex(
+                                    (item) => item.id === sub.id
+                                  );
+                                  const isSelected = selectedSubtitleId === sub.id;
+                                  const isCurrent = sub.id === livePlayingSubId;
+                                  const isLooping = loopingSubId === sub.id;
+                                  const isEditingTime = editingTimeId === sub.id;
+                                  const isAiPopoverOpen = aiPopoverId === sub.id;
+                                  const isMoreMenuOpen = moreMenuId === sub.id;
+                                  const isWordBarCollapsed = Boolean(collapsedWordBarSubIds[sub.id]);
+                                  const isRegenerating = regeneratingSubIds.includes(sub.id);
+                                  const isInFlightRetranslate =
+                                    retranslatingSubIds.includes(sub.id) ||
+                                    (isRetranslatingAll &&
+                                      retranslatingSubIds.length === 0 &&
+                                      !sub.isManuallyEdited);
+                                  const isRowLocked = isRegenerating || isInFlightRetranslate;
+                                  const canSplitSub = sub.endTime - sub.startTime >= 0.45;
+                                  const canMergeNext =
+                                    subIdx >= 0 && subIdx < project.subtitles.length - 1;
+                                  const hintValue = hintDrafts[sub.id] ?? "";
+                                  const qFlags = qualityMap[sub.id];
+
+                                  if (!isSelected) {
+                                    const issueLabels = qFlags?.issues.map((iss) =>
+                                      iss === "overlap"
+                                        ? "Overlap"
+                                        : iss === "too_fast"
+                                          ? "Too fast"
+                                          : iss === "silent_mismatch"
+                                            ? "Silent mismatch"
+                                            : "Missing gloss"
+                                    );
+                                    return (
+                                      <div
+                                        key={sub.id}
+                                        ref={(node) => {
+                                          subCardRefs.current[sub.id] = node;
+                                          subtitleViewportRef.current?.registerItemElement(
+                                            sub.id,
+                                            node
+                                          );
+                                        }}
+                                        role="button"
+                                        tabIndex={0}
+                                        aria-label={`Edit subtitle ${subIdx + 1}: ${
+                                          sub.thaiPhonetic || sub.burmese || "empty"
+                                        }${issueLabels?.length ? ` (${issueLabels.join(", ")})` : ""}`}
+                                        onClick={() => {
+                                          setAiPopoverId(null);
+                                          setMoreMenuId(null);
+                                          setEditingTimeId(null);
+                                          setSelectedSubtitleId(sub.id);
+                                        }}
+                                        onKeyDown={(e) => {
+                                          if (e.key === "Enter" || e.key === " ") {
+                                            e.preventDefault();
+                                            setAiPopoverId(null);
+                                            setMoreMenuId(null);
+                                            setEditingTimeId(null);
+                                            setSelectedSubtitleId(sub.id);
+                                          }
+                                        }}
+                                        className={`px-3.5 py-2 border-l-2 cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-700 dark:focus-visible:ring-teal-400 ${
+                                          isLooping
+                                            ? "border-l-emerald-500 bg-emerald-50/45 dark:bg-emerald-950/20"
+                                            : isCurrent
+                                              ? "border-l-teal-700 dark:border-l-teal-400 bg-teal-50/45 dark:bg-teal-950/25"
+                                              : "border-l-transparent bg-white dark:bg-[#0d1022] hover:bg-[#f3f5fc]/70 dark:hover:bg-[#141933]/60"
                                         }`}
                                       >
-                                        <BookOpen className="w-3 h-3" />
-                                        <span>Gloss</span>
-                                      </button>
-                                    )}
-                                    <button
-                                      type="button"
-                                      disabled={!canSplitSub}
-                                      onClick={() => onSplitSubtitle(sub.id)}
-                                      title="Split subtitle into two lines"
-                                      aria-label="Split subtitle into two lines"
-                                      className="h-6 px-1.5 rounded-sm flex items-center gap-1 text-[11px] font-medium border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer whitespace-nowrap"
-                                    >
-                                      <Scissors className="w-3 h-3" />
-                                      <span>Split</span>
-                                    </button>
-                                    {canMergeNext && (
-                                      <button
-                                        type="button"
-                                        onClick={() => onMergeSubtitleWithNext(sub.id)}
-                                        title="Merge with next subtitle"
-                                        aria-label="Merge with next subtitle"
-                                        className="h-6 px-1.5 rounded-sm flex items-center gap-1 text-[11px] font-medium border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] transition-colors cursor-pointer whitespace-nowrap"
-                                      >
-                                        <Merge className="w-3 h-3" />
-                                        <span>Merge</span>
-                                      </button>
-                                    )}
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        if (isEditingTime) {
-                                          setEditingTimeId(null);
-                                        } else {
-                                          setEditingTimeId(sub.id);
-                                          setEditStartVal(sub.startTime.toFixed(1));
-                                          setEditEndVal(sub.endTime.toFixed(1));
-                                        }
-                                      }}
-                                      title="Edit subtitle timing"
-                                      aria-label="Edit subtitle timing"
-                                      className={`w-6 h-6 rounded-sm flex items-center justify-center transition-colors cursor-pointer ${
-                                        isEditingTime
-                                          ? "bg-[#e7ecf8] dark:bg-[#1a2142] text-teal-700 dark:text-teal-400"
-                                          : "text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933]"
-                                      }`}
-                                    >
-                                      <Clock className="w-3.5 h-3.5" />
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        if (editingTimeId === sub.id) setEditingTimeId(null);
-                                        if (hintOpenId === sub.id) setHintOpenId(null);
-                                        if (editingWordsId === sub.id) setEditingWordsId(null);
-                                        onDeleteSubtitle(sub.id);
-                                      }}
-                                      title="Delete subtitle"
-                                      aria-label="Delete subtitle"
-                                      className="w-6 h-6 rounded-sm flex items-center justify-center text-[#4d597d] dark:text-[#919ec4] hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 transition-colors cursor-pointer"
-                                    >
-                                      <Trash2 className="w-3.5 h-3.5" />
-                                    </button>
-                                  </div>
-                                </div>
-
-                                {isHintOpen && (
-                                  <form
-                                    onSubmit={(e) => {
-                                      e.preventDefault();
-                                      if (!isRegenerating && !isRetranslatingAll) {
-                                        onRegenerateSubtitle(sub.id, hintValue);
-                                      }
-                                    }}
-                                    className="mb-2 p-2 rounded-sm border border-teal-200/80 dark:border-teal-500/30 bg-teal-50/50 dark:bg-teal-950/30 space-y-1.5"
-                                  >
-                                    <div className="flex flex-wrap gap-1">
-                                      {QUICK_AI_HINTS.map((preset) => (
-                                        <button
-                                          key={preset.label}
-                                          type="button"
-                                          onClick={() =>
-                                            setHintDrafts((prev) => ({
-                                              ...prev,
-                                              [sub.id]: preset.text,
-                                            }))
-                                          }
-                                          className="px-2 py-0.5 rounded-sm border border-teal-200/80 dark:border-teal-500/30 bg-white dark:bg-[#0d1022] text-[10px] font-medium text-teal-800 dark:text-teal-200 hover:bg-teal-100/70 dark:hover:bg-teal-900/50 cursor-pointer whitespace-nowrap"
-                                        >
-                                          {preset.label}
-                                        </button>
-                                      ))}
-                                    </div>
-                                    <div className="flex items-center gap-1.5">
-                                      <input
-                                        type="text"
-                                        value={hintValue}
-                                        onChange={(e) =>
-                                          setHintDrafts((prev) => ({
-                                            ...prev,
-                                            [sub.id]: e.target.value,
-                                          }))
-                                        }
-                                        placeholder="AI Hint (e.g. 'လူနာမည်ဖြစ်တယ်', 'ဗန်းစကားလိုပြန်ပေး')..."
-                                        aria-label="AI regeneration hint"
-                                        className="flex-1 min-w-0 h-7 px-2 rounded-sm border border-teal-200 dark:border-teal-500/30 bg-white dark:bg-[#0d1022] text-xs text-[#0c1026] dark:text-[#f3f5fc] placeholder:text-[#4d597d] dark:placeholder:text-[#919ec4] focus:outline-none focus:border-teal-700 dark:focus:border-teal-400"
-                                      />
-                                      {isRegenerating ? (
-                                        <button
-                                          type="button"
-                                          onClick={() => onCancelRegenerateSubtitle?.(sub.id)}
-                                          className="h-7 px-2.5 rounded-sm border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/70 hover:bg-red-100 dark:hover:bg-red-900 text-red-700 dark:text-red-300 text-[11px] font-semibold flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer"
-                                        >
-                                          <Square className="w-2.5 h-2.5 fill-current" />
-                                          <span>Stop</span>
-                                        </button>
-                                      ) : (
-                                        <button
-                                          type="submit"
-                                          disabled={isRetranslatingAll || isResyncingTimings}
-                                          className="h-7 px-2.5 rounded-sm bg-teal-700 text-white hover:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] text-[11px] font-semibold flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-60 transition-colors"
-                                        >
-                                          <Sparkles className="w-3 h-3" />
-                                          <span>Regenerate</span>
-                                        </button>
-                                      )}
-                                    </div>
-                                  </form>
-                                )}
-
-                                {isEditingTime && (
-                                  <div className="mb-2 flex flex-wrap items-center gap-2 p-1.5 rounded-sm bg-[#e7ecf8] dark:bg-[#141933] text-xs">
-                                    <label className="flex items-center gap-1 text-[#4d597d] dark:text-[#919ec4]">
-                                      <span>Start</span>
-                                      <input
-                                        type="number"
-                                        step="0.1"
-                                        min={0}
-                                        max={project.targetDurationSec}
-                                        value={editStartVal}
-                                        onChange={(e) => setEditStartVal(e.target.value)}
-                                        className="w-16 h-6 px-1.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#0c1026] dark:text-[#f3f5fc] font-mono-tabular text-xs"
-                                      />
-                                    </label>
-                                    <label className="flex items-center gap-1 text-[#4d597d] dark:text-[#919ec4]">
-                                      <span>End</span>
-                                      <input
-                                        type="number"
-                                        step="0.1"
-                                        min={0.2}
-                                        max={project.targetDurationSec}
-                                        value={editEndVal}
-                                        onChange={(e) => setEditEndVal(e.target.value)}
-                                        className="w-16 h-6 px-1.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#0c1026] dark:text-[#f3f5fc] font-mono-tabular text-xs"
-                                      />
-                                    </label>
-                                    <div className="flex items-center gap-1">
-                                      {[-0.1, 0.1].map((delta) => (
-                                        <button
-                                          key={delta}
-                                          type="button"
-                                          onClick={() => {
-                                            const maxDur = Math.max(0.5, project.targetDurationSec || 10);
-                                            const curS = Number.isFinite(parseFloat(editStartVal))
-                                              ? parseFloat(editStartVal)
-                                              : sub.startTime;
-                                            const curE = Number.isFinite(parseFloat(editEndVal))
-                                              ? parseFloat(editEndVal)
-                                              : sub.endTime;
-                                            const dur = Math.max(0.2, curE - curS);
-                                            const nextS = Math.max(0, Math.min(maxDur - dur, curS + delta));
-                                            const nextE = Math.min(maxDur, nextS + dur);
-                                            setEditStartVal(nextS.toFixed(1));
-                                            setEditEndVal(nextE.toFixed(1));
-                                            onUpdateSubtitleTiming(sub.id, nextS, nextE);
-                                          }}
-                                          className="h-6 px-1.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] font-mono-tabular text-[11px] text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] cursor-pointer transition-colors"
-                                        >
-                                          {delta > 0 ? `+${delta}s` : `${delta}s`}
-                                        </button>
-                                      ))}
-                                      <button
-                                        type="button"
-                                        onClick={() => {
-                                          const s = parseFloat(editStartVal);
-                                          const en = parseFloat(editEndVal);
-                                          if (Number.isFinite(s) && Number.isFinite(en)) {
-                                            onUpdateSubtitleTiming(sub.id, s, en);
-                                          }
-                                          setEditingTimeId(null);
-                                        }}
-                                        className="h-6 px-2 rounded-sm bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] text-[11px] font-semibold flex items-center gap-1 cursor-pointer transition-colors"
-                                      >
-                                        <Check className="w-3 h-3" />
-                                        <span>Apply</span>
-                                      </button>
-                                    </div>
-                                  </div>
-                                )}
-
-                                {editSettings.showThaiScript && (
-                                  <input
-                                    type="text"
-                                    value={sub.thaiScript}
-                                    onChange={(e) => onUpdateSubtitle(sub.id, "thaiScript", e.target.value)}
-                                    placeholder="ภาษาไทย..."
-                                    aria-label="Thai script"
-                                    className="w-full text-[12px] font-medium text-teal-700 dark:text-teal-400 bg-transparent border-b border-transparent focus:border-teal-600 dark:focus:border-teal-400 focus:outline-none py-0.5"
-                                  />
-                                )}
-
-                                <input
-                                  type="text"
-                                  value={sub.thaiPhonetic}
-                                  onChange={(e) => onUpdateSubtitle(sub.id, "thaiPhonetic", e.target.value)}
-                                  placeholder="Thai phonetic..."
-                                  aria-label="Thai in English phonetics"
-                                  className="w-full text-[13px] font-semibold text-[#0c1026] dark:text-[#f3f5fc] bg-transparent border-b border-transparent focus:border-teal-700 dark:focus:border-teal-400 focus:outline-none py-0.5"
-                                />
-
-                                <input
-                                  type="text"
-                                  value={sub.burmese}
-                                  onChange={(e) => onUpdateSubtitle(sub.id, "burmese", e.target.value)}
-                                  placeholder="မြန်မာဘာသာပြန်..."
-                                  aria-label="Burmese translation"
-                                  className="w-full font-myanmar text-[13px] text-[#4d597d] dark:text-[#919ec4] bg-transparent border-b border-transparent focus:border-teal-700 dark:focus:border-teal-400 focus:outline-none py-0.5"
-                                />
-
-                                {isEditingWords && sub.words.length > 0 && (
-                                  <div className="mt-2 pt-2 border-t border-[#d2dcf0] dark:border-[#21284c] space-y-1.5">
-                                    <span className="block text-[11px] font-medium text-[#4d597d] dark:text-[#919ec4]">
-                                      Word-by-Word Burmese Gloss (9:16 Stage)
-                                    </span>
-                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
-                                      {sub.words.map((word, wi) => (
-                                        <div
-                                          key={`${sub.id}-gloss-${wi}`}
-                                          className="flex items-center gap-2 px-2 py-1 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933]"
-                                        >
-                                          <div className="min-w-0 shrink-0 max-w-[45%]">
-                                            <p className="text-[11px] font-semibold text-[#0c1026] dark:text-[#f3f5fc] truncate">
-                                              {word.phonetic}
-                                            </p>
-                                            {word.thai && word.thai !== word.phonetic && (
-                                              <p className="text-[10px] text-[#4d597d] dark:text-[#919ec4] truncate">
-                                                {word.thai}
-                                              </p>
+                                        <div className="flex items-center gap-2 min-w-0">
+                                          <div className="flex items-center gap-1.5 shrink-0">
+                                            <span
+                                              className={`text-[11px] font-mono-tabular ${
+                                                isCurrent
+                                                  ? "text-teal-700 dark:text-teal-400 font-semibold"
+                                                  : "text-[#4d597d] dark:text-[#919ec4]"
+                                              }`}
+                                            >
+                                              {formatRangeSec(sub.startTime / effectiveSpd)}
+                                            </span>
+                                            {sub.isManuallyEdited && (
+                                              <span
+                                                title="Manually edited"
+                                                aria-label="Manually edited"
+                                                className="w-1.5 h-1.5 rounded-full bg-amber-500 dark:bg-amber-400 shrink-0"
+                                              />
                                             )}
                                           </div>
-                                          <input
-                                            type="text"
-                                            value={word.burmeseGloss || ""}
-                                            onChange={(e) =>
-                                              onUpdateWordGloss(sub.id, wi, e.target.value)
-                                            }
-                                            placeholder="အနက်..."
-                                            aria-label={`Burmese gloss for ${word.phonetic}`}
-                                            className="flex-1 min-w-0 h-6 px-1.5 rounded-xs border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] font-myanmar text-[11px] text-teal-700 dark:text-teal-300 placeholder:text-[#4d597d] dark:placeholder:text-[#919ec4] focus:outline-none focus:border-teal-700 dark:focus:border-teal-400"
-                                          />
+
+                                          <div className="flex-1 min-w-0">
+                                            <p className="text-[12.5px] font-semibold text-[#0c1026] dark:text-[#f3f5fc] truncate leading-snug">
+                                              {sub.thaiPhonetic || "—"}
+                                            </p>
+                                            <p className="font-myanmar text-[12px] text-[#4d597d] dark:text-[#919ec4] truncate leading-snug">
+                                              {sub.burmese || "—"}
+                                            </p>
+                                          </div>
+
+                                          {(isLooping ||
+                                            isRegenerating ||
+                                            isInFlightRetranslate ||
+                                            (qFlags && qFlags.issues.length > 0)) && (
+                                            <div
+                                              className="flex items-center gap-1 shrink-0"
+                                              title={issueLabels?.join(" · ")}
+                                            >
+                                              {qFlags?.overlap && (
+                                                <span
+                                                  aria-label="Overlap issue"
+                                                  className="w-2 h-2 rounded-full bg-rose-500"
+                                                />
+                                              )}
+                                              {qFlags?.too_fast && (
+                                                <span
+                                                  aria-label="Too fast issue"
+                                                  className="w-2 h-2 rounded-full bg-amber-500"
+                                                />
+                                              )}
+                                              {qFlags?.silent_mismatch && (
+                                                <span
+                                                  aria-label="Silent mismatch issue"
+                                                  className="w-2 h-2 rounded-full bg-orange-500"
+                                                />
+                                              )}
+                                              {qFlags?.missing_gloss && (
+                                                <span
+                                                  aria-label="Missing gloss issue"
+                                                  className="w-2 h-2 rounded-full bg-sky-500"
+                                                />
+                                              )}
+                                              {isLooping && (
+                                                <Repeat className="w-3 h-3 text-emerald-600 dark:text-emerald-400" />
+                                              )}
+                                              {(isRegenerating || isInFlightRetranslate) && (
+                                                <Loader2 className="w-3 h-3 animate-spin text-teal-700 dark:text-teal-400" />
+                                              )}
+                                            </div>
+                                          )}
                                         </div>
-                                      ))}
+                                      </div>
+                                    );
+                                  }
+
+                                  return (
+                                    <div
+                                      key={sub.id}
+                                      ref={(node) => {
+                                        subCardRefs.current[sub.id] = node;
+                                        subtitleViewportRef.current?.registerItemElement(
+                                          sub.id,
+                                          node
+                                        );
+                                      }}
+                                      onFocusCapture={handleExpandedCardFocusCapture}
+                                      onChangeCapture={handleExpandedCardInputActivity}
+                                      onBlurCapture={handleExpandedCardBlurCapture}
+                                      className={`px-3.5 py-2.5 border-l-2 transition-colors ${
+                                        isLooping
+                                          ? "border-l-emerald-500 bg-emerald-50/55 dark:bg-emerald-950/25"
+                                          : isCurrent
+                                            ? "border-l-teal-700 dark:border-l-teal-400 bg-teal-50/55 dark:bg-teal-950/30"
+                                            : "border-l-amber-500 dark:border-l-amber-400 bg-[#f3f5fc]/55 dark:bg-[#141933]/55"
+                                      }`}
+                                    >
+                                      <div className="flex flex-wrap items-center justify-between gap-1.5 mb-1.5">
+                                        <div className="flex items-center gap-2 min-w-0">
+                                          <div
+                                            ref={isEditingTime ? timePopoverRef : undefined}
+                                            className="relative shrink-0"
+                                          >
+                                            <button
+                                              type="button"
+                                              disabled={isRowLocked}
+                                              onClick={() => {
+                                                if (isEditingTime) {
+                                                  setEditingTimeId(null);
+                                                } else {
+                                                  setAiPopoverId(null);
+                                                  setMoreMenuId(null);
+                                                  setEditingTimeId(sub.id);
+                                                  setEditStartVal(sub.startTime.toFixed(1));
+                                                  setEditEndVal(sub.endTime.toFixed(1));
+                                                }
+                                              }}
+                                              title="Click to edit start/end timing"
+                                              aria-label="Edit subtitle timing"
+                                              aria-expanded={isEditingTime}
+                                              className={`h-6 px-2 rounded-sm border text-[11px] font-mono-tabular inline-flex items-center gap-1 cursor-pointer transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                                                isEditingTime
+                                                  ? "border-teal-600/80 bg-teal-50/90 text-teal-800 dark:border-teal-400/80 dark:bg-teal-950/60 dark:text-teal-200 font-semibold"
+                                                  : isCurrent
+                                                    ? "border-teal-600/40 bg-teal-50/70 dark:border-teal-400/40 dark:bg-teal-950/40 text-teal-700 dark:text-teal-300 font-semibold"
+                                                    : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
+                                              }`}
+                                            >
+                                              <Clock className="w-3 h-3 shrink-0" />
+                                              <span>
+                                                {formatRangeSec(sub.startTime / effectiveSpd)} –{" "}
+                                                {formatRangeSec(sub.endTime / effectiveSpd)}
+                                              </span>
+                                            </button>
+
+                                            {isEditingTime && (
+                                              <div className="absolute left-0 top-full mt-1 w-64 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] shadow-lg p-2.5 z-30 space-y-2 text-xs">
+                                                <div className="flex items-center justify-between gap-2">
+                                                  <label className="flex items-center gap-1.5 text-[#4d597d] dark:text-[#919ec4]">
+                                                    <span>Start</span>
+                                                    <input
+                                                      type="number"
+                                                      step="0.1"
+                                                      min={0}
+                                                      max={project.targetDurationSec}
+                                                      value={editStartVal}
+                                                      onChange={(e) => setEditStartVal(e.target.value)}
+                                                      className="w-16 h-6 px-1.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] text-[#0c1026] dark:text-[#f3f5fc] font-mono-tabular text-xs"
+                                                    />
+                                                  </label>
+                                                  <label className="flex items-center gap-1.5 text-[#4d597d] dark:text-[#919ec4]">
+                                                    <span>End</span>
+                                                    <input
+                                                      type="number"
+                                                      step="0.1"
+                                                      min={0.2}
+                                                      max={project.targetDurationSec}
+                                                      value={editEndVal}
+                                                      onChange={(e) => setEditEndVal(e.target.value)}
+                                                      className="w-16 h-6 px-1.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] text-[#0c1026] dark:text-[#f3f5fc] font-mono-tabular text-xs"
+                                                    />
+                                                  </label>
+                                                </div>
+
+                                                <div className="flex items-center justify-between gap-1.5 pt-0.5">
+                                                  <div className="flex items-center gap-1">
+                                                    {[-0.1, 0.1].map((delta) => (
+                                                      <button
+                                                        key={delta}
+                                                        type="button"
+                                                        onClick={() => {
+                                                          const maxDur = Math.max(
+                                                            0.5,
+                                                            project.targetDurationSec || 10
+                                                          );
+                                                          const curS = Number.isFinite(
+                                                            parseFloat(editStartVal)
+                                                          )
+                                                            ? parseFloat(editStartVal)
+                                                            : sub.startTime;
+                                                          const curE = Number.isFinite(
+                                                            parseFloat(editEndVal)
+                                                          )
+                                                            ? parseFloat(editEndVal)
+                                                            : sub.endTime;
+                                                          const dur = Math.max(0.2, curE - curS);
+                                                          const nextS = Math.max(
+                                                            0,
+                                                            Math.min(maxDur - dur, curS + delta)
+                                                          );
+                                                          const nextE = Math.min(maxDur, nextS + dur);
+                                                          setEditStartVal(nextS.toFixed(1));
+                                                          setEditEndVal(nextE.toFixed(1));
+                                                          onUpdateSubtitleTiming(sub.id, nextS, nextE);
+                                                        }}
+                                                        className="h-6 px-1.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] font-mono-tabular text-[11px] text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] cursor-pointer transition-colors"
+                                                      >
+                                                        {delta > 0 ? `+${delta}s` : `${delta}s`}
+                                                      </button>
+                                                    ))}
+                                                    <button
+                                                      type="button"
+                                                      onClick={() => onSeek(sub.startTime)}
+                                                      className="h-6 px-1.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] text-[11px] font-medium text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] cursor-pointer transition-colors"
+                                                    >
+                                                      Seek
+                                                    </button>
+                                                  </div>
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                      const s = parseFloat(editStartVal);
+                                                      const en = parseFloat(editEndVal);
+                                                      if (Number.isFinite(s) && Number.isFinite(en)) {
+                                                        onUpdateSubtitleTiming(sub.id, s, en);
+                                                      }
+                                                      setEditingTimeId(null);
+                                                    }}
+                                                    className="h-6 px-2 rounded-sm bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] text-[11px] font-semibold flex items-center gap-1 cursor-pointer transition-colors"
+                                                  >
+                                                    <Check className="w-3 h-3" />
+                                                    <span>Apply</span>
+                                                  </button>
+                                                </div>
+                                              </div>
+                                            )}
+                                          </div>
+
+                                          {sub.isManuallyEdited && (
+                                            <span className="inline-flex items-center gap-1 text-[10px] font-medium text-amber-700 dark:text-amber-300 shrink-0">
+                                              <span
+                                                aria-hidden="true"
+                                                className="w-1.5 h-1.5 rounded-full bg-amber-500 dark:bg-amber-400"
+                                              />
+                                              <span>Edited</span>
+                                            </span>
+                                          )}
+                                          {isInFlightRetranslate && (
+                                            <span className="text-[10px] font-medium text-teal-700 dark:text-teal-400 inline-flex items-center gap-1 shrink-0">
+                                              <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                                              <span>Updating</span>
+                                            </span>
+                                          )}
+                                          <span className="text-[11px] text-[#4d597d]/75 dark:text-[#919ec4]/75 truncate">
+                                            {sub.originalSpokenText}
+                                          </span>
+                                        </div>
+
+                                        <div className="flex flex-wrap items-center gap-1 shrink-0">
+                                          <button
+                                            type="button"
+                                            onClick={() => onToggleLoopSubtitle(sub.id)}
+                                            title={
+                                              isLooping
+                                                ? "Stop looping this line"
+                                                : "Loop play this subtitle"
+                                            }
+                                            aria-label={
+                                              isLooping
+                                                ? "Stop looping this line"
+                                                : "Loop play this subtitle"
+                                            }
+                                            className={`h-6 px-1.5 rounded-sm flex items-center gap-1 text-[11px] font-medium border transition-colors cursor-pointer whitespace-nowrap ${
+                                              isLooping
+                                                ? "border-emerald-500 bg-emerald-100/90 dark:bg-emerald-950/70 text-emerald-800 dark:text-emerald-200"
+                                                : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
+                                            }`}
+                                          >
+                                            {isLooping && isPlaying ? (
+                                              <Square className="w-2.5 h-2.5 fill-current" />
+                                            ) : (
+                                              <Repeat className="w-3 h-3" />
+                                            )}
+                                            <span>{isLooping ? "Stop" : "Loop"}</span>
+                                          </button>
+
+                                          {sub.words.length > 0 && (
+                                            <button
+                                              type="button"
+                                              onClick={() =>
+                                                setCollapsedWordBarSubIds((prev) => ({
+                                                  ...prev,
+                                                  [sub.id]: !prev[sub.id],
+                                                }))
+                                              }
+                                              title="Toggle interactive word-chip gloss editor"
+                                              aria-label="Toggle interactive word-chip gloss editor"
+                                              aria-expanded={!isWordBarCollapsed}
+                                              className={`h-6 px-1.5 rounded-sm flex items-center gap-1 text-[11px] font-medium border transition-colors cursor-pointer whitespace-nowrap ${
+                                                !isWordBarCollapsed
+                                                  ? "border-teal-600/70 dark:border-teal-400/70 bg-teal-50/80 dark:bg-teal-950/50 text-teal-800 dark:text-teal-200"
+                                                  : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
+                                              }`}
+                                            >
+                                              <BookOpen className="w-3 h-3" />
+                                              <span>Words</span>
+                                            </button>
+                                          )}
+
+                                          {/* Single Unified ✨ AI Popover Trigger */}
+                                          {isRegenerating ? (
+                                            <button
+                                              type="button"
+                                              onClick={() => onCancelRegenerateSubtitle?.(sub.id)}
+                                              title="Cancel AI regeneration for this subtitle"
+                                              aria-label="Cancel AI regeneration for this subtitle"
+                                              className="h-6 px-1.5 rounded-sm flex items-center gap-1 text-[11px] font-semibold border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/60 hover:bg-red-100 dark:hover:bg-red-900/70 text-red-700 dark:text-red-300 transition-colors cursor-pointer whitespace-nowrap"
+                                            >
+                                              <Loader2 className="w-3 h-3 animate-spin" />
+                                              <span>Stop</span>
+                                            </button>
+                                          ) : (
+                                            <div
+                                              ref={isAiPopoverOpen ? aiPopoverRef : undefined}
+                                              className="relative"
+                                            >
+                                              <button
+                                                type="button"
+                                                disabled={isRetranslatingAll || isResyncingTimings}
+                                                onClick={() => {
+                                                  setMoreMenuId(null);
+                                                  setEditingTimeId(null);
+                                                  setAiPopoverId((cur) =>
+                                                    cur === sub.id ? null : sub.id
+                                                  );
+                                                }}
+                                                title="AI rewrite or hint"
+                                                aria-label="AI rewrite or hint"
+                                                aria-expanded={isAiPopoverOpen}
+                                                className={`h-6 px-1.5 rounded-sm flex items-center gap-1 text-[11px] font-medium border transition-colors cursor-pointer whitespace-nowrap disabled:opacity-45 disabled:cursor-not-allowed ${
+                                                  isAiPopoverOpen || hintValue.trim()
+                                                    ? "border-teal-600/70 dark:border-teal-400/70 bg-teal-50/80 dark:bg-teal-950/50 text-teal-800 dark:text-teal-200"
+                                                    : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#4d597d] dark:text-[#919ec4] hover:border-teal-600/60 dark:hover:border-teal-400/60 hover:text-teal-700 dark:hover:text-teal-400"
+                                                }`}
+                                              >
+                                                <Sparkles className="w-3 h-3" />
+                                                <span>AI</span>
+                                              </button>
+
+                                              {isAiPopoverOpen && (
+                                                <div className="absolute right-0 mt-1 w-72 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] shadow-lg p-2.5 z-30 space-y-2">
+                                                  <div className="flex items-center justify-between gap-2">
+                                                    <span className="text-[11px] font-semibold text-[#0c1026] dark:text-[#f3f5fc]">
+                                                      AI Rewrite
+                                                    </span>
+                                                    <button
+                                                      type="button"
+                                                      disabled={
+                                                        isRetranslatingAll || isResyncingTimings
+                                                      }
+                                                      onClick={() => {
+                                                        setAiPopoverId(null);
+                                                        onRegenerateSubtitle(sub.id);
+                                                      }}
+                                                      className="h-6 px-2 rounded-sm bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                                                    >
+                                                      <Sparkles className="w-3 h-3" />
+                                                      <span>Instant Regenerate</span>
+                                                    </button>
+                                                  </div>
+
+                                                  <div className="border-t border-[#d2dcf0] dark:border-[#21284c] pt-2 space-y-1.5">
+                                                    <div className="flex flex-wrap gap-1">
+                                                      {QUICK_AI_HINTS.map((preset) => (
+                                                        <button
+                                                          key={preset.label}
+                                                          type="button"
+                                                          onClick={() =>
+                                                            setHintDrafts((prev) => ({
+                                                              ...prev,
+                                                              [sub.id]: preset.text,
+                                                            }))
+                                                          }
+                                                          className="px-2 py-0.5 rounded-sm border border-teal-200/80 dark:border-teal-500/30 bg-[#f3f5fc] dark:bg-[#141933] text-[10px] font-medium text-teal-800 dark:text-teal-200 hover:bg-teal-50 dark:hover:bg-teal-900/50 cursor-pointer whitespace-nowrap"
+                                                        >
+                                                          {preset.label}
+                                                        </button>
+                                                      ))}
+                                                    </div>
+
+                                                    <form
+                                                      onSubmit={(e) => {
+                                                        e.preventDefault();
+                                                        setAiPopoverId(null);
+                                                        onRegenerateSubtitle(sub.id, hintValue);
+                                                      }}
+                                                      className="space-y-1.5"
+                                                    >
+                                                      <input
+                                                        type="text"
+                                                        value={hintValue}
+                                                        onChange={(e) =>
+                                                          setHintDrafts((prev) => ({
+                                                            ...prev,
+                                                            [sub.id]: e.target.value,
+                                                          }))
+                                                        }
+                                                        placeholder="Custom AI hint..."
+                                                        aria-label="AI regeneration hint"
+                                                        className="w-full h-7 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] text-xs text-[#0c1026] dark:text-[#f3f5fc] placeholder:text-[#4d597d] dark:placeholder:text-[#919ec4] focus:outline-none focus:border-teal-700 dark:focus:border-teal-400"
+                                                      />
+                                                      <button
+                                                        type="submit"
+                                                        disabled={
+                                                          isRetranslatingAll || isResyncingTimings
+                                                        }
+                                                        className="w-full h-7 px-2.5 rounded-sm border border-teal-600/60 dark:border-teal-400/60 bg-teal-50/80 dark:bg-teal-950/50 hover:bg-teal-100 dark:hover:bg-teal-900/60 text-teal-800 dark:text-teal-200 text-[11px] font-semibold flex items-center justify-center gap-1 cursor-pointer disabled:opacity-50"
+                                                      >
+                                                        <Sparkles className="w-3 h-3" />
+                                                        <span>Run with Hint</span>
+                                                      </button>
+                                                    </form>
+                                                  </div>
+                                                </div>
+                                              )}
+                                            </div>
+                                          )}
+
+                                          {/* Compact ⋯ Overflow Menu (Split, Merge with Next, Delete) */}
+                                          <div
+                                            ref={isMoreMenuOpen ? moreMenuRef : undefined}
+                                            className="relative"
+                                          >
+                                            <button
+                                              type="button"
+                                              disabled={isRowLocked}
+                                              onClick={() => {
+                                                setAiPopoverId(null);
+                                                setEditingTimeId(null);
+                                                setMoreMenuId((cur) =>
+                                                  cur === sub.id ? null : sub.id
+                                                );
+                                              }}
+                                              title="More subtitle actions"
+                                              aria-label="More subtitle actions"
+                                              aria-expanded={isMoreMenuOpen}
+                                              className={`w-6 h-6 rounded-sm flex items-center justify-center border transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
+                                                isMoreMenuOpen
+                                                  ? "border-teal-600/70 bg-teal-50 text-teal-800 dark:border-teal-400/70 dark:bg-teal-950/50 dark:text-teal-200"
+                                                  : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
+                                              }`}
+                                            >
+                                              <MoreHorizontal className="w-3.5 h-3.5" />
+                                            </button>
+
+                                            {isMoreMenuOpen && (
+                                              <div className="absolute right-0 mt-1 w-40 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] shadow-lg p-1 z-30 space-y-0.5">
+                                                <button
+                                                  type="button"
+                                                  disabled={!canSplitSub || isRowLocked}
+                                                  onClick={() => {
+                                                    setMoreMenuId(null);
+                                                    onSplitSubtitle(sub.id);
+                                                  }}
+                                                  className="w-full px-2.5 py-1.5 rounded-sm text-left text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2 cursor-pointer"
+                                                >
+                                                  <Scissors className="w-3.5 h-3.5 text-[#4d597d] dark:text-[#919ec4]" />
+                                                  <span>Split</span>
+                                                </button>
+                                                {canMergeNext && (
+                                                  <button
+                                                    type="button"
+                                                    disabled={isRowLocked}
+                                                    onClick={() => {
+                                                      setMoreMenuId(null);
+                                                      onMergeSubtitleWithNext(sub.id);
+                                                    }}
+                                                    className="w-full px-2.5 py-1.5 rounded-sm text-left text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2 cursor-pointer"
+                                                  >
+                                                    <Merge className="w-3.5 h-3.5 text-[#4d597d] dark:text-[#919ec4]" />
+                                                    <span>Merge with Next</span>
+                                                  </button>
+                                                )}
+                                                <div className="my-1 border-t border-[#d2dcf0] dark:border-[#21284c]" />
+                                                <button
+                                                  type="button"
+                                                  disabled={isRowLocked}
+                                                  onClick={() => {
+                                                    setMoreMenuId(null);
+                                                    if (editingTimeId === sub.id) setEditingTimeId(null);
+                                                    if (aiPopoverId === sub.id) setAiPopoverId(null);
+                                                    if (activeWordChip?.subId === sub.id) {
+                                                      setActiveWordChip(null);
+                                                      setChipSplitMode(false);
+                                                    }
+                                                    onDeleteSubtitle(sub.id);
+                                                  }}
+                                                  className="w-full px-2.5 py-1.5 rounded-sm text-left text-xs font-medium text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2 cursor-pointer"
+                                                >
+                                                  <Trash2 className="w-3.5 h-3.5" />
+                                                  <span>Delete</span>
+                                                </button>
+                                              </div>
+                                            )}
+                                          </div>
+                                        </div>
+                                      </div>
+
+                                      {qFlags && qFlags.issues.length > 0 && (
+                                        <div className="flex flex-wrap items-center gap-1.5 mt-1 mb-1">
+                                          {qFlags.overlap && (
+                                            <span className="px-1.5 py-0.5 rounded-sm border border-rose-300/80 dark:border-rose-700/70 bg-rose-50 dark:bg-rose-950/45 text-[10px] font-medium text-rose-800 dark:text-rose-200">
+                                              Overlap
+                                            </span>
+                                          )}
+                                          {qFlags.too_fast && (
+                                            <span className="px-1.5 py-0.5 rounded-sm border border-amber-300/80 dark:border-amber-700/70 bg-amber-50 dark:bg-amber-950/45 text-[10px] font-medium text-amber-900 dark:text-amber-200">
+                                              Too Fast (
+                                              {qFlags.durationSec < 0.5
+                                                ? `${qFlags.durationSec.toFixed(2)}s`
+                                                : `${Math.round(
+                                                    Math.max(qFlags.burmeseCps, qFlags.phoneticCps)
+                                                  )}/s`}
+                                              )
+                                            </span>
+                                          )}
+                                          {qFlags.silent_mismatch && (
+                                            <span className="px-1.5 py-0.5 rounded-sm border border-orange-300/80 dark:border-orange-700/70 bg-orange-50 dark:bg-orange-950/45 text-[10px] font-medium text-orange-800 dark:text-orange-200">
+                                              No Speech Match
+                                            </span>
+                                          )}
+                                          {qFlags.missing_gloss && (
+                                            <span className="px-1.5 py-0.5 rounded-sm border border-sky-300/80 dark:border-sky-700/70 bg-sky-50 dark:bg-sky-950/45 text-[10px] font-medium text-sky-800 dark:text-sky-200">
+                                              Missing Gloss ({qFlags.missingGlossCount})
+                                            </span>
+                                          )}
+                                        </div>
+                                      )}
+
+                                      {editSettings.showThaiScript && (
+                                        <input
+                                          type="text"
+                                          disabled={isRowLocked}
+                                          value={sub.thaiScript}
+                                          onChange={(e) =>
+                                            onUpdateSubtitle(sub.id, "thaiScript", e.target.value)
+                                          }
+                                          placeholder="ภาษาไทย..."
+                                          aria-label="Thai script"
+                                          className="w-full text-[12px] font-medium text-teal-700 dark:text-teal-400 bg-transparent border-b border-transparent focus:border-teal-600 dark:focus:border-teal-400 focus:outline-none py-0.5 disabled:opacity-50"
+                                        />
+                                      )}
+
+                                      <input
+                                        ref={selectedPhoneticInputRef}
+                                        type="text"
+                                        disabled={isRowLocked}
+                                        value={sub.thaiPhonetic}
+                                        onChange={(e) =>
+                                          onUpdateSubtitle(sub.id, "thaiPhonetic", e.target.value)
+                                        }
+                                        placeholder="Thai phonetic..."
+                                        aria-label="Thai in English phonetics"
+                                        className="w-full text-[13px] font-semibold text-[#0c1026] dark:text-[#f3f5fc] bg-transparent border-b border-transparent focus:border-teal-700 dark:focus:border-teal-400 focus:outline-none py-0.5 disabled:opacity-50"
+                                      />
+
+                                      <input
+                                        type="text"
+                                        disabled={isRowLocked}
+                                        value={sub.burmese}
+                                        onChange={(e) =>
+                                          onUpdateSubtitle(sub.id, "burmese", e.target.value)
+                                        }
+                                        placeholder="မြန်မာဘာသာပြန်..."
+                                        aria-label="Burmese translation"
+                                        className="w-full font-myanmar text-[13px] text-[#4d597d] dark:text-[#919ec4] bg-transparent border-b border-transparent focus:border-teal-700 dark:focus:border-teal-400 focus:outline-none py-0.5 disabled:opacity-50"
+                                      />
+
+                                      {!isWordBarCollapsed && sub.words.length > 0 && (
+                                        <div className="mt-2 pt-2 border-t border-[#d2dcf0] dark:border-[#21284c] space-y-2">
+                                          <div className="flex flex-wrap items-center gap-1.5">
+                                            {sub.words.map((word, wi) => {
+                                              const isChipActive =
+                                                activeWordChip?.subId === sub.id &&
+                                                activeWordChip.wordIndex === wi;
+                                              const isMissingWordGloss =
+                                                editSettings.showWordGloss !== false &&
+                                                (!word.burmeseGloss || !word.burmeseGloss.trim());
+                                              return (
+                                                <button
+                                                  key={`${sub.id}-chip-${wi}`}
+                                                  type="button"
+                                                  disabled={isRowLocked}
+                                                  aria-expanded={isChipActive}
+                                                  onClick={() => {
+                                                    if (isChipActive) {
+                                                      setActiveWordChip(null);
+                                                      setChipSplitMode(false);
+                                                      return;
+                                                    }
+                                                    setActiveWordChip({ subId: sub.id, wordIndex: wi });
+                                                    setChipPhoneticDraft(word.phonetic);
+                                                    setChipThaiDraft(word.thai || "");
+                                                    setChipGlossDraft(word.burmeseGloss || "");
+                                                    setChipSplitMode(false);
+                                                    const [a, b] = suggestChipSplitParts(word.phonetic);
+                                                    setChipSplitA(a);
+                                                    setChipSplitB(b);
+                                                  }}
+                                                  className={`px-2 py-0.5 rounded-sm border text-[11px] inline-flex items-center gap-1.5 cursor-pointer transition-colors disabled:opacity-45 ${
+                                                    isChipActive
+                                                      ? "border-teal-600 bg-teal-50 text-teal-900 dark:border-teal-400 dark:bg-teal-950/60 dark:text-teal-100 font-semibold"
+                                                      : isMissingWordGloss
+                                                        ? "border-sky-400/75 bg-sky-50/70 text-[#0c1026] dark:border-sky-500/60 dark:bg-sky-950/35 dark:text-[#f3f5fc] hover:border-sky-500"
+                                                        : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#0c1026] dark:text-[#f3f5fc] hover:border-teal-600/60 dark:hover:border-teal-400/60"
+                                                  }`}
+                                                >
+                                                  <span className="font-semibold">
+                                                    {word.phonetic || "—"}
+                                                  </span>
+                                                  <span className="text-[#94a3b8] dark:text-[#4b588c]">
+                                                    |
+                                                  </span>
+                                                  <span
+                                                    className={`font-myanmar ${
+                                                      word.burmeseGloss?.trim()
+                                                        ? "text-teal-700 dark:text-teal-300"
+                                                        : "text-[#94a3b8] dark:text-[#7c89b0]"
+                                                    }`}
+                                                  >
+                                                    {word.burmeseGloss?.trim() || "—"}
+                                                  </span>
+                                                </button>
+                                              );
+                                            })}
+                                          </div>
+
+                                          {activeWordChip &&
+                                            activeWordChip.subId === sub.id &&
+                                            sub.words[activeWordChip.wordIndex] && (
+                                              <div
+                                                ref={wordChipPopoverRef}
+                                                className="rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] shadow-md p-2.5 space-y-2 text-xs"
+                                              >
+                                                <div className="flex items-center justify-between gap-2">
+                                                  <span className="text-[11px] font-semibold text-[#0c1026] dark:text-[#f3f5fc]">
+                                                    Word {activeWordChip.wordIndex + 1} ·{" "}
+                                                    <span className="font-mono-tabular text-[#4d597d] dark:text-[#919ec4]">
+                                                      {sub.words[
+                                                        activeWordChip.wordIndex
+                                                      ].startOffsetSec.toFixed(2)}
+                                                      s–
+                                                      {sub.words[
+                                                        activeWordChip.wordIndex
+                                                      ].endOffsetSec.toFixed(2)}
+                                                      s
+                                                    </span>
+                                                  </span>
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                      setActiveWordChip(null);
+                                                      setChipSplitMode(false);
+                                                    }}
+                                                    aria-label="Close word editor"
+                                                    className="p-0.5 rounded hover:bg-[#e7ecf8] dark:hover:bg-[#141933] text-[#4d597d] dark:text-[#919ec4] cursor-pointer"
+                                                  >
+                                                    <X className="w-3.5 h-3.5" />
+                                                  </button>
+                                                </div>
+
+                                                <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5">
+                                                  <label className="space-y-0.5">
+                                                    <span className="block text-[10px] font-medium text-[#4d597d] dark:text-[#919ec4]">
+                                                      Phonetic
+                                                    </span>
+                                                    <input
+                                                      type="text"
+                                                      disabled={isRowLocked}
+                                                      value={chipPhoneticDraft}
+                                                      onChange={(e) => {
+                                                        const val = e.target.value;
+                                                        setChipPhoneticDraft(val);
+                                                        onUpdateWordChip?.(
+                                                          sub.id,
+                                                          activeWordChip.wordIndex,
+                                                          { phonetic: val }
+                                                        );
+                                                      }}
+                                                      className="w-full h-7 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] focus:outline-none focus:border-teal-700 dark:focus:border-teal-400"
+                                                    />
+                                                  </label>
+
+                                                  <label className="space-y-0.5">
+                                                    <span className="block text-[10px] font-medium text-[#4d597d] dark:text-[#919ec4]">
+                                                      Thai
+                                                    </span>
+                                                    <input
+                                                      type="text"
+                                                      disabled={isRowLocked}
+                                                      value={chipThaiDraft}
+                                                      onChange={(e) => {
+                                                        const val = e.target.value;
+                                                        setChipThaiDraft(val);
+                                                        onUpdateWordChip?.(
+                                                          sub.id,
+                                                          activeWordChip.wordIndex,
+                                                          { thai: val }
+                                                        );
+                                                      }}
+                                                      className="w-full h-7 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] text-xs text-[#0c1026] dark:text-[#f3f5fc] focus:outline-none focus:border-teal-700 dark:focus:border-teal-400"
+                                                    />
+                                                  </label>
+
+                                                  <label className="space-y-0.5">
+                                                    <span className="block text-[10px] font-medium text-[#4d597d] dark:text-[#919ec4]">
+                                                      Burmese Gloss
+                                                    </span>
+                                                    <input
+                                                      type="text"
+                                                      disabled={isRowLocked}
+                                                      value={chipGlossDraft}
+                                                      placeholder="အနက်..."
+                                                      onChange={(e) => {
+                                                        const val = e.target.value;
+                                                        setChipGlossDraft(val);
+                                                        if (onUpdateWordChip) {
+                                                          onUpdateWordChip(
+                                                            sub.id,
+                                                            activeWordChip.wordIndex,
+                                                            { burmeseGloss: val }
+                                                          );
+                                                        } else {
+                                                          onUpdateWordGloss(
+                                                            sub.id,
+                                                            activeWordChip.wordIndex,
+                                                            val
+                                                          );
+                                                        }
+                                                      }}
+                                                      className="w-full h-7 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] font-myanmar text-xs text-teal-700 dark:text-teal-300 placeholder:text-[#4d597d] dark:placeholder:text-[#919ec4] focus:outline-none focus:border-teal-700 dark:focus:border-teal-400"
+                                                    />
+                                                  </label>
+                                                </div>
+
+                                                <div className="flex flex-wrap items-center justify-between gap-1.5 pt-1 border-t border-[#d2dcf0] dark:border-[#21284c]">
+                                                  <div className="flex flex-wrap items-center gap-1.5">
+                                                    {onMergeWordChips &&
+                                                      activeWordChip.wordIndex + 1 <
+                                                        sub.words.length && (
+                                                        <button
+                                                          type="button"
+                                                          disabled={isRowLocked}
+                                                          onClick={() => {
+                                                            const idx = activeWordChip.wordIndex;
+                                                            const w1 = sub.words[idx];
+                                                            const w2 = sub.words[idx + 1];
+                                                            onMergeWordChips(sub.id, idx);
+                                                            if (w1 && w2) {
+                                                              const p1 = w1.phonetic.trim();
+                                                              const p2 = w2.phonetic.trim();
+                                                              setChipPhoneticDraft(
+                                                                p1.endsWith("-") && p2
+                                                                  ? `${p1}${p2}`
+                                                                  : [p1, p2]
+                                                                      .filter(Boolean)
+                                                                      .join(" ")
+                                                              );
+                                                              setChipThaiDraft(
+                                                                [w1.thai, w2.thai]
+                                                                  .map((s) => (s || "").trim())
+                                                                  .filter(Boolean)
+                                                                  .join("")
+                                                              );
+                                                              setChipGlossDraft(
+                                                                [w1.burmeseGloss, w2.burmeseGloss]
+                                                                  .map((s) => (s || "").trim())
+                                                                  .filter(Boolean)
+                                                                  .join(" ")
+                                                              );
+                                                            }
+                                                            setChipSplitMode(false);
+                                                          }}
+                                                          className="h-6 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] inline-flex items-center gap-1 cursor-pointer"
+                                                        >
+                                                          <Merge className="w-3 h-3" />
+                                                          <span>Merge with Next</span>
+                                                        </button>
+                                                      )}
+                                                    {onSplitWordChip && (
+                                                      <button
+                                                        type="button"
+                                                        disabled={isRowLocked}
+                                                        onClick={() => {
+                                                          setChipSplitMode((v) => !v);
+                                                          const [a, b] =
+                                                            suggestChipSplitParts(chipPhoneticDraft);
+                                                          setChipSplitA(a);
+                                                          setChipSplitB(b);
+                                                        }}
+                                                        className={`h-6 px-2 rounded-sm border text-[11px] font-medium inline-flex items-center gap-1 cursor-pointer ${
+                                                          chipSplitMode
+                                                            ? "border-teal-600/80 bg-teal-50 text-teal-800 dark:border-teal-400/80 dark:bg-teal-950/60 dark:text-teal-200"
+                                                            : "border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[#0c1026] dark:text-[#f3f5fc]"
+                                                        }`}
+                                                      >
+                                                        <Scissors className="w-3 h-3" />
+                                                        <span>Split Chip</span>
+                                                      </button>
+                                                    )}
+                                                  </div>
+
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                      setActiveWordChip(null);
+                                                      setChipSplitMode(false);
+                                                    }}
+                                                    className="h-6 px-2 rounded-sm bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:text-[#060918] text-[11px] font-semibold cursor-pointer"
+                                                  >
+                                                    Done
+                                                  </button>
+                                                </div>
+
+                                                {chipSplitMode && onSplitWordChip && (
+                                                  <div className="pt-1.5 border-t border-[#d2dcf0] dark:border-[#21284c] flex flex-wrap items-end gap-1.5">
+                                                    <label className="flex-1 min-w-[90px] space-y-0.5">
+                                                      <span className="block text-[10px] font-medium text-[#4d597d] dark:text-[#919ec4]">
+                                                        Part A
+                                                      </span>
+                                                      <input
+                                                        type="text"
+                                                        value={chipSplitA}
+                                                        onChange={(e) => setChipSplitA(e.target.value)}
+                                                        className="w-full h-6 px-1.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] text-[11px] text-[#0c1026] dark:text-[#f3f5fc]"
+                                                      />
+                                                    </label>
+                                                    <label className="flex-1 min-w-[90px] space-y-0.5">
+                                                      <span className="block text-[10px] font-medium text-[#4d597d] dark:text-[#919ec4]">
+                                                        Part B
+                                                      </span>
+                                                      <input
+                                                        type="text"
+                                                        value={chipSplitB}
+                                                        onChange={(e) => setChipSplitB(e.target.value)}
+                                                        className="w-full h-6 px-1.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] text-[11px] text-[#0c1026] dark:text-[#f3f5fc]"
+                                                      />
+                                                    </label>
+                                                    <button
+                                                      type="button"
+                                                      disabled={!chipSplitA.trim() || !chipSplitB.trim()}
+                                                      onClick={() => {
+                                                        onSplitWordChip(
+                                                          sub.id,
+                                                          activeWordChip.wordIndex,
+                                                          chipSplitA,
+                                                          chipSplitB,
+                                                          chipGlossDraft,
+                                                          ""
+                                                        );
+                                                        setChipSplitMode(false);
+                                                        setActiveWordChip(null);
+                                                      }}
+                                                      className="h-6 px-2.5 rounded-sm bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:text-[#060918] text-[11px] font-semibold disabled:opacity-45 cursor-pointer"
+                                                    >
+                                                      Split
+                                                    </button>
+                                                  </div>
+                                                )}
+                                              </div>
+                                            )}
+                                        </div>
+                                      )}
                                     </div>
-                                  </div>
-                                )}
-                              </div>
+                                  );
+                                })}
+                              </>
                             );
-                          })}
-                        </>
-                      );
-                    })()}
-                  </div>
-                )}
-              </div>
-            )}
+                          })()}
+                        </div>
+                      )}
+                      </SubtitleListViewport>
+                    </div>
+                  )}
+
+                  {/* TAB 2: STYLE */}
+                  {captionTab === "style" && (
+                    <SubtitleStylePanel
+                      editSettings={editSettings}
+                      onChangeEditSettings={onChangeEditSettings}
+                    />
+                  )}
+
+                  {/* TAB 3: SYNC */}
+                  {captionTab === "sync" && (
+                    <div className="px-3.5 py-3 space-y-4">
+                      {/* Fix Overlaps & Gaps */}
+                      <div className="space-y-2">
+                        <span className="block text-[11px] font-semibold uppercase tracking-wider text-[#4d597d] dark:text-[#919ec4]">
+                          Cleanup &amp; Timing Hygiene
+                        </span>
+                        <p className="text-xs text-[#4d597d] dark:text-[#919ec4] leading-relaxed">
+                          Automatically clamp out-of-range lines, resolve overlaps, and smooth brief flicker gaps.
+                        </p>
+                        {onAutoFixSubtitleTimings && (
+                          <button
+                            type="button"
+                            disabled={project.subtitles.length === 0 || isResyncingTimings}
+                            onClick={onAutoFixSubtitleTimings}
+                            className="h-8 px-3 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] hover:border-teal-600/70 hover:text-teal-700 dark:hover:border-teal-400/70 dark:hover:text-teal-400 text-xs font-semibold text-[#0c1026] dark:text-[#f3f5fc] inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed transition-colors"
+                          >
+                            <Wand2 className="w-3.5 h-3.5" />
+                            <span>Fix Overlaps &amp; Gaps</span>
+                          </button>
+                        )}
+                      </div>
+
+                      {/* Coarse Offset Shift */}
+                      <div className="pt-3 border-t border-[#d2dcf0] dark:border-[#21284c] space-y-2">
+                        <span className="block text-[11px] font-semibold uppercase tracking-wider text-[#4d597d] dark:text-[#919ec4]">
+                          Coarse Global Shift
+                        </span>
+                        <p className="text-xs text-[#4d597d] dark:text-[#919ec4]">
+                          Shift all subtitle timestamps by half a second. Fine ±0.1s nudge controls are available on the Timeline toolbar.
+                        </p>
+                        <div className="flex items-center gap-2">
+                          {[-0.5, 0.5].map((delta) => (
+                            <button
+                              key={delta}
+                              type="button"
+                              disabled={project.subtitles.length === 0 || isResyncingTimings}
+                              onClick={() => onShiftAllSubtitles(delta)}
+                              className="h-8 px-3 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-xs font-mono-tabular font-semibold text-[#0c1026] dark:text-[#f3f5fc] disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer transition-colors"
+                            >
+                              {delta > 0 ? `+${delta}s` : `${delta}s`}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* AI Resync All with inline warning */}
+                      {onAiResyncSubtitles && (
+                        <div className="pt-3 border-t border-[#d2dcf0] dark:border-[#21284c] space-y-2.5">
+                          <span className="block text-[11px] font-semibold uppercase tracking-wider text-[#4d597d] dark:text-[#919ec4]">
+                            AI Audio Alignment
+                          </span>
+                          {isResyncingTimings ? (
+                            <div className="flex items-center gap-2">
+                              <span className="h-8 px-3 rounded-sm border border-teal-300 dark:border-teal-500/40 bg-teal-50 dark:bg-teal-950/50 text-teal-800 dark:text-teal-200 text-xs font-medium inline-flex items-center gap-1.5">
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                <span>Resyncing timings...</span>
+                              </span>
+                              {onCancelAiResync && (
+                                <button
+                                  type="button"
+                                  onClick={onCancelAiResync}
+                                  aria-label="Cancel AI timing sync"
+                                  className="h-8 px-2.5 rounded-sm border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/60 hover:bg-red-100 dark:hover:bg-red-900/70 text-xs font-semibold text-red-700 dark:text-red-300 inline-flex items-center gap-1 cursor-pointer transition-colors"
+                                >
+                                  <Square className="w-3 h-3 fill-current" />
+                                  <span>Stop</span>
+                                </button>
+                              )}
+                            </div>
+                          ) : showResyncConfirm ? (
+                            <div className="p-3 rounded-sm border border-amber-300/80 dark:border-amber-500/40 bg-amber-50/80 dark:bg-amber-950/35 space-y-2.5">
+                              <div className="flex items-start gap-2 text-xs text-amber-900 dark:text-amber-100">
+                                <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                                <p className="leading-relaxed">
+                                  AI Resync All will re-align subtitle timestamps across the entire audio track. Manual timing adjustments may change.
+                                </p>
+                              </div>
+                              <div className="flex items-center justify-end gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => setShowResyncConfirm(false)}
+                                  className="h-7 px-2.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-xs font-medium text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] cursor-pointer"
+                                >
+                                  Cancel
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={isRetranslatingAll}
+                                  onClick={() => {
+                                    setShowResyncConfirm(false);
+                                    onAiResyncSubtitles();
+                                  }}
+                                  className="h-7 px-3 rounded-sm bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                                >
+                                  <RefreshCw className="w-3 h-3" />
+                                  <span>Confirm AI Resync</span>
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled={project.subtitles.length === 0 || isRetranslatingAll}
+                              onClick={() => setShowResyncConfirm(true)}
+                              className="h-8 px-3 rounded-sm border border-teal-600/50 dark:border-teal-400/50 bg-teal-50/80 dark:bg-teal-950/50 hover:bg-teal-100 dark:hover:bg-teal-900/60 text-xs font-semibold text-teal-800 dark:text-teal-200 inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed transition-colors"
+                            >
+                              <RefreshCw className="w-3.5 h-3.5" />
+                              <span>AI Resync All</span>
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             {studioSection === "timeline" && showMobileTimelineTab && (
               <div className="p-3">
@@ -2663,9 +4045,13 @@ export function WorkspaceSidebar({
                   onPlayFromTime={onPlayFromTime}
                   onUpdateScenes={onUpdateProjectScenes}
                   onUpdateSubtitleTiming={onUpdateSubtitleTiming}
+                  onShiftAllSubtitles={onShiftAllSubtitles}
                   onRestoreSnapshot={onRestoreProjectSnapshot}
                   onResetTimeline={onResetTimeline}
                   onGoToScenes={() => onChangeStudioSection("clips")}
+                  cutSpeechRegions={cutSpeechRegions}
+                  onTranscribeRange={onTranscribeRange}
+                  transcribingRange={transcribingRange}
                 />
               </div>
             )}
@@ -2714,6 +4100,25 @@ export function WorkspaceSidebar({
             )}
           </div>
         </div>
+        {project && onApplyPasteTranscriptSync && (
+          <PasteTranscriptModal
+            isOpen={showPasteSyncModal}
+            projectTitle={project.title}
+            subtitles={project.subtitles}
+            exportOpts={{
+              speed: getEffectivePlaybackSpeed(
+                project.sourceType,
+                editSettings.playbackSpeed,
+                voiceSettings.speed
+              ),
+              showThaiScript: editSettings.showThaiScript,
+              showWordGloss: editSettings.showWordGloss,
+              showBurmeseLine: editSettings.showBurmeseLine,
+            }}
+            onClose={() => setShowPasteSyncModal(false)}
+            onApplySync={onApplyPasteTranscriptSync}
+          />
+        )}
     </div>
   );
 }

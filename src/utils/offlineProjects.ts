@@ -371,6 +371,7 @@ export async function listSavedProjects(): Promise<SavedProjectRecord[]> {
         subtitles: Array.isArray(item.subtitles)
           ? item.subtitles.map((sub) => ({
               ...sub,
+              isManuallyEdited: Boolean(sub.isManuallyEdited),
               words: Array.isArray(sub.words) ? sub.words : [],
             }))
           : [],
@@ -527,6 +528,7 @@ export async function saveOfflineProject(
       scenes: project.scenes.map((s) => ({ ...s })),
       subtitles: project.subtitles.map((sub) => ({
         ...sub,
+        isManuallyEdited: Boolean(sub.isManuallyEdited),
         words: (Array.isArray(sub.words) ? sub.words : []).map((w) => ({ ...w })),
       })),
       ...(Array.isArray(project.speechRegions) && project.speechRegions.length > 0
@@ -886,6 +888,7 @@ export async function importProjectFromJsonText(
       thaiScript: typeof s.thaiScript === "string" ? s.thaiScript : "",
       burmese: typeof s.burmese === "string" ? s.burmese : "",
       words: validatedWords,
+      isManuallyEdited: Boolean(s.isManuallyEdited),
     };
   });
 

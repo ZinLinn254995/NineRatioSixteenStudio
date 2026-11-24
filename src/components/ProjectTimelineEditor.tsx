@@ -5,10 +5,12 @@ import {
   ChevronUp,
   Film,
   List,
+  Loader2,
   Pause,
   Play,
   RotateCcw,
   Scissors,
+  Sparkles,
   Trash2,
   Undo2,
   ZoomIn,
@@ -18,7 +20,9 @@ import type { SpeechRegion, SpeakingScene, SubtitleItem, VideoProject } from "..
 import { ensureSceneIds, roundTenth } from "../utils/projectTimeline";
 import {
   projectSpeechRegionsToCutTimeline,
+  type CutSpeechRegion,
 } from "../utils/audioSpeechAnalyzer";
+import { findUnmatchedSpeechGaps, suggestTranscribeRange } from "../utils/subtitleState";
 import { hasVerticalScrollRoom, scrollVerticalAncestors } from "../utils/timelineScroll";
 
 interface ProjectTimelineEditorProps {
@@ -33,12 +37,19 @@ interface ProjectTimelineEditorProps {
   onPlayFromTime: (sec: number) => void;
   onUpdateScenes: (nextScenes: SpeakingScene[]) => void;
   onUpdateSubtitleTiming?: (id: string, startTime: number, endTime: number) => void;
+  onShiftAllSubtitles?: (deltaSec: number) => void;
+  onTranscribeRange?: (
+    startSec: number,
+    endSec: number
+  ) => Promise<{ addedCount: number; message?: string } | void>;
+  transcribingRange?: { startSec: number; endSec: number } | null;
   onRestoreSnapshot: (scenes: SpeakingScene[], subtitles?: SubtitleItem[]) => void;
   onResetTimeline: () => void;
   onGoToScenes?: () => void;
   dockMode?: boolean;
   isCollapsed?: boolean;
   onToggleCollapse?: () => void;
+  cutSpeechRegions?: CutSpeechRegion[];
 }
 
 interface ClipSegment {
@@ -140,17 +151,25 @@ export function ProjectTimelineEditor({
   onPlayFromTime,
   onUpdateScenes,
   onUpdateSubtitleTiming,
+  onShiftAllSubtitles,
+  onTranscribeRange,
+  transcribingRange = null,
   onRestoreSnapshot,
   onResetTimeline,
   onGoToScenes,
   dockMode = false,
   isCollapsed = false,
   onToggleCollapse,
+  cutSpeechRegions: controlledCutSpeechRegions,
 }: ProjectTimelineEditorProps) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const trackSlideRef = useRef<HTMLDivElement | null>(null);
   const timeReadoutRef = useRef<HTMLSpanElement | null>(null);
   const [showDockScenes, setShowDockScenes] = useState(false);
+  const [showRangeFill, setShowRangeFill] = useState(false);
+  const [rangeStartVal, setRangeStartVal] = useState("0");
+  const [rangeEndVal, setRangeEndVal] = useState("3");
+  const [rangeNotice, setRangeNotice] = useState<string | null>(null);
 
   const [pxPerSec, setPxPerSec] = useState(32);
   const [viewportWidth, setViewportWidth] = useState(560);
@@ -286,6 +305,8 @@ export function ProjectTimelineEditor({
     setDragBadge(null);
     setActiveSceneId(null);
     setActiveSubId(null);
+    setShowRangeFill(false);
+    setRangeNotice(null);
     setBaselineSubRegions(
       project?.subtitles.map((s) => ({
         sourceStartSec: s.sourceStartSec,
@@ -701,7 +722,7 @@ export function ProjectTimelineEditor({
     }));
   }, [project?.speechRegions, baselineSubRegions, project?.subtitles]);
 
-  const cutSpeechRegions = useMemo(() => {
+  const computedCutSpeechRegions = useMemo(() => {
     const primary = projectSpeechRegionsToCutTimeline(segments, resolvedSpeechRegions);
     if (primary.length > 0) return primary;
     const fallbackSubs =
@@ -713,6 +734,53 @@ export function ProjectTimelineEditor({
           }));
     return projectSpeechRegionsToCutTimeline(segments, fallbackSubs);
   }, [segments, resolvedSpeechRegions, baselineSubRegions, project?.subtitles]);
+
+  const cutSpeechRegions = controlledCutSpeechRegions ?? computedCutSpeechRegions;
+
+  const unmatchedSpeechGaps = useMemo(
+    () =>
+      project
+        ? findUnmatchedSpeechGaps(project.subtitles, cutSpeechRegions, totalCutDuration)
+        : [],
+    [project, cutSpeechRegions, totalCutDuration]
+  );
+
+  const openRangeFillPopover = useCallback(() => {
+    setRangeNotice(null);
+    const suggestion = suggestTranscribeRange(
+      project?.subtitles ?? [],
+      cutSpeechRegions,
+      cutTime,
+      totalCutDuration
+    );
+    setRangeStartVal(suggestion.startSec.toFixed(1));
+    setRangeEndVal(suggestion.endSec.toFixed(1));
+    setShowRangeFill(true);
+  }, [project?.subtitles, cutSpeechRegions, cutTime, totalCutDuration]);
+
+  const runRangeTranscribe = useCallback(
+    async (rawStart: number, rawEnd: number) => {
+      if (!onTranscribeRange || transcribingRange) return;
+      const startSec = Math.max(0, Math.min(totalCutDuration, Number(rawStart) || 0));
+      const endSec = Math.max(startSec + 0.3, Math.min(totalCutDuration, Number(rawEnd) || startSec + 2));
+      if (isPlaying) {
+        onPause();
+      }
+      setRangeNotice(null);
+      onSeek(startSec);
+      const res = await onTranscribeRange(startSec, endSec);
+      if (res && typeof res.addedCount === "number" && res.addedCount === 0) {
+        setRangeNotice(res.message || "No clear speech detected in that range.");
+        setRangeStartVal(startSec.toFixed(1));
+        setRangeEndVal(endSec.toFixed(1));
+        setShowRangeFill(true);
+      } else {
+        setShowRangeFill(false);
+        setRangeNotice(null);
+      }
+    },
+    [onTranscribeRange, transcribingRange, totalCutDuration, isPlaying, onPause, onSeek]
+  );
 
   const tickStepSec = useMemo(() => {
     if (pxPerSec >= 75) return 1;
@@ -1484,6 +1552,44 @@ export function ProjectTimelineEditor({
             <RotateCcw className="w-3.5 h-3.5" />
           </button>
 
+          {onShiftAllSubtitles && (
+            <div
+              role="group"
+              aria-label="Subtitle timing micro-nudge"
+              className="inline-flex items-center border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] rounded-md overflow-hidden"
+            >
+              <span className="px-1.5 text-[10px] font-semibold uppercase tracking-wide text-[#4d597d] dark:text-[#919ec4] select-none">
+                Sub
+              </span>
+              <button
+                type="button"
+                disabled={!project.subtitles.length}
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  onShiftAllSubtitles(-0.1);
+                }}
+                title="Nudge all subtitles -0.1s"
+                aria-label="Shift all subtitles -0.1s"
+                className="h-7 px-1.5 border-l border-[#d2dcf0] dark:border-[#21284c] text-[11px] font-mono-tabular font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors whitespace-nowrap"
+              >
+                -0.1s
+              </button>
+              <button
+                type="button"
+                disabled={!project.subtitles.length}
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  onShiftAllSubtitles(0.1);
+                }}
+                title="Nudge all subtitles +0.1s"
+                aria-label="Shift all subtitles +0.1s"
+                className="h-7 px-1.5 border-l border-[#d2dcf0] dark:border-[#21284c] text-[11px] font-mono-tabular font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors whitespace-nowrap"
+              >
+                +0.1s
+              </button>
+            </div>
+          )}
+
           <div className="inline-flex items-center border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] rounded-md overflow-hidden ml-0.5">
             <button
               type="button"
@@ -1508,6 +1614,42 @@ export function ProjectTimelineEditor({
               <ZoomIn className="w-3.5 h-3.5" />
             </button>
           </div>
+
+          {onTranscribeRange && (
+            <button
+              type="button"
+              disabled={segments.length === 0 || Boolean(transcribingRange)}
+              onClick={(e) => {
+                e.currentTarget.blur();
+                if (showRangeFill) {
+                  setShowRangeFill(false);
+                  setRangeNotice(null);
+                } else {
+                  openRangeFillPopover();
+                }
+              }}
+              title="AI transcribe missing speech in a time range"
+              className={`h-7 px-2.5 rounded-md border text-xs font-medium flex items-center gap-1.5 whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors ${
+                showRangeFill || transcribingRange
+                  ? "border-teal-600/70 bg-teal-50 text-teal-800 dark:border-teal-400/70 dark:bg-teal-950/60 dark:text-teal-200"
+                  : unmatchedSpeechGaps.length > 0
+                    ? "border-amber-500/60 bg-amber-50/90 text-amber-900 hover:bg-amber-100 dark:border-amber-400/50 dark:bg-amber-950/40 dark:text-amber-200 dark:hover:bg-amber-900/50"
+                    : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142]"
+              }`}
+            >
+              {transcribingRange ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Sparkles className="w-3.5 h-3.5" />
+              )}
+              <span>{transcribingRange ? "Transcribing…" : "AI Fill"}</span>
+              {!transcribingRange && unmatchedSpeechGaps.length > 0 && (
+                <span className="px-1 py-0.2 rounded bg-amber-600/15 dark:bg-amber-400/20 text-[10px] font-mono-tabular font-bold">
+                  {unmatchedSpeechGaps.length}
+                </span>
+              )}
+            </button>
+          )}
 
           {dockMode && (
               <button
@@ -1538,6 +1680,100 @@ export function ProjectTimelineEditor({
           )}
         </div>
       </div>
+
+      {onTranscribeRange && showRangeFill && (
+        <div
+          className={`flex flex-wrap items-center gap-2 text-xs bg-[#eef2fc] dark:bg-[#10152e] border-b border-[#d2dcf0] dark:border-[#21284c] ${
+            dockMode ? "px-4 py-1.5" : "px-2.5 py-2 rounded-md border"
+          }`}
+        >
+          <span className="font-semibold text-teal-800 dark:text-teal-300 flex items-center gap-1 shrink-0">
+            <Sparkles className="w-3 h-3" />
+            Transcribe Range
+          </span>
+          <label className="flex items-center gap-1 text-[11px] text-[#4d597d] dark:text-[#919ec4]">
+            Start
+            <input
+              type="number"
+              step="0.1"
+              min="0"
+              max={totalCutDuration}
+              value={rangeStartVal}
+              onChange={(e) => {
+                setRangeStartVal(e.target.value);
+                setRangeNotice(null);
+              }}
+              className="w-16 h-6 px-1.5 rounded border border-[#bcc9e6] dark:border-[#2a3461] bg-white dark:bg-[#090d20] text-[#0c1026] dark:text-[#f3f5fc] font-mono-tabular text-[11px]"
+            />
+          </label>
+          <label className="flex items-center gap-1 text-[11px] text-[#4d597d] dark:text-[#919ec4]">
+            End
+            <input
+              type="number"
+              step="0.1"
+              min="0"
+              max={totalCutDuration}
+              value={rangeEndVal}
+              onChange={(e) => {
+                setRangeEndVal(e.target.value);
+                setRangeNotice(null);
+              }}
+              className="w-16 h-6 px-1.5 rounded border border-[#bcc9e6] dark:border-[#2a3461] bg-white dark:bg-[#090d20] text-[#0c1026] dark:text-[#f3f5fc] font-mono-tabular text-[11px]"
+            />
+          </label>
+          <button
+            type="button"
+            onClick={openRangeFillPopover}
+            className="h-6 px-2 rounded border border-[#bcc9e6] dark:border-[#2a3461] bg-white dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[11px] text-[#0c1026] dark:text-[#f3f5fc] cursor-pointer"
+          >
+            Playhead Gap
+          </button>
+          {unmatchedSpeechGaps.slice(0, 4).map((gap, idx) => (
+            <button
+              key={`tl-gap-${gap.startSec}-${gap.endSec}-${idx}`}
+              type="button"
+              disabled={Boolean(transcribingRange)}
+              onClick={() => void runRangeTranscribe(gap.startSec, gap.endSec)}
+              title={`Fill ${formatTimePrecise(gap.startSec)} – ${formatTimePrecise(gap.endSec)}`}
+              className="h-6 px-2 rounded border border-amber-500/50 bg-amber-50 hover:bg-amber-100 dark:border-amber-400/40 dark:bg-amber-950/40 dark:hover:bg-amber-900/50 text-amber-900 dark:text-amber-200 font-mono-tabular text-[10px] cursor-pointer disabled:opacity-40"
+            >
+              Gap {gap.startSec.toFixed(1)}s–{gap.endSec.toFixed(1)}s
+            </button>
+          ))}
+          <div className="flex items-center gap-1.5 ml-auto">
+            {rangeNotice && (
+              <span className="text-[11px] text-amber-800 dark:text-amber-300 font-medium">
+                {rangeNotice}
+              </span>
+            )}
+            <button
+              type="button"
+              disabled={Boolean(transcribingRange)}
+              onClick={() =>
+                void runRangeTranscribe(parseFloat(rangeStartVal), parseFloat(rangeEndVal))
+              }
+              className="h-6 px-2.5 rounded bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] font-semibold text-[11px] flex items-center gap-1 cursor-pointer disabled:opacity-40"
+            >
+              {transcribingRange ? (
+                <Loader2 className="w-3 h-3 animate-spin" />
+              ) : (
+                <Sparkles className="w-3 h-3" />
+              )}
+              <span>{transcribingRange ? "Transcribing…" : "Transcribe"}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setShowRangeFill(false);
+                setRangeNotice(null);
+              }}
+              className="h-6 px-2 rounded text-[11px] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-white cursor-pointer"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Fixed-Center-Playhead Split & Delete Timeline with Dedicated Bottom Scroll Space */}
       {(!dockMode || !isCollapsed) && (
@@ -1761,6 +1997,47 @@ export function ProjectTimelineEditor({
                 })}
               </div>
             </div>
+
+            {/* Unmatched Speech Gap Quick-Fill Highlights */}
+            {onTranscribeRange &&
+              unmatchedSpeechGaps.map((gap, gapIdx) => {
+                const leftPx = gap.startSec * pxPerSec;
+                const widthPx = Math.max(20, gap.durationSec * pxPerSec);
+                const isGapBusy =
+                  Boolean(transcribingRange) &&
+                  Math.abs(transcribingRange!.startSec - gap.startSec) < 0.25 &&
+                  Math.abs(transcribingRange!.endSec - gap.endSec) < 0.25;
+                return (
+                  <button
+                    key={`unmatched-gap-${gapIdx}-${gap.startSec.toFixed(2)}`}
+                    type="button"
+                    disabled={Boolean(transcribingRange)}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void runRangeTranscribe(gap.startSec, gap.endSec);
+                    }}
+                    style={{ left: `${leftPx}px`, width: `${widthPx}px` }}
+                    title={`Unmatched speech (${formatTimePrecise(gap.startSec)} – ${formatTimePrecise(gap.endSec)}). Click to AI fill.`}
+                    className={`absolute top-0 h-10 rounded-md border border-dashed flex items-center justify-center gap-1 px-1.5 overflow-hidden transition-colors cursor-pointer z-[5] disabled:opacity-60 ${
+                      isGapBusy
+                        ? "border-teal-600 bg-teal-500/20 text-teal-800 dark:border-teal-400 dark:bg-teal-500/25 dark:text-teal-200"
+                        : "border-amber-600/75 bg-amber-500/15 hover:bg-amber-500/28 text-amber-900 dark:border-amber-400/70 dark:bg-amber-500/15 dark:hover:bg-amber-500/25 dark:text-amber-200"
+                    }`}
+                  >
+                    {isGapBusy ? (
+                      <Loader2 className="w-3 h-3 animate-spin shrink-0" />
+                    ) : (
+                      <Sparkles className="w-3 h-3 shrink-0" />
+                    )}
+                    {widthPx >= 52 && (
+                      <span className="text-[10px] font-semibold truncate">
+                        {isGapBusy ? "Filling…" : "AI Fill"}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
 
             {/* Upper Subtitle Clips Row */}
             {project.subtitles.map((sub, subIdx) => {
