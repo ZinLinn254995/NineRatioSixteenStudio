@@ -4477,17 +4477,21 @@ function buildTopVideoFfmpegFilter(editSettings, width, topVideoH) {
     `scale=w=${targetW}:h=${targetH}:force_original_aspect_ratio=${ratioFlag}:force_divisible_by=2`,
     "setsar=1"
   ];
-  if (flipH) parts.push("hflip");
-  if (flipV) parts.push("vflip");
   if (Math.abs(rotateDeg) >= 0.5) {
     const rad = (rotateDeg * Math.PI / 180).toFixed(5);
-    parts.push(`rotate=${rad}:fillcolor=0x111111`);
+    parts.push(`rotate=${rad}:ow='rotw(${rad})':oh='roth(${rad})':fillcolor=0x111111`);
   }
+  if (flipH) parts.push("hflip");
+  if (flipV) parts.push("vflip");
+  const shiftX = Math.round(panXRatio * width);
+  const shiftY = Math.round(panYRatio * topVideoH);
+  const padMarginX = 2 * Math.abs(shiftX);
+  const padMarginY = 2 * Math.abs(shiftY);
   parts.push(
-    `pad=w='max(iw,${width})':h='max(ih,${topVideoH})':x='(ow-iw)/2':y='(oh-ih)/2':color=0x111111`
+    `pad=w='max(iw,${width})+${padMarginX}':h='max(ih,${topVideoH})+${padMarginY}':x='(ow-iw)/2':y='(oh-ih)/2':color=0x111111`
   );
   parts.push(
-    `crop=w=${width}:h=${topVideoH}:x='max(0,min(iw-${width},(iw-${width})/2-(${panXRatio.toFixed(4)})*${width}))':y='max(0,min(ih-${topVideoH},(ih-${topVideoH})/2-(${panYRatio.toFixed(4)})*${topVideoH}))'`
+    `crop=w=${width}:h=${topVideoH}:x='(iw-${width})/2-(${shiftX})':y='(ih-${topVideoH})/2-(${shiftY})'`
   );
   const brightnessPct = editSettings?.brightness ?? 100;
   const contrastPct = editSettings?.contrast ?? 100;

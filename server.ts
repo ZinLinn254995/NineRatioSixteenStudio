@@ -5663,12 +5663,13 @@ function buildTopVideoFfmpegFilter(
     "setsar=1",
   ];
 
-  if (flipH) parts.push("hflip");
-  if (flipV) parts.push("vflip");
+  // Apply rotate before hflip/vflip to match CSS/Canvas transform order (scale(flip) * rotate(deg))
   if (Math.abs(rotateDeg) >= 0.5) {
     const rad = ((rotateDeg * Math.PI) / 180).toFixed(5);
     parts.push(`rotate=${rad}:ow='rotw(${rad})':oh='roth(${rad})':fillcolor=0x111111`);
   }
+  if (flipH) parts.push("hflip");
+  if (flipV) parts.push("vflip");
 
   // Pad with pan-offset margins so zoom<=1, contain, and extreme pan match Canvas #111111 matte 1:1
   const shiftX = Math.round(panXRatio * width);
