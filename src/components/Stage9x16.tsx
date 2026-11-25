@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from "react";
 const useIsomorphicLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
 import { Pause, Play, Upload, Volume2, VolumeX } from "lucide-react";
 import type { SubtitleItem, VideoEditSettings, VideoProject, VoiceSettings } from "../types";
@@ -6,7 +6,6 @@ import { YouTubeScenePlayer, type YouTubeScenePlayerHandle } from "./YouTubeScen
 import { getEffectivePlaybackSpeed } from "../utils/voicePresets";
 import { findActiveSubtitle, getScrollAnchorSubtitle } from "../utils/projectTimeline";
 import { hasGeneratedProject, hasProjectMedia } from "../utils/projectState";
-import { UNIFIED_CUT_FLOW } from "../config/flags";
 import {
   clampAndSnapVideoHeightPct,
   isStageCleanClick,
@@ -58,37 +57,6 @@ export function boundsValueToScale(
   return Math.max(1, Math.min(MAX_STAGE_PREVIEW_SCALE, 1 + (clamped - defaultVal) / upperSpan));
 }
 
-export function getCompactStageBounds(outerWidth: number, viewportHeight: number) {
-  const stageHorizontalPad = 20; // px-2.5 (10px each side)
-  const effectiveStageW = outerWidth > 0 ? outerWidth : 390;
-  const availWidth = Math.max(200, effectiveStageW - stageHorizontalPad);
-  const maxSafeHeight = Math.max(160, Math.round(viewportHeight * 0.64));
-  const maxWidthPx = Math.max(
-    200,
-    Math.min(availWidth, Math.floor((maxSafeHeight * 16) / 9))
-  );
-  const minWidthPx = Math.max(
-    140,
-    Math.min(maxWidthPx - 48, Math.round(maxWidthPx * 0.4))
-  );
-  const defaultWidthPx = Math.max(
-    minWidthPx + 24,
-    Math.min(maxWidthPx - 16, Math.round(maxWidthPx * 0.72))
-  );
-  const minHeightPx = Math.round((minWidthPx * 9) / 16);
-  const defaultHeightPx = Math.round((defaultWidthPx * 9) / 16);
-  const maxHeightPx = Math.round((maxWidthPx * 9) / 16);
-  return {
-    availWidth,
-    minWidthPx,
-    defaultWidthPx,
-    maxWidthPx,
-    minHeightPx,
-    defaultHeightPx,
-    maxHeightPx,
-  };
-}
-
 interface Stage9x16Props {
   project: VideoProject | null;
   cutTime: number;
@@ -124,33 +92,41 @@ function formatSec(sec: number): string {
   return `${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}`;
 }
 
-export function Stage9x16({
-  project,
-  cutTime,
-  subscribeCutTime,
-  getLiveCutTime,
-  seekNonce,
-  isPlaying,
-  muted,
-  voiceSettings,
-  editSettings,
-  onTogglePlay,
-  onPlayingChange,
-  onSeek,
-  onTimeUpdate,
-  onEnded,
-  onToggleMute,
-  selectedSubtitleId = null,
-  onSelectSubtitle,
-  compactMobile = false,
-  fitContainerHeight = false,
-  previewScale = DEFAULT_STAGE_PREVIEW_SCALE,
-  onChangePreviewScale,
-  onChangeVideoHeightPct,
-  onUploadVideo,
-  onDetectedDuration,
-}: Stage9x16Props) {
+export interface Stage9x16Handle {
+  previewSourceTime: (sourceSec: number | null, opts?: { skipResync?: boolean }) => void;
+}
+
+export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function Stage9x16(
+  {
+    project,
+    cutTime,
+    subscribeCutTime,
+    getLiveCutTime,
+    seekNonce,
+    isPlaying,
+    muted,
+    voiceSettings,
+    editSettings,
+    onTogglePlay,
+    onPlayingChange,
+    onSeek,
+    onTimeUpdate,
+    onEnded,
+    onToggleMute,
+    selectedSubtitleId = null,
+    onSelectSubtitle,
+    compactMobile = false,
+    fitContainerHeight = false,
+    previewScale = DEFAULT_STAGE_PREVIEW_SCALE,
+    onChangePreviewScale,
+    onChangeVideoHeightPct,
+    onUploadVideo,
+    onDetectedDuration,
+  },
+  ref
+) {
   const playerRef = useRef<YouTubeScenePlayerHandle | null>(null);
+  const subPanelRef = useRef<HTMLDivElement | null>(null);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const [isUploadDragOver, setIsUploadDragOver] = useState(false);
   const onDetectedDurationRef = useRef(onDetectedDuration);
@@ -247,15 +223,33 @@ export function Stage9x16({
     return () => ro.disconnect();
   }, []);
 
-  const activeProject = (
-    UNIFIED_CUT_FLOW ? hasProjectMedia(project) : hasGeneratedProject(project)
-  )
-    ? project
-    : null;
+  const activeProject = hasProjectMedia(project) ? project : null;
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      previewSourceTime: (sourceSec: number | null, opts?: { skipResync?: boolean }) => {
+        if (activeProject?.sourceType !== "local") {
+          if (subPanelRef.current) subPanelRef.current.style.visibility = "";
+          return;
+        }
+        if (subPanelRef.current) {
+          subPanelRef.current.style.visibility = sourceSec !== null ? "hidden" : "";
+        }
+        playerRef.current?.previewSourceTime(sourceSec, opts);
+      },
+    }),
+    [activeProject?.sourceType]
+  );
+
+  useEffect(() => {
+    if (subPanelRef.current) {
+      subPanelRef.current.style.visibility = "";
+    }
+  }, [activeProject?.sourceType, activeProject?.localUrl]);
 
   useEffect(() => {
     if (
-      !UNIFIED_CUT_FLOW ||
       !activeProject ||
       activeProject.sourceType !== "local" ||
       !activeProject.localUrl
@@ -836,7 +830,7 @@ export function Stage9x16({
           className="pointer-events-none absolute inset-0 rounded-lg border border-[#d2dcf0] dark:border-[#21284c] z-20"
         />
         {!activeProject ? (
-          UNIFIED_CUT_FLOW && onUploadVideo ? (
+          onUploadVideo ? (
             <div
               className={`flex-1 flex flex-col items-center justify-center ${
                 compactMobile ? "p-3 lg:p-5" : "p-5"
@@ -1208,6 +1202,7 @@ export function Stage9x16({
 
               return (
                 <div
+                  ref={subPanelRef}
                   style={{ transform: "translateZ(0)", contain: "layout paint" }}
                   className={`relative flex-1 w-full overflow-hidden ${topDividerClass} ${containerThemeClass}`}
                 >
@@ -1548,4 +1543,4 @@ export function Stage9x16({
       )}
     </div>
   );
-}
+});

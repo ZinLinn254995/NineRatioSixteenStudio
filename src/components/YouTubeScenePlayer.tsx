@@ -115,6 +115,7 @@ export interface YouTubeScenePlayerHandle {
   play: () => void;
   pause: () => void;
   togglePlay: () => void;
+  previewSourceTime: (sourceSec: number | null, opts?: { skipResync?: boolean }) => void;
 }
 
 interface YouTubeScenePlayerProps {
@@ -170,6 +171,9 @@ export const YouTubeScenePlayer = memo(
     const lastSeekFixAtRef = useRef<number>(0);
     const seekSettleUntilRef = useRef<number>(0);
     const playAttemptPendingRef = useRef<boolean>(false);
+    const sourcePreviewOverrideRef = useRef<number | null>(null);
+    const pendingPreviewSeekRef = useRef<number | null>(null);
+    const previewSeekRafRef = useRef<number | null>(null);
     const ytStateRef = useRef<number>(-1);
     const ytHasPlayedRef = useRef<boolean>(false);
     const ytPlayKickAtRef = useRef<number>(0);
@@ -261,6 +265,31 @@ export const YouTubeScenePlayer = memo(
     voiceSettings.speed
   );
 
+  const cancelPreviewSeekRaf = useCallback(() => {
+    if (previewSeekRafRef.current !== null) {
+      cancelAnimationFrame(previewSeekRafRef.current);
+      previewSeekRafRef.current = null;
+    }
+  }, []);
+
+  const flushLocalPreviewSeek = useCallback((vid: HTMLVideoElement) => {
+    const target = pendingPreviewSeekRef.current;
+    if (target === null || sourcePreviewOverrideRef.current === null) return;
+    if (vid.readyState < 1 || vid.seeking) return;
+    const actualDur =
+      Number.isFinite(vid.duration) && vid.duration > 0 ? vid.duration : target + 1;
+    const clamped = Math.max(0, Math.min(Math.max(0, actualDur - 0.02), target));
+    pendingPreviewSeekRef.current = null;
+    if (Math.abs(vid.currentTime - clamped) > 0.015) {
+      seekSettleUntilRef.current = performance.now() + 650;
+      try {
+        vid.currentTime = clamped;
+      } catch {
+        // ignore invalid media seek state
+      }
+    }
+  }, []);
+
   // Reset playback guards when source changes
   useEffect(() => {
     voiceAttachedRef.current = false;
@@ -268,9 +297,17 @@ export const YouTubeScenePlayer = memo(
     pendingLocalPlayRef.current = false;
     playAttemptPendingRef.current = false;
     reloadAttemptedRef.current = false;
+    sourcePreviewOverrideRef.current = null;
+    pendingPreviewSeekRef.current = null;
+    cancelPreviewSeekRaf();
     setAutoMutedFallback(false);
     setLocalPlayError(null);
-  }, [localUrl]);
+    return () => {
+      sourcePreviewOverrideRef.current = null;
+      pendingPreviewSeekRef.current = null;
+      cancelPreviewSeekRaf();
+    };
+  }, [localUrl, sourceType, cancelPreviewSeekRaf]);
 
   useEffect(() => {
     autoMutedFallbackRef.current = false;
@@ -455,6 +492,9 @@ export const YouTubeScenePlayer = memo(
 
   // Synchronous Play/Pause helpers so Android/iOS mobile browsers honor user tap gestures
   const startLocalPlayback = useCallback(() => {
+    sourcePreviewOverrideRef.current = null;
+    pendingPreviewSeekRef.current = null;
+    cancelPreviewSeekRaf();
     const vid = localVideoRef.current;
     if (!vid) return;
 
@@ -719,8 +759,70 @@ export const YouTubeScenePlayer = memo(
           }
         }
       },
+      previewSourceTime: (sourceSec: number | null, opts?: { skipResync?: boolean }) => {
+        if (sourceType !== "local") return;
+        const vid = localVideoRef.current;
+        if (sourceSec !== null && Number.isFinite(sourceSec)) {
+          sourcePreviewOverrideRef.current = sourceSec;
+          pendingLocalPlayRef.current = false;
+          playAttemptPendingRef.current = false;
+          if (vid && !vid.paused) {
+            try {
+              vid.pause();
+            } catch {
+              // ignore
+            }
+          }
+          pendingPreviewSeekRef.current = sourceSec;
+          if (previewSeekRafRef.current === null) {
+            previewSeekRafRef.current = requestAnimationFrame(() => {
+              previewSeekRafRef.current = null;
+              const v = localVideoRef.current;
+              if (v) flushLocalPreviewSeek(v);
+            });
+          }
+          return;
+        }
+
+        sourcePreviewOverrideRef.current = null;
+        pendingPreviewSeekRef.current = null;
+        cancelPreviewSeekRaf();
+        if (opts?.skipResync || !vid) return;
+
+        const { sceneIndex, sourceSec: cutSourceSec } = mapCutTimeToSource(
+          scenesRef.current,
+          readCurrentCutTime()
+        );
+        activeSceneIdxRef.current = sceneIndex;
+        if (vid.readyState >= 1) {
+          const actualDur =
+            Number.isFinite(vid.duration) && vid.duration > 0 ? vid.duration : cutSourceSec + 10;
+          const clamped = Math.max(0, Math.min(Math.max(0, actualDur - 0.05), cutSourceSec));
+          if (Math.abs(vid.currentTime - clamped) > 0.04) {
+            seekSettleUntilRef.current = performance.now() + 650;
+            try {
+              vid.currentTime = clamped;
+            } catch {
+              // ignore
+            }
+          }
+          pendingLocalSeekRef.current = null;
+        } else {
+          pendingLocalSeekRef.current = cutSourceSec;
+        }
+      },
     }),
-    [sourceType, ytActualPlaying, startLocalPlayback, pauseLocalPlayback, startYouTubePlayback, pauseYouTubePlayback]
+    [
+      sourceType,
+      ytActualPlaying,
+      startLocalPlayback,
+      pauseLocalPlayback,
+      startYouTubePlayback,
+      pauseYouTubePlayback,
+      cancelPreviewSeekRaf,
+      flushLocalPreviewSeek,
+      readCurrentCutTime,
+    ]
   );
 
   // If Android mobile browser blocks external YT.Player.playVideo() after iframe is ready, surface a direct tap hint
@@ -741,6 +843,7 @@ export const YouTubeScenePlayer = memo(
   // Reset initial position when source or scenes change (without interrupting active playback)
   useEffect(() => {
     if (isPlayingRef.current || playAttemptPendingRef.current || pendingLocalPlayRef.current) return;
+    if (sourceType === "local" && sourcePreviewOverrideRef.current !== null) return;
     const { sceneIndex, sourceSec } = mapCutTimeToSource(scenes, readCurrentCutTime());
     activeSceneIdxRef.current = sceneIndex;
 
@@ -781,6 +884,7 @@ export const YouTubeScenePlayer = memo(
   // Explicit user seek (scrubber drag, clicking subtitle card, or clicking scene chip)
   useEffect(() => {
     if (seekNonce === 0) return;
+    if (sourceType === "local" && sourcePreviewOverrideRef.current !== null) return;
     const { sceneIndex, sourceSec } = mapCutTimeToSource(scenesRef.current, readCurrentCutTime());
     activeSceneIdxRef.current = sceneIndex;
 
@@ -1003,7 +1107,14 @@ export const YouTubeScenePlayer = memo(
         scenesRef.current.length > 0
           ? scenesRef.current
           : [{ index: 0, startSec: 0, endSec: fallbackDur, durationSec: fallbackDur, summary: "Full video" }];
-      if (vid && curScenes.length > 0 && !vid.paused && !vid.seeking && vid.readyState >= 1) {
+      if (
+        vid &&
+        curScenes.length > 0 &&
+        sourcePreviewOverrideRef.current === null &&
+        !vid.paused &&
+        !vid.seeking &&
+        vid.readyState >= 1
+      ) {
         const idx = Math.max(0, Math.min(activeSceneIdxRef.current, curScenes.length - 1));
         const sc = curScenes[idx];
         const srcT = vid.currentTime;
@@ -1055,8 +1166,13 @@ export const YouTubeScenePlayer = memo(
     return () => cancelAnimationFrame(rafId);
   }, [sourceType, isPlaying]);
 
-  const applyPendingLocalSeekAndPlay = useCallback((vid: HTMLVideoElement) => {
-    const target = pendingLocalSeekRef.current;
+  const applyPendingLocalSeekAndPlay = useCallback(
+    (vid: HTMLVideoElement) => {
+      if (sourcePreviewOverrideRef.current !== null) {
+        flushLocalPreviewSeek(vid);
+        return;
+      }
+      const target = pendingLocalSeekRef.current;
     if (target !== null) {
       const actualDur = Number.isFinite(vid.duration) && vid.duration > 0 ? vid.duration : target + 1;
       const clamped = Math.max(0, Math.min(Math.max(0, actualDur - 0.05), target));
@@ -1110,7 +1226,7 @@ export const YouTubeScenePlayer = memo(
           }
         });
     }
-  }, []);
+  }, [flushLocalPreviewSeek]);
 
   const transformCss = buildCssTransformString(editSettings);
   const filterCss = buildCssFilterString(editSettings);
@@ -1194,6 +1310,10 @@ export const YouTubeScenePlayer = memo(
             }}
           onSeeked={(e) => {
             seekSettleUntilRef.current = 0;
+            if (sourcePreviewOverrideRef.current !== null) {
+              flushLocalPreviewSeek(e.currentTarget);
+              return;
+            }
             applyPendingLocalSeekAndPlay(e.currentTarget);
           }}
           onPlay={(e) => {

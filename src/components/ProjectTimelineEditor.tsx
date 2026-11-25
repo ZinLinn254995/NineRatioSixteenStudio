@@ -21,7 +21,6 @@ import {
 import type { SpeechRegion, SpeakingScene, SubtitleItem, VideoProject } from "../types";
 import { ensureSceneIds, roundTenth } from "../utils/projectTimeline";
 import { hasGeneratedProject, hasProjectMedia } from "../utils/projectState";
-import { UNIFIED_CUT_FLOW } from "../config/flags";
 import {
   projectSpeechRegionsToCutTimeline,
   type CutSpeechRegion,
@@ -63,6 +62,7 @@ interface ProjectTimelineEditorProps {
   regeneratingClipPercent?: number | null;
   onGenerateSingleClip?: (sceneId: string) => void;
   isBusy?: boolean;
+  onPreviewSourceSeek?: (sourceSec: number | null, opts?: { skipResync?: boolean }) => void;
 }
 
 interface ClipSegment {
@@ -177,6 +177,7 @@ export function ProjectTimelineEditor({
   regeneratingClipPercent = null,
   onGenerateSingleClip,
   isBusy = false,
+  onPreviewSourceSeek,
 }: ProjectTimelineEditorProps) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const trackSlideRef = useRef<HTMLDivElement | null>(null);
@@ -216,6 +217,7 @@ export function ProjectTimelineEditor({
   const windowDragCleanupRef = useRef<(() => void) | null>(null);
   const pointerMoveHandlerRef = useRef<(e: PointerEvent) => void>(() => {});
   const pointerUpHandlerRef = useRef<(e: PointerEvent) => void>(() => {});
+  const pointerCancelHandlerRef = useRef<(e?: PointerEvent) => void>(() => {});
   const updateDragState = useCallback((next: DragMode | null) => {
     dragStateRef.current = next;
   }, []);
@@ -245,6 +247,12 @@ export function ProjectTimelineEditor({
   const lastSeekDispatchAtRef = useRef<number>(0);
   const seekThrottleTimerRef = useRef<number | null>(null);
   const queuedSeekSecRef = useRef<number | null>(null);
+  const onPreviewSourceSeekRef = useRef(onPreviewSourceSeek);
+  onPreviewSourceSeekRef.current = onPreviewSourceSeek;
+  const lastPreviewSeekAtRef = useRef<number>(0);
+  const previewSeekTimerRef = useRef<number | null>(null);
+  const queuedPreviewSourceSecRef = useRef<number | null>(null);
+  const isPreviewOverrideActiveRef = useRef<boolean>(false);
   const activePointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
   const pinchStartRef = useRef<{ dist: number; pxPerSec: number } | null>(null);
   const tappedClipRef = useRef<{ sceneId: string; startX: number; moved: boolean } | null>(null);
@@ -255,11 +263,7 @@ export function ProjectTimelineEditor({
     moved: boolean;
   } | null>(null);
 
-  const activeTimelineProject = (
-    UNIFIED_CUT_FLOW ? hasProjectMedia(project) : hasGeneratedProject(project)
-  )
-    ? project
-    : null;
+  const activeTimelineProject = hasProjectMedia(project) ? project : null;
   const isDraft = Boolean(activeTimelineProject?.isDraft);
 
   const normalizedScenes = useMemo(
@@ -313,6 +317,15 @@ export function ProjectTimelineEditor({
     : "none";
 
   useEffect(() => {
+    if (previewSeekTimerRef.current !== null) {
+      window.clearTimeout(previewSeekTimerRef.current);
+      previewSeekTimerRef.current = null;
+    }
+    queuedPreviewSourceSecRef.current = null;
+    if (isPreviewOverrideActiveRef.current) {
+      isPreviewOverrideActiveRef.current = false;
+      onPreviewSourceSeekRef.current?.(null);
+    }
     frozenTrackTimeRef.current = null;
     setFrozenTrackTime(null);
     setLiveScrubCutTime(null);
@@ -521,6 +534,50 @@ export function ProjectTimelineEditor({
     [onSeek]
   );
 
+  const clearPreviewSourceSeekState = useCallback((opts?: { skipResync?: boolean }) => {
+    if (previewSeekTimerRef.current !== null) {
+      window.clearTimeout(previewSeekTimerRef.current);
+      previewSeekTimerRef.current = null;
+    }
+    queuedPreviewSourceSecRef.current = null;
+    if (isPreviewOverrideActiveRef.current) {
+      isPreviewOverrideActiveRef.current = false;
+      onPreviewSourceSeekRef.current?.(null, opts);
+    }
+  }, []);
+
+  const dispatchPreviewSourceSeek = useCallback((sourceSec: number, immediate = false) => {
+    if (projectRef.current?.sourceType !== "local" || !onPreviewSourceSeekRef.current) return;
+    isPreviewOverrideActiveRef.current = true;
+    const minIntervalMs = 28;
+    const now = performance.now();
+
+    if (immediate || now - lastPreviewSeekAtRef.current >= minIntervalMs) {
+      if (previewSeekTimerRef.current !== null) {
+        window.clearTimeout(previewSeekTimerRef.current);
+        previewSeekTimerRef.current = null;
+      }
+      queuedPreviewSourceSecRef.current = null;
+      lastPreviewSeekAtRef.current = now;
+      onPreviewSourceSeekRef.current(sourceSec);
+      return;
+    }
+
+    queuedPreviewSourceSecRef.current = sourceSec;
+    if (previewSeekTimerRef.current === null) {
+      const wait = Math.max(8, minIntervalMs - (now - lastPreviewSeekAtRef.current));
+      previewSeekTimerRef.current = window.setTimeout(() => {
+        previewSeekTimerRef.current = null;
+        if (queuedPreviewSourceSecRef.current !== null && isPreviewOverrideActiveRef.current) {
+          const next = queuedPreviewSourceSecRef.current;
+          queuedPreviewSourceSecRef.current = null;
+          lastPreviewSeekAtRef.current = performance.now();
+          onPreviewSourceSeekRef.current?.(next);
+        }
+      }, wait);
+    }
+  }, []);
+
   useEffect(() => {
     return () => {
       if (seekThrottleTimerRef.current !== null) {
@@ -529,8 +586,9 @@ export function ProjectTimelineEditor({
       if (wheelClearTimerRef.current !== null) {
         window.clearTimeout(wheelClearTimerRef.current);
       }
+      clearPreviewSourceSeekState();
     };
-  }, []);
+  }, [clearPreviewSourceSeekState]);
 
   // Segment currently underneath the center playhead
   const segmentAtPlayhead = useMemo(() => {
@@ -828,6 +886,15 @@ export function ProjectTimelineEditor({
     const onWinEnd = (ev: PointerEvent) => {
       pointerUpHandlerRef.current(ev);
     };
+    const onWinCancel = (ev: PointerEvent) => {
+      pointerCancelHandlerRef.current(ev);
+    };
+    const onWinKeyDown = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape" && dragStateRef.current) {
+        ev.preventDefault();
+        pointerCancelHandlerRef.current();
+      }
+    };
     const onWinTouchMove = (ev: TouchEvent) => {
       if (dragStateRef.current || activePointersRef.current.size > 0) {
         if (ev.cancelable) ev.preventDefault();
@@ -838,17 +905,25 @@ export function ProjectTimelineEditor({
     };
     window.addEventListener("pointermove", onWinMove, { passive: false });
     window.addEventListener("pointerup", onWinEnd);
-    window.addEventListener("pointercancel", onWinEnd);
+    window.addEventListener("pointercancel", onWinCancel);
+    window.addEventListener("keydown", onWinKeyDown);
     window.addEventListener("touchmove", onWinTouchMove, { passive: false });
     window.addEventListener("blur", onWinBlur);
     windowDragCleanupRef.current = () => {
       window.removeEventListener("pointermove", onWinMove);
       window.removeEventListener("pointerup", onWinEnd);
-      window.removeEventListener("pointercancel", onWinEnd);
+      window.removeEventListener("pointercancel", onWinCancel);
+      window.removeEventListener("keydown", onWinKeyDown);
       window.removeEventListener("touchmove", onWinTouchMove);
       window.removeEventListener("blur", onWinBlur);
     };
   }, []);
+
+  useEffect(() => {
+    if (isCollapsed || !isActive) {
+      pointerCancelHandlerRef.current();
+    }
+  }, [isCollapsed, isActive]);
 
   useEffect(() => {
     return () => {
@@ -910,6 +985,7 @@ export function ProjectTimelineEditor({
   ) => {
     e.stopPropagation();
     if (e.button !== 0 && e.pointerType === "mouse") return;
+    e.preventDefault();
     blurFocusedButton();
     try {
       e.currentTarget.setPointerCapture(e.pointerId);
@@ -943,6 +1019,7 @@ export function ProjectTimelineEditor({
       origEndSec: seg.endSec,
       origCutStart: seg.cutStart,
     });
+    dispatchPreviewSourceSeek(mode === "trim-start" ? seg.startSec : seg.endSec, true);
   };
 
   const handlePointerDownSubInteraction = (
@@ -1066,6 +1143,7 @@ export function ProjectTimelineEditor({
       trimPreviewRef.current = nextPreview;
       setTrimPreview(nextPreview);
       setDragBadge({ label: "In", sec: nextStart });
+      dispatchPreviewSourceSeek(nextStart);
       return;
     }
 
@@ -1089,6 +1167,7 @@ export function ProjectTimelineEditor({
       trimPreviewRef.current = nextPreview;
       setTrimPreview(nextPreview);
       setDragBadge({ label: "Out", sec: nextEnd });
+      dispatchPreviewSourceSeek(nextEnd);
       return;
     }
 
@@ -1235,11 +1314,13 @@ export function ProjectTimelineEditor({
         frozenTrackTimeRef.current = null;
         setFrozenTrackTime(null);
 
-        if (
+        const changed = Boolean(
           preview &&
-          (Math.abs(preview.nextStartSec - preview.origStartSec) >= 0.01 ||
-            Math.abs(preview.nextEndSec - preview.origEndSec) >= 0.01)
-        ) {
+            (Math.abs(preview.nextStartSec - preview.origStartSec) >= 0.01 ||
+              Math.abs(preview.nextEndSec - preview.origEndSec) >= 0.01)
+        );
+        if (preview && changed) {
+          clearPreviewSourceSeekState({ skipResync: true });
           const nextScenes = normalizedScenesRef.current.map((sc) =>
             sc.id === preview.sceneId
               ? {
@@ -1257,6 +1338,8 @@ export function ProjectTimelineEditor({
           );
           const stayCut = Math.max(0, Math.min(newMaxCut, stayFrozen ?? cutTimeRef.current));
           dispatchSeek(stayCut, true);
+        } else {
+          clearPreviewSourceSeekState();
         }
         lastDragTargetRef.current = null;
       }
@@ -1267,11 +1350,69 @@ export function ProjectTimelineEditor({
         stopWindowPointerTracking();
       }
     },
-    [dispatchSeek, onUpdateScenes, onUpdateSubtitleTiming, stopWindowPointerTracking, updateDragState]
+    [
+      clearPreviewSourceSeekState,
+      dispatchSeek,
+      onUpdateScenes,
+      onUpdateSubtitleTiming,
+      stopWindowPointerTracking,
+      updateDragState,
+    ]
+  );
+
+  const handlePointerCancelAny = useCallback(
+    (e?: PointerEvent) => {
+      if (e && "pointerId" in e) {
+        activePointersRef.current.delete(e.pointerId);
+        if (activePointersRef.current.size < 2) {
+          pinchStartRef.current = null;
+        }
+      } else {
+        activePointersRef.current.clear();
+        pinchStartRef.current = null;
+      }
+
+      const activeDrag = dragStateRef.current;
+      dragStateRef.current = null;
+      tappedClipRef.current = null;
+      tappedSubRef.current = null;
+      lastDragTargetRef.current = null;
+
+      if (activeDrag?.type === "scrub") {
+        liveScrubCutRef.current = null;
+        setLiveScrubCutTime(null);
+      } else if (
+        activeDrag?.type === "sub-move" ||
+        activeDrag?.type === "sub-trim-start" ||
+        activeDrag?.type === "sub-trim-end"
+      ) {
+        dragSubPreviewRef.current = null;
+        setDragSubPreview(null);
+        setFrozenTrackTime(null);
+      } else if (
+        activeDrag?.type === "trim-start" ||
+        activeDrag?.type === "trim-end" ||
+        trimPreviewRef.current !== null ||
+        isPreviewOverrideActiveRef.current
+      ) {
+        trimPreviewRef.current = null;
+        setTrimPreview(null);
+        frozenTrackTimeRef.current = null;
+        setFrozenTrackTime(null);
+        clearPreviewSourceSeekState();
+      }
+
+      setDragBadge(null);
+      if (activePointersRef.current.size === 0) {
+        stopWindowPointerTracking();
+      }
+    },
+    [clearPreviewSourceSeekState, stopWindowPointerTracking]
   );
 
   pointerMoveHandlerRef.current = handlePointerMoveViewport;
   pointerUpHandlerRef.current = handlePointerUpAny;
+  pointerCancelHandlerRef.current = handlePointerCancelAny;
 
   // Two-finger trackpad pinch-to-zoom (ctrlKey + wheel) & horizontal/vertical scroll scrub
   const wheelStateRef = useRef({ pxPerSec, dispatchSeek, isPlaying, onPause });
