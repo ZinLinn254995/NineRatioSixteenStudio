@@ -28,6 +28,8 @@ interface LocalVideoTimelineEditorProps {
   onRemoveScene: (id: string) => void;
   onReplaceScenes?: (scenes: SceneSelection[]) => void;
   onDetectedDuration?: (dur: number) => void;
+  onUndo?: () => void;
+  canUndo?: boolean;
   isTabActive?: boolean;
   mobileStageTarget?: HTMLElement | null;
 }
@@ -105,6 +107,8 @@ export function LocalVideoTimelineEditor({
   onRemoveScene,
   onReplaceScenes,
   onDetectedDuration,
+  onUndo,
+  canUndo = false,
   isTabActive = true,
   mobileStageTarget = null,
 }: LocalVideoTimelineEditorProps) {
@@ -136,7 +140,6 @@ export function LocalVideoTimelineEditor({
   const [frozenTrackTime, setFrozenTrackTime] = useState<number | null>(null);
   const [dragBadge, setDragBadge] = useState<{ label: string; sec: number } | null>(null);
   const [thumbnails, setThumbnails] = useState<string[]>([]);
-  const [undoStack, setUndoStack] = useState<SceneSelection[][]>([]);
   const [playError, setPlayError] = useState<string | null>(null);
 
   const dragStateRef = useRef<DragMode | null>(null);
@@ -161,7 +164,6 @@ export function LocalVideoTimelineEditor({
   const scenesRef = useRef(scenes);
   scenesRef.current = scenes;
   const lastDragTargetRef = useRef<{ cutTime: number; sourceSec: number } | null>(null);
-  const trimPreUndoRef = useRef<SceneSelection[] | null>(null);
   const pendingSeekSecRef = useRef<number | null>(null);
   const pendingPlayRef = useRef<boolean>(false);
   const playAttemptPendingRef = useRef<boolean>(false);
@@ -239,7 +241,6 @@ export function LocalVideoTimelineEditor({
     setActiveSceneId(null);
     wheelTargetCutRef.current = null;
     setPlayError(null);
-    setUndoStack([]);
     pendingSeekSecRef.current = null;
     pendingPlayRef.current = false;
     playAttemptPendingRef.current = false;
@@ -265,7 +266,6 @@ export function LocalVideoTimelineEditor({
       activePointersRef.current.clear();
       pinchStartRef.current = null;
       tappedClipRef.current = null;
-      trimPreUndoRef.current = null;
       trimPreviewRef.current = null;
       setTrimPreview(null);
       frozenTrackTimeRef.current = null;
@@ -751,10 +751,7 @@ export function LocalVideoTimelineEditor({
   }, []);
 
   const applyScenesMutation = useCallback(
-    (nextScenes: SceneSelection[], recordUndo = true) => {
-      if (recordUndo) {
-        setUndoStack((prev) => [...prev.slice(-29), scenes.map((s) => ({ ...s }))]);
-      }
+    (nextScenes: SceneSelection[]) => {
       if (onReplaceScenes) {
         onReplaceScenes(nextScenes);
       } else {
@@ -817,7 +814,7 @@ export function LocalVideoTimelineEditor({
       rightClip,
       ...scenes.slice(segmentAtPlayhead.index + 1),
     ];
-    applyScenesMutation(nextScenes, true);
+    applyScenesMutation(nextScenes);
     setActiveSceneId(rightClip.id);
   }, [segmentAtPlayhead, canSplitAtPlayhead, cutTime, scenes, applyScenesMutation]);
 
@@ -843,7 +840,7 @@ export function LocalVideoTimelineEditor({
 
       const nextScenes = scenes.filter((s) => s.id !== segToDelete.scene.id);
       if (onReplaceScenes) {
-        applyScenesMutation(nextScenes, true);
+        applyScenesMutation(nextScenes);
       } else {
         onRemoveScene(segToDelete.scene.id);
       }
@@ -878,17 +875,12 @@ export function LocalVideoTimelineEditor({
   );
 
   const handleUndo = useCallback(() => {
-    if (undoStack.length === 0) return;
+    if (!canUndo || !onUndo) return;
     if (videoRef.current && !videoRef.current.paused) {
       videoRef.current.pause();
     }
-    const prev = undoStack[undoStack.length - 1];
-    setUndoStack((s) => s.slice(0, -1));
-    if (onReplaceScenes) {
-      onReplaceScenes(prev);
-    }
-    setActiveSceneId((cur) => (cur && prev.some((s) => s.id === cur) ? cur : null));
-  }, [undoStack, onReplaceScenes]);
+    onUndo();
+  }, [canUndo, onUndo]);
 
   const handleRestoreFullVideo = useCallback(() => {
     if (videoRef.current && !videoRef.current.paused) {
@@ -899,10 +891,10 @@ export function LocalVideoTimelineEditor({
       startSec: 0,
       endSec: roundTenth(sourceDuration),
     };
-    applyScenesMutation([fullClip], scenes.length > 0);
+    applyScenesMutation([fullClip]);
     setActiveSceneId(null);
     seekCutTo(0, true);
-  }, [sourceDuration, applyScenesMutation, scenes.length, seekCutTo]);
+  }, [sourceDuration, applyScenesMutation, seekCutTo]);
 
   // Keyboard shortcuts: Space to Play/Pause, Delete/Backspace to remove selected clip
   useEffect(() => {
@@ -1062,7 +1054,6 @@ export function LocalVideoTimelineEditor({
     }
     const freezeCut = cutTimeRef.current;
     frozenTrackTimeRef.current = freezeCut;
-    trimPreUndoRef.current = scenes.map((s) => ({ ...s }));
     setActiveSceneId(seg.scene.id);
     setFrozenTrackTime(freezeCut);
     const initTrim = {
@@ -1243,12 +1234,9 @@ export function LocalVideoTimelineEditor({
 
         if (
           preview &&
-          trimPreUndoRef.current &&
           (Math.abs(preview.nextStartSec - preview.origStartSec) >= 0.01 ||
             Math.abs(preview.nextEndSec - preview.origEndSec) >= 0.01)
         ) {
-          const snapshot = trimPreUndoRef.current;
-          setUndoStack((prev) => [...prev.slice(-29), snapshot]);
           const nextScenes = scenesRef.current.map((sc) =>
             sc.id === preview.sceneId
               ? { ...sc, startSec: preview.nextStartSec, endSec: preview.nextEndSec }
@@ -1289,7 +1277,6 @@ export function LocalVideoTimelineEditor({
             );
           }
         }
-        trimPreUndoRef.current = null;
         lastDragTargetRef.current = null;
       }
       setDragBadge(null);
@@ -1523,7 +1510,7 @@ export function LocalVideoTimelineEditor({
               e.currentTarget.blur();
               handleUndo();
             }}
-            disabled={undoStack.length === 0}
+            disabled={!canUndo || !onUndo}
             title="Undo last edit"
             aria-label="Undo last edit"
             className="h-8 px-2 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"

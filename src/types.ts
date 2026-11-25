@@ -53,6 +53,7 @@ export interface SubtitleWord {
 export interface SubtitleItem {
   id: string;
   sceneIndex: number;
+  sceneId?: string;
   startTime: number;
   endTime: number;
   sourceStartSec: number;
@@ -83,6 +84,7 @@ export interface SpeechRegion {
 }
 
 export interface VideoProject {
+  isDraft?: boolean;
   sourceType: "youtube" | "local";
   videoId?: string;
   localUrl?: string;

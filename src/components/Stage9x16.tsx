@@ -1,10 +1,12 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 const useIsomorphicLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
-import { Pause, Play, Volume2, VolumeX } from "lucide-react";
+import { Pause, Play, Upload, Volume2, VolumeX } from "lucide-react";
 import type { SubtitleItem, VideoEditSettings, VideoProject, VoiceSettings } from "../types";
 import { YouTubeScenePlayer, type YouTubeScenePlayerHandle } from "./YouTubeScenePlayer";
 import { getEffectivePlaybackSpeed } from "../utils/voicePresets";
 import { findActiveSubtitle, getScrollAnchorSubtitle } from "../utils/projectTimeline";
+import { hasGeneratedProject, hasProjectMedia } from "../utils/projectState";
+import { UNIFIED_CUT_FLOW } from "../config/flags";
 import {
   clampAndSnapVideoHeightPct,
   isStageCleanClick,
@@ -110,6 +112,8 @@ interface Stage9x16Props {
   previewScale?: number;
   onChangePreviewScale?: (scale: number) => void;
   onChangeVideoHeightPct?: (pct: number) => void;
+  onUploadVideo?: (file: File) => void;
+  onDetectedDuration?: (dur: number) => void;
 }
 
 function formatSec(sec: number): string {
@@ -143,8 +147,14 @@ export function Stage9x16({
   previewScale = DEFAULT_STAGE_PREVIEW_SCALE,
   onChangePreviewScale,
   onChangeVideoHeightPct,
+  onUploadVideo,
+  onDetectedDuration,
 }: Stage9x16Props) {
   const playerRef = useRef<YouTubeScenePlayerHandle | null>(null);
+  const uploadInputRef = useRef<HTMLInputElement | null>(null);
+  const [isUploadDragOver, setIsUploadDragOver] = useState(false);
+  const onDetectedDurationRef = useRef(onDetectedDuration);
+  onDetectedDurationRef.current = onDetectedDuration;
   const stageOuterRef = useRef<HTMLDivElement | null>(null);
   const stageFrameRef = useRef<HTMLDivElement | null>(null);
   const listContainerRef = useRef<HTMLDivElement | null>(null);
@@ -237,16 +247,58 @@ export function Stage9x16({
     return () => ro.disconnect();
   }, []);
 
+  const activeProject = (
+    UNIFIED_CUT_FLOW ? hasProjectMedia(project) : hasGeneratedProject(project)
+  )
+    ? project
+    : null;
+
+  useEffect(() => {
+    if (
+      !UNIFIED_CUT_FLOW ||
+      !activeProject ||
+      activeProject.sourceType !== "local" ||
+      !activeProject.localUrl
+    ) {
+      return;
+    }
+    const frameEl = stageFrameRef.current;
+    if (!frameEl) return;
+
+    const reportFromVideo = (vidEl: HTMLVideoElement | null | undefined) => {
+      if (!vidEl) return;
+      const d = vidEl.duration;
+      if (Number.isFinite(d) && d > 0) {
+        onDetectedDurationRef.current?.(Math.max(0.5, Math.round(d * 10) / 10));
+      }
+    };
+
+    const existingVideo = frameEl.querySelector("video");
+    if (existingVideo && existingVideo.readyState >= 1) {
+      reportFromVideo(existingVideo);
+    }
+
+    const onLoadedMetadataCapture = (ev: Event) => {
+      if (ev.target instanceof HTMLVideoElement) {
+        reportFromVideo(ev.target);
+      }
+    };
+    frameEl.addEventListener("loadedmetadata", onLoadedMetadataCapture, true);
+    return () => {
+      frameEl.removeEventListener("loadedmetadata", onLoadedMetadataCapture, true);
+    };
+  }, [activeProject?.sourceType, activeProject?.localUrl]);
   const safeCutTime = typeof cutTime === "number" && Number.isFinite(cutTime) ? Math.max(0, cutTime) : 0;
   const totalDuration =
-    typeof project?.targetDurationSec === "number" &&
-    Number.isFinite(project.targetDurationSec) &&
-    project.targetDurationSec > 0
-      ? project.targetDurationSec
+    activeProject &&
+    typeof activeProject.targetDurationSec === "number" &&
+    Number.isFinite(activeProject.targetDurationSec) &&
+    activeProject.targetDurationSec > 0
+      ? activeProject.targetDurationSec
       : 90;
-  const rawEffectiveSpeed = project
+  const rawEffectiveSpeed = activeProject
     ? getEffectivePlaybackSpeed(
-        project.sourceType,
+        activeProject.sourceType,
         editSettings.playbackSpeed,
         voiceSettings.speed
       )
@@ -256,8 +308,13 @@ export function Stage9x16({
       ? rawEffectiveSpeed
       : 1;
   const displayTotalDuration = totalDuration / effectiveSpeed;
-  const leadSec = project ? (project.sourceType === "youtube" ? 0.22 : 0.12) : 0;
-  const subtitles = Array.isArray(project?.subtitles) ? project.subtitles : [];
+  const leadSec = activeProject
+    ? activeProject.sourceType === "youtube"
+      ? 0.22
+      : 0.12
+    : 0;
+  const subtitles =
+    hasGeneratedProject(project) && Array.isArray(project.subtitles) ? project.subtitles : [];
 
   const [subClockTime, setSubClockTime] = useState<number>(safeCutTime);
   const wordKeyRef = useRef<string>("");
@@ -276,8 +333,8 @@ export function Stage9x16({
   leadSecRef.current = leadSec;
 
   // Keep local Stage clock and DOM scrubber synced whenever paused, reset, seeked, or speed changes
-  const sceneCount = project?.scenes.length ?? 0;
-  const hasTransportBar = Boolean(project && project.scenes.length > 0);
+  const sceneCount = activeProject ? activeProject.scenes.length : 0;
+  const hasTransportBar = Boolean(activeProject && activeProject.scenes.length > 0);
   useIsomorphicLayoutEffect(() => {
     const syncTime =
       isPlaying && getLiveCutTime
@@ -373,7 +430,7 @@ export function Stage9x16({
   const activeTimeForDisplay =
     typeof rawActiveTime === "number" && Number.isFinite(rawActiveTime) ? Math.max(0, rawActiveTime) : 0;
   const highlightTime =
-    isPlaying && project
+    isPlaying && hasGeneratedProject(project)
       ? Math.min(totalDuration, activeTimeForDisplay + leadSec)
       : activeTimeForDisplay;
 
@@ -635,7 +692,7 @@ export function Stage9x16({
   }, []);
 
   // Match exportVideo.ts 720x1280 split geometry verbatim
-  const hasSubtitles = Boolean(project && project.subtitles.length > 0);
+  const hasSubtitles = Boolean(hasGeneratedProject(project) && project.subtitles.length > 0);
   const activeVideoHeightPct = dragVideoHeightPct ?? (editSettings.videoHeightPct || 35);
   const clampedHeightPct = Math.max(26, Math.min(52, activeVideoHeightPct));
   const exportTopVideoH = hasSubtitles ? Math.round((1280 * clampedHeightPct) / 100) : 1280;
@@ -778,20 +835,82 @@ export function Stage9x16({
           aria-hidden="true"
           className="pointer-events-none absolute inset-0 rounded-lg border border-[#d2dcf0] dark:border-[#21284c] z-20"
         />
-        {!project ? (
-          <div
-            className={`flex-1 flex flex-col items-center justify-center text-center ${
-              compactMobile ? "p-4 lg:p-8" : "p-8"
-            }`}
-          >
-            <div className="w-10 h-10 lg:w-12 lg:h-12 rounded-lg border border-[#d2dcf0] dark:border-[#21284c] bg-[#e7ecf8] dark:bg-[#141933] flex items-center justify-center mb-2.5 lg:mb-3 text-teal-700 dark:text-teal-400">
-              <Play className="w-4 h-4 lg:w-5 lg:h-5" />
+        {!activeProject ? (
+          UNIFIED_CUT_FLOW && onUploadVideo ? (
+            <div
+              className={`flex-1 flex flex-col items-center justify-center ${
+                compactMobile ? "p-3 lg:p-5" : "p-5"
+              }`}
+            >
+              <input
+                ref={uploadInputRef}
+                type="file"
+                accept="video/*"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) onUploadVideo(file);
+                  e.target.value = "";
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => uploadInputRef.current?.click()}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  if (!isUploadDragOver) setIsUploadDragOver(true);
+                }}
+                onDragLeave={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setIsUploadDragOver(false);
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setIsUploadDragOver(false);
+                  const file = e.dataTransfer?.files?.[0];
+                  if (
+                    file &&
+                    (file.type.startsWith("video/") ||
+                      /\.(mp4|mov|m4v|webm|mkv|avi|3gp)$/i.test(file.name))
+                  ) {
+                    onUploadVideo(file);
+                  }
+                }}
+                className={`group w-full h-full rounded-lg border border-dashed flex flex-col items-center justify-center gap-2 text-center cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-700 dark:focus-visible:ring-teal-400 p-4 ${
+                  isUploadDragOver
+                    ? "border-teal-700 dark:border-teal-400 bg-teal-50/70 dark:bg-teal-950/35"
+                    : "border-[#bcc9e6] dark:border-[#2e3644] bg-[#e7ecf8]/75 dark:bg-[#0d1015] hover:border-teal-700/60 dark:hover:border-teal-400/50 hover:bg-[#e6eaf0]/85 dark:hover:bg-[#12161d]"
+                }`}
+              >
+                <div className="w-10 h-10 lg:w-12 lg:h-12 rounded-lg border border-[#d2dcf0] dark:border-[#21284c] bg-white/85 dark:bg-[#141933] flex items-center justify-center text-teal-700 dark:text-teal-400 transition-transform duration-150 group-hover:-translate-y-0.5 shrink-0">
+                  <Upload className="w-4 h-4 lg:w-5 lg:h-5" />
+                </div>
+                <span className="font-display text-xs lg:text-sm font-semibold text-[#0c1026] dark:text-[#f3f5fc]">
+                  Upload video
+                </span>
+                <span className="text-[11px] text-[#4d597d] dark:text-[#919ec4]">
+                  Click or drop video file
+                </span>
+              </button>
             </div>
-            <p className="font-display text-xs lg:text-sm font-semibold text-[#0c1026] dark:text-[#f3f5fc]">
-              9:16 Monitor
-            </p>
-          </div>
-        ) : project.scenes.length === 0 ? (
+          ) : (
+            <div
+              className={`flex-1 flex flex-col items-center justify-center text-center ${
+                compactMobile ? "p-4 lg:p-8" : "p-8"
+              }`}
+            >
+              <div className="w-10 h-10 lg:w-12 lg:h-12 rounded-lg border border-[#d2dcf0] dark:border-[#21284c] bg-[#e7ecf8] dark:bg-[#141933] flex items-center justify-center mb-2.5 lg:mb-3 text-teal-700 dark:text-teal-400">
+                <Play className="w-4 h-4 lg:w-5 lg:h-5" />
+              </div>
+              <p className="font-display text-xs lg:text-sm font-semibold text-[#0c1026] dark:text-[#f3f5fc]">
+                9:16 Monitor
+              </p>
+            </div>
+          )
+        ) : activeProject.scenes.length === 0 ? (
           <div
             className={`flex-1 flex flex-col items-center justify-center text-center ${
               compactMobile ? "p-4 lg:p-8" : "p-8"
@@ -819,10 +938,10 @@ export function Stage9x16({
               <AppErrorBoundary fallbackLabel="Video preview error" compact>
                 <YouTubeScenePlayer
                   ref={playerRef}
-                  sourceType={project.sourceType}
-                  videoId={project.videoId}
-                  localUrl={project.localUrl}
-                  scenes={project.scenes}
+                  sourceType={activeProject.sourceType}
+                  videoId={activeProject.videoId}
+                  localUrl={activeProject.localUrl}
+                  scenes={activeProject.scenes}
                   cutTime={subscribeCutTime ? 0 : safeCutTime}
                   getLiveCutTime={getLiveCutTime}
                   seekNonce={seekNonce}
@@ -830,7 +949,7 @@ export function Stage9x16({
                   muted={muted}
                   voiceSettings={voiceSettings}
                   editSettings={editSettings}
-                  fallbackThumbnail={project.keyframeUrls[0]}
+                  fallbackThumbnail={activeProject.keyframeUrls[0]}
                   onTimeUpdate={onTimeUpdate}
                   onPlayingChange={onPlayingChange}
                   onEnded={onEnded}
@@ -1104,7 +1223,7 @@ export function Stage9x16({
                     }}
                     className={`absolute top-0 left-0 flex flex-col overflow-y-auto overflow-x-hidden no-scrollbar ${containerThemeClass}`}
                   >
-                    {project.subtitles.map((sub, subIdx) => {
+                    {subtitles.map((sub, subIdx) => {
                       const isActive = activeSub?.id === sub.id;
                       const isStageSelected = selectedSubtitleId === sub.id;
                       const localElapsed = Math.max(0, highlightTime - sub.startTime);

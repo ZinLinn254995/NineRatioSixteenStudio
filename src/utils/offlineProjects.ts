@@ -364,21 +364,28 @@ export async function listSavedProjects(): Promise<SavedProjectRecord[]> {
     const items = await reqToPromise<SavedProjectRecord[]>(store.getAll());
     await txDone(tx);
     return items
-      .map((item) => ({
-        ...item,
-        scenes: Array.isArray(item.scenes) ? item.scenes : [],
-        selectedScenes: Array.isArray(item.selectedScenes) ? item.selectedScenes : [],
-        subtitles: Array.isArray(item.subtitles)
-          ? item.subtitles.map((sub) => ({
-              ...sub,
-              isManuallyEdited: Boolean(sub.isManuallyEdited),
-              words: Array.isArray(sub.words) ? sub.words : [],
-            }))
-          : [],
-        keyframeUrls: Array.isArray(item.keyframeUrls) ? item.keyframeUrls : [],
-        voiceSettings: sanitizeVoiceSettings(item.voiceSettings),
-        editSettings: sanitizeEditSettings(item.editSettings),
-      }))
+      .map((item) => {
+        const scenes = Array.isArray(item.scenes) ? item.scenes : [];
+        return {
+          ...item,
+          scenes,
+          selectedScenes: Array.isArray(item.selectedScenes) ? item.selectedScenes : [],
+          subtitles: Array.isArray(item.subtitles)
+            ? item.subtitles.map((sub) => ({
+                ...sub,
+                sceneId:
+                  typeof sub.sceneId === "string" && sub.sceneId.trim()
+                    ? sub.sceneId
+                    : scenes[sub.sceneIndex]?.id,
+                isManuallyEdited: Boolean(sub.isManuallyEdited),
+                words: Array.isArray(sub.words) ? sub.words : [],
+              }))
+            : [],
+          keyframeUrls: Array.isArray(item.keyframeUrls) ? item.keyframeUrls : [],
+          voiceSettings: sanitizeVoiceSettings(item.voiceSettings),
+          editSettings: sanitizeEditSettings(item.editSettings),
+        };
+      })
       .sort((a, b) => b.updatedAt - a.updatedAt);
   } finally {
     db.close();
@@ -875,10 +882,15 @@ export async function importProjectFromJsonText(
     const rawSceneIndex = Number(s.sceneIndex);
     const sceneIndex =
       Number.isInteger(rawSceneIndex) && rawSceneIndex >= 0 ? rawSceneIndex : 0;
+    const sceneId =
+      typeof s.sceneId === "string" && s.sceneId.trim()
+        ? s.sceneId
+        : validatedScenes[sceneIndex]?.id;
 
     return {
       id: typeof s.id === "string" && s.id.trim() ? s.id : `sub-${idx + 1}`,
       sceneIndex,
+      ...(sceneId ? { sceneId } : {}),
       startTime: Number(startTime.toFixed(2)),
       endTime: Number(endTime.toFixed(2)),
       sourceStartSec: Number(sourceStartSec.toFixed(2)),

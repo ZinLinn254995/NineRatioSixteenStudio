@@ -59,6 +59,8 @@ import type {
   YouTubeVideo,
 } from "../types";
 import { ScenePicker } from "./ScenePicker";
+import { PreGenerateBar } from "./PreGenerateBar";
+import { UploadHeader } from "./UploadHeader";
 import { YouTubePreviewPanel } from "./YouTubePreviewPanel";
 import { VideoEditPanel, getVideoEditDirtyMap } from "./VideoEditPanel";
 import { ProjectTimelineEditor } from "./ProjectTimelineEditor";
@@ -78,6 +80,8 @@ import {
 } from "./SubtitleListViewport";
 import { DEFAULT_VOICE_SETTINGS, getEffectivePlaybackSpeed } from "../utils/voicePresets";
 import { findActiveSubtitle, getSceneDurationSec } from "../utils/projectTimeline";
+import { hasGeneratedProject, hasProjectMedia } from "../utils/projectState";
+import { UNIFIED_CUT_FLOW } from "../config/flags";
 import {
   computeSubtitleQualityMap,
   findUnmatchedSpeechGaps,
@@ -95,6 +99,8 @@ import {
   downloadTextFile,
   makeSafeFileSlug,
 } from "../utils/exportSubtitles";
+
+const NOOP_RESTORE_SNAPSHOT = () => {};
 
 export type WorkspaceTab = "youtube" | "studio" | "projects";
 
@@ -155,7 +161,7 @@ interface WorkspaceSidebarProps {
   onPause: () => void;
   onPlayFromTime: (sec: number) => void;
   onUpdateProjectScenes: (nextScenes: SpeakingScene[]) => void;
-  onRestoreProjectSnapshot: (scenes: SpeakingScene[], subtitles?: SubtitleItem[]) => void;
+  onRestoreProjectSnapshot?: (scenes: SpeakingScene[], subtitles?: SubtitleItem[]) => void;
   onResetTimeline: () => void;
   onUpdateSubtitle: (
     id: string,
@@ -183,6 +189,10 @@ interface WorkspaceSidebarProps {
   onShiftAllSubtitles: (deltaSec: number) => void;
   loopingSubId?: string | null;
   onToggleLoopSubtitle: (id: string) => void;
+  canUndo?: boolean;
+  canRedo?: boolean;
+  onUndo?: () => void;
+  onRedo?: () => void;
   canUndoSubtitles?: boolean;
   canRedoSubtitles?: boolean;
   onUndoSubtitles?: () => void;
@@ -347,6 +357,10 @@ export function WorkspaceSidebar({
   onShiftAllSubtitles,
   loopingSubId = null,
   onToggleLoopSubtitle,
+  canUndo: canUndoProp,
+  canRedo: canRedoProp,
+  onUndo: onUndoProp,
+  onRedo: onRedoProp,
   canUndoSubtitles = false,
   canRedoSubtitles = false,
   onUndoSubtitles,
@@ -785,7 +799,7 @@ export function WorkspaceSidebar({
       !isWorkspaceVisible ||
       activeTab !== "studio" ||
       studioSection !== "captions" ||
-      !project ||
+      !hasGeneratedProject(project) ||
       captionTab !== "script"
     ) {
       return;
@@ -1012,7 +1026,7 @@ export function WorkspaceSidebar({
   };
 
   const jumpToActiveSubtitle = () => {
-    if (!project || project.subtitles.length === 0) return;
+    if (!hasGeneratedProject(project) || project.subtitles.length === 0) return;
     const target =
       findActiveSubtitle(project.subtitles, cutTime) ||
       project.subtitles.find((s) => s.startTime >= cutTime) ||
@@ -1030,7 +1044,7 @@ export function WorkspaceSidebar({
   };
 
   const openAddSubtitleForm = () => {
-    if (!project) return;
+    if (!hasGeneratedProject(project)) return;
     const maxDur = Math.max(0.5, project.targetDurationSec || 10);
     const suggested = suggestTranscribeRange(
       project.subtitles,
@@ -1094,13 +1108,13 @@ export function WorkspaceSidebar({
       id: "clips",
       label: "Upload & Cut",
       icon: Upload,
-      count: !project && selectedScenes.length > 0 ? selectedScenes.length : undefined,
+      count: !hasGeneratedProject(project) && selectedScenes.length > 0 ? selectedScenes.length : undefined,
     },
     {
       id: "captions",
       label: "Captions",
       icon: Captions,
-      count: project?.subtitles.length,
+      count: hasGeneratedProject(project) ? project.subtitles.length : undefined,
     },
     ...(showMobileTimelineTab
       ? [{ id: "timeline" as const, label: "Timeline", icon: Scissors, dirty: timelineDirty }]
@@ -1119,21 +1133,23 @@ export function WorkspaceSidebar({
     },
   ];
 
-  const hasStudioVideo = Boolean(localMedia || project);
+  const hasStudioVideo = Boolean(localMedia || hasProjectMedia(project));
   const isStudioView = activeTab === "studio";
 
   const rawTargetDuration =
-    project && typeof project.targetDurationSec === "number" && Number.isFinite(project.targetDurationSec)
+    hasGeneratedProject(project) &&
+    typeof project.targetDurationSec === "number" &&
+    Number.isFinite(project.targetDurationSec)
       ? Math.max(0, project.targetDurationSec)
       : 0;
-  const rawHeaderSpeed = project
+  const rawHeaderSpeed = hasGeneratedProject(project)
     ? getEffectivePlaybackSpeed(
         project.sourceType,
         editSettings.playbackSpeed,
         voiceSettings.speed
       )
     : 1;
-  const studioHeaderDuration = project
+  const studioHeaderDuration = hasGeneratedProject(project)
     ? Math.round(rawTargetDuration / (rawHeaderSpeed > 0 ? rawHeaderSpeed : 1))
     : 0;
 
@@ -1152,7 +1168,7 @@ export function WorkspaceSidebar({
           {inlineStage && (
             <div
               className={
-                isMobileStudio && studioSection === "clips"
+                !UNIFIED_CUT_FLOW && isMobileStudio && studioSection === "clips"
                   ? "hidden"
                   : "pt-2.5 w-full flex justify-center"
               }
@@ -1160,7 +1176,7 @@ export function WorkspaceSidebar({
               {inlineStage}
             </div>
           )}
-          {isMobileStudio && (
+          {!UNIFIED_CUT_FLOW && isMobileStudio && (
             <div
               className={
                 studioSection === "clips"
@@ -1670,7 +1686,7 @@ export function WorkspaceSidebar({
                   </button>
                 )}
 
-              {project && (
+              {hasGeneratedProject(project) && (
                 <span className="text-[11px] text-[#4d597d] dark:text-[#919ec4] font-mono-tabular whitespace-nowrap">
                   {`${project.scenes.length} · ${studioHeaderDuration}s`}
                 </span>
@@ -1681,7 +1697,7 @@ export function WorkspaceSidebar({
           {/* Flat Edge-to-Edge Studio Body */}
           <div
             className={
-              studioSection === "captions" && project && captionTab === "script"
+              studioSection === "captions" && hasGeneratedProject(project) && captionTab === "script"
                 ? "flex-1 min-h-0 flex flex-col overflow-hidden"
                 : "flex-1 overflow-y-auto overscroll-y-contain studio-scrollbar min-h-0"
             }
@@ -1770,7 +1786,84 @@ export function WorkspaceSidebar({
               );
             })()}
 
-            {localMedia ? (
+            {UNIFIED_CUT_FLOW ? (
+              studioSection === "clips" && (
+                <div className="px-3.5 py-3 flex flex-col gap-4 pb-6">
+                  {localMedia ? (
+                    <>
+                      <UploadHeader
+                        title={localMedia.title}
+                        durationSec={localMedia.durationSec}
+                        onClearVideo={onClearLocalVideo}
+                      />
+                      <PreGenerateBar
+                        scenes={selectedScenes}
+                        isProcessing={isProcessing}
+                        generationProgress={generationProgress}
+                        translationTone={editSettings.translationTone}
+                        onChangeTranslationTone={(tone) =>
+                          onChangeEditSettings({ ...editSettings, translationTone: tone })
+                        }
+                        onGenerate={onGenerateSubtitles}
+                        regeneratingClipId={regeneratingClipId}
+                      />
+                      {isMobileStudio && (
+                        <ProjectTimelineEditor
+                          project={project}
+                          cutTime={cutTime}
+                          subscribeCutTime={subscribeCutTime}
+                          isPlaying={isPlaying}
+                          isActive={isWorkspaceVisible && isStudioView && studioSection === "clips"}
+                          onTogglePlay={onTogglePlay}
+                          onPause={onPause}
+                          onSeek={onSeek}
+                          onPlayFromTime={onPlayFromTime}
+                          onUpdateScenes={onUpdateProjectScenes}
+                          onUpdateSubtitleTiming={onUpdateSubtitleTiming}
+                          onShiftAllSubtitles={onShiftAllSubtitles}
+                          onUndo={onUndoProp ?? onUndoSubtitles}
+                          onRedo={onRedoProp ?? onRedoSubtitles}
+                          canUndo={canUndoProp ?? canUndoSubtitles}
+                          canRedo={canRedoProp ?? canRedoSubtitles}
+                          onResetTimeline={onResetTimeline}
+                          onGoToScenes={() => onChangeStudioSection("clips")}
+                          cutSpeechRegions={cutSpeechRegions}
+                          onTranscribeRange={onTranscribeRange}
+                          transcribingRange={transcribingRange}
+                          clipSubtitleCounts={clipSubtitleCounts}
+                          regeneratingClipId={regeneratingClipId}
+                          regeneratingClipPercent={regeneratingClipPercent}
+                          onGenerateSingleClip={onGenerateSingleClip}
+                          isBusy={isProcessing}
+                        />
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <div className="rounded-lg border border-dashed border-[#bcc9e6] dark:border-[#21284c] bg-[#e7ecf8]/50 dark:bg-[#141933]/40 p-4 text-center space-y-1">
+                        <p className="font-display text-xs font-semibold text-[#0c1026] dark:text-[#f3f5fc]">
+                          Upload a local video on the 9:16 Stage
+                        </p>
+                        <p className="text-[11px] text-[#4d597d] dark:text-[#919ec4]">
+                          Click or drop a video file on the 9:16 preview to cut clips and generate subtitles.
+                        </p>
+                      </div>
+                      <PreGenerateBar
+                        scenes={[]}
+                        isProcessing={isProcessing}
+                        generationProgress={generationProgress}
+                        translationTone={editSettings.translationTone}
+                        onChangeTranslationTone={(tone) =>
+                          onChangeEditSettings({ ...editSettings, translationTone: tone })
+                        }
+                        onGenerate={onGenerateSubtitles}
+                        regeneratingClipId={regeneratingClipId}
+                      />
+                    </>
+                  )}
+                </div>
+              )
+            ) : localMedia ? (
               <div className={studioSection === "clips" ? "px-3.5 py-3" : "hidden"}>
                 <ScenePicker
                   media={localMedia}
@@ -1794,6 +1887,8 @@ export function WorkspaceSidebar({
                   onGenerateSingleClip={onGenerateSingleClip}
                   onUploadVideo={onUploadLocalVideo}
                   onClearVideo={onClearLocalVideo}
+                  onUndo={onUndoProp ?? onUndoSubtitles}
+                  canUndo={canUndoProp ?? canUndoSubtitles}
                 />
               </div>
             ) : (
@@ -1821,12 +1916,14 @@ export function WorkspaceSidebar({
                     onGenerateSingleClip={onGenerateSingleClip}
                     onUploadVideo={onUploadLocalVideo}
                     onClearVideo={onClearLocalVideo}
+                    onUndo={onUndoProp ?? onUndoSubtitles}
+                    canUndo={canUndoProp ?? canUndoSubtitles}
                   />
                 </div>
               )
             )}
 
-            {studioSection === "captions" && !project && (
+            {studioSection === "captions" && !hasGeneratedProject(project) && (
               <div className="p-6 text-center space-y-3">
                 <div className="w-9 h-9 rounded-md bg-teal-50 dark:bg-teal-950/60 border border-teal-200/70 dark:border-teal-500/25 text-teal-700 dark:text-teal-400 flex items-center justify-center mx-auto">
                   <Captions className="w-4 h-4" />
@@ -1849,7 +1946,7 @@ export function WorkspaceSidebar({
               </div>
             )}
 
-            {studioSection === "captions" && project && (() => {
+            {studioSection === "captions" && hasGeneratedProject(project) && (() => {
               const effectiveSpd = getEffectivePlaybackSpeed(
                 project.sourceType,
                 editSettings.playbackSpeed,
@@ -1916,10 +2013,10 @@ export function WorkspaceSidebar({
                       <div className="inline-flex items-center border border-[#d2dcf0] dark:border-[#21284c] rounded-sm overflow-hidden bg-white dark:bg-[#141933]">
                         <button
                           type="button"
-                          disabled={!canUndoSubtitles || !onUndoSubtitles}
-                          onClick={onUndoSubtitles}
-                          title="Undo subtitle edit"
-                          aria-label="Undo subtitle edit"
+                          disabled={!(canUndoProp ?? canUndoSubtitles) || !(onUndoProp ?? onUndoSubtitles)}
+                          onClick={onUndoProp ?? onUndoSubtitles}
+                          title="Undo edit"
+                          aria-label="Undo edit"
                           className="h-7 px-2 flex items-center gap-1 text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors whitespace-nowrap"
                         >
                           <Undo2 className="w-3 h-3" />
@@ -1927,10 +2024,10 @@ export function WorkspaceSidebar({
                         </button>
                         <button
                           type="button"
-                          disabled={!canRedoSubtitles || !onRedoSubtitles}
-                          onClick={onRedoSubtitles}
-                          title="Redo subtitle edit"
-                          aria-label="Redo subtitle edit"
+                          disabled={!(canRedoProp ?? canRedoSubtitles) || !(onRedoProp ?? onRedoSubtitles)}
+                          onClick={onRedoProp ?? onRedoSubtitles}
+                          title="Redo edit"
+                          aria-label="Redo edit"
                           className="h-7 px-2 flex items-center gap-1 text-[11px] font-medium border-l border-[#d2dcf0] dark:border-[#21284c] text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors whitespace-nowrap"
                         >
                           <Redo2 className="w-3 h-3" />
@@ -4046,12 +4143,20 @@ export function WorkspaceSidebar({
                   onUpdateScenes={onUpdateProjectScenes}
                   onUpdateSubtitleTiming={onUpdateSubtitleTiming}
                   onShiftAllSubtitles={onShiftAllSubtitles}
-                  onRestoreSnapshot={onRestoreProjectSnapshot}
+                  onUndo={onUndoProp ?? onUndoSubtitles}
+                  onRedo={onRedoProp ?? onRedoSubtitles}
+                  canUndo={canUndoProp ?? canUndoSubtitles}
+                  canRedo={canRedoProp ?? canRedoSubtitles}
                   onResetTimeline={onResetTimeline}
                   onGoToScenes={() => onChangeStudioSection("clips")}
                   cutSpeechRegions={cutSpeechRegions}
                   onTranscribeRange={onTranscribeRange}
                   transcribingRange={transcribingRange}
+                  clipSubtitleCounts={UNIFIED_CUT_FLOW ? clipSubtitleCounts : undefined}
+                  regeneratingClipId={UNIFIED_CUT_FLOW ? regeneratingClipId : undefined}
+                  regeneratingClipPercent={UNIFIED_CUT_FLOW ? regeneratingClipPercent : undefined}
+                  onGenerateSingleClip={UNIFIED_CUT_FLOW ? onGenerateSingleClip : undefined}
+                  isBusy={UNIFIED_CUT_FLOW ? isProcessing : undefined}
                 />
               </div>
             )}
@@ -4068,13 +4173,14 @@ export function WorkspaceSidebar({
                     "local"
                   }
                   sourceDurationSec={
-                    project?.targetDurationSec ??
-                    (selectedScenes.length > 0
-                      ? selectedScenes.reduce(
-                          (acc, sc) => acc + Math.max(0, sc.endSec - sc.startSec),
-                          0
-                        )
-                      : localMedia?.durationSec ?? youtubeMedia?.durationSec)
+                    hasGeneratedProject(project)
+                      ? project.targetDurationSec
+                      : selectedScenes.length > 0
+                        ? selectedScenes.reduce(
+                            (acc, sc) => acc + Math.max(0, sc.endSec - sc.startSec),
+                            0
+                          )
+                        : localMedia?.durationSec ?? youtubeMedia?.durationSec
                   }
                   project={project}
                   cutTime={cutTime}
@@ -4092,7 +4198,7 @@ export function WorkspaceSidebar({
                   onPlayFromTime={onPlayFromTime}
                   onUpdateProjectScenes={onUpdateProjectScenes}
                   onUpdateSubtitleTiming={onUpdateSubtitleTiming}
-                  onRestoreProjectSnapshot={onRestoreProjectSnapshot}
+                  onRestoreProjectSnapshot={onRestoreProjectSnapshot ?? NOOP_RESTORE_SNAPSHOT}
                   onResetTimeline={onResetTimeline}
                   onGoToScenes={() => onChangeStudioSection("clips")}
                 />
@@ -4100,7 +4206,7 @@ export function WorkspaceSidebar({
             )}
           </div>
         </div>
-        {project && onApplyPasteTranscriptSync && (
+        {hasGeneratedProject(project) && onApplyPasteTranscriptSync && (
           <PasteTranscriptModal
             isOpen={showPasteSyncModal}
             projectTitle={project.title}

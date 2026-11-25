@@ -56,7 +56,16 @@ import {
   findActiveSubtitle,
   getSceneDurationSec,
   remapSubtitlesToScenes,
+  withSceneId,
 } from "./utils/projectTimeline";
+import { hasGeneratedProject, hasProjectMedia } from "./utils/projectState";
+import { UNIFIED_CUT_FLOW } from "./config/flags";
+import {
+  MAX_HISTORY,
+  pushCapped,
+  snapshotsEqual,
+  type ProjectSnapshot,
+} from "./utils/projectHistory";
 import {
   attachLocalVideoToSavedProject,
   deleteSavedProject,
@@ -110,7 +119,6 @@ export default function App() {
   const [timelineCollapsed, setTimelineCollapsed] = useState<boolean>(false);
   const [localMedia, setLocalMedia] = useState<ActiveMediaSource | null>(null);
   const [youtubeMedia, setYoutubeMedia] = useState<ActiveMediaSource | null>(null);
-  const [selectedScenes, setSelectedScenes] = useState<SceneSelection[]>([]);
   const [voiceSettings, setVoiceSettings] = useState<VoiceSettings>({
     ...DEFAULT_VOICE_SETTINGS,
   });
@@ -148,6 +156,14 @@ export default function App() {
   const [baselineSubRegions, setBaselineSubRegions] = useState<SpeechRegion[]>([]);
 
   const [project, setProject] = useState<VideoProject | null>(null);
+  const selectedScenes = useMemo<SceneSelection[]>(() => {
+    if (!project) return [];
+    return ensureSceneIds(project.scenes).map((sc) => ({
+      id: sc.id!,
+      startSec: sc.startSec,
+      endSec: sc.endSec,
+    }));
+  }, [project]);
   const [cutTime, setCutTime] = useState(0);
   const [seekNonce, setSeekNonce] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -255,16 +271,12 @@ export default function App() {
   } | null>(null);
   const [timelineDirty, setTimelineDirty] = useState(false);
 
-  interface SubtitleSnapshot {
-    subtitles: SubtitleItem[];
-    baselineSubtitles: SubtitleItem[] | null;
-  }
-  const [subUndoStack, setSubUndoStack] = useState<SubtitleSnapshot[]>([]);
-  const [subRedoStack, setSubRedoStack] = useState<SubtitleSnapshot[]>([]);
-  const subUndoStackRef = useRef<SubtitleSnapshot[]>([]);
-  subUndoStackRef.current = subUndoStack;
-  const subRedoStackRef = useRef<SubtitleSnapshot[]>([]);
-  subRedoStackRef.current = subRedoStack;
+  const [undoStack, setUndoStack] = useState<ProjectSnapshot[]>([]);
+  const [redoStack, setRedoStack] = useState<ProjectSnapshot[]>([]);
+  const undoStackRef = useRef<ProjectSnapshot[]>([]);
+  undoStackRef.current = undoStack;
+  const redoStackRef = useRef<ProjectSnapshot[]>([]);
+  redoStackRef.current = redoStack;
   const lastSubTypingCoalesceRef = useRef<{ key: string; at: number } | null>(null);
 
   const cloneSubtitleList = useCallback(
@@ -276,7 +288,63 @@ export default function App() {
     []
   );
 
-  const pushSubtitleUndo = useCallback(
+  const captureProjectSnapshot = useCallback(
+    (proj: VideoProject): ProjectSnapshot => ({
+      scenes: proj.scenes,
+      subtitles: proj.subtitles,
+      baselineSubtitles: timelineBaselineRef.current?.subtitles ?? null,
+      baselineScenes: timelineBaselineRef.current?.scenes ?? null,
+    }),
+    []
+  );
+
+  const applyProjectSnapshot = useCallback((snap: ProjectSnapshot) => {
+    if (timelineBaselineRef.current) {
+      timelineBaselineRef.current = {
+        scenes: snap.baselineScenes ?? timelineBaselineRef.current.scenes,
+        subtitles: snap.baselineSubtitles ?? timelineBaselineRef.current.subtitles,
+      };
+    } else if (snap.baselineScenes || snap.baselineSubtitles) {
+      timelineBaselineRef.current = {
+        scenes: snap.baselineScenes ?? [],
+        subtitles: snap.baselineSubtitles ?? [],
+      };
+    }
+
+    const baseScenes = timelineBaselineRef.current?.scenes;
+    if (!baseScenes) {
+      setTimelineDirty(false);
+    } else {
+      const dirty =
+        baseScenes.length !== snap.scenes.length ||
+        baseScenes.some(
+          (b, idx) =>
+            Math.abs(b.startSec - snap.scenes[idx].startSec) > 0.05 ||
+            Math.abs(b.endSec - snap.scenes[idx].endSec) > 0.05
+        );
+      setTimelineDirty(dirty);
+    }
+
+    setProject((prev) => {
+      if (!prev) return prev;
+      const nextTargetDurationSec =
+        prev.scenes === snap.scenes
+          ? prev.targetDurationSec
+          : Number(
+              snap.scenes
+                .reduce((acc, sc) => acc + getSceneDurationSec(sc), 0)
+                .toFixed(2)
+            );
+      return {
+        ...prev,
+        scenes: snap.scenes,
+        subtitles: snap.subtitles,
+        targetDurationSec: nextTargetDurationSec,
+      };
+    });
+  }, []);
+
+  const pushProjectUndo = useCallback(
     (coalesceKey?: string) => {
       const curProj = projectRef.current;
       if (!curProj) return;
@@ -295,67 +363,54 @@ export default function App() {
         lastSubTypingCoalesceRef.current = null;
       }
 
-      const snap: SubtitleSnapshot = {
-        subtitles: cloneSubtitleList(curProj.subtitles),
-        baselineSubtitles: timelineBaselineRef.current
-          ? cloneSubtitleList(timelineBaselineRef.current.subtitles)
-          : null,
-      };
-      setSubUndoStack((prev) => [...prev.slice(-39), snap]);
-      setSubRedoStack([]);
+      const snap = captureProjectSnapshot(curProj);
+      setUndoStack((prev) =>
+        prev.length > 0 && snapshotsEqual(prev[prev.length - 1], snap)
+          ? prev
+          : pushCapped(prev, snap, MAX_HISTORY)
+      );
+      setRedoStack([]);
     },
-    [cloneSubtitleList]
+    [captureProjectSnapshot]
   );
 
-  const handleUndoSubtitles = useCallback(() => {
+  const pushSubtitleUndo = pushProjectUndo;
+
+  const handleUndo = useCallback(() => {
     const curProj = projectRef.current;
-    const undoList = subUndoStackRef.current;
+    const undoList = undoStackRef.current;
     if (!curProj || undoList.length === 0) return;
 
     const prevSnap = undoList[undoList.length - 1];
-    const currentSnap: SubtitleSnapshot = {
-      subtitles: cloneSubtitleList(curProj.subtitles),
-      baselineSubtitles: timelineBaselineRef.current
-        ? cloneSubtitleList(timelineBaselineRef.current.subtitles)
-        : null,
-    };
+    const currentSnap = captureProjectSnapshot(curProj);
 
     lastSubTypingCoalesceRef.current = null;
-    setSubUndoStack((prev) => prev.slice(0, -1));
-    setSubRedoStack((prev) => [...prev.slice(-39), currentSnap]);
-
-    if (timelineBaselineRef.current && prevSnap.baselineSubtitles) {
-      timelineBaselineRef.current.subtitles = cloneSubtitleList(prevSnap.baselineSubtitles);
-    }
-    setProject((prev) =>
-      prev ? { ...prev, subtitles: cloneSubtitleList(prevSnap.subtitles) } : prev
+    setUndoStack((prev) => prev.slice(0, -1));
+    setRedoStack((prev) =>
+      prev.length > 0 && snapshotsEqual(prev[prev.length - 1], currentSnap)
+        ? prev
+        : pushCapped(prev, currentSnap, MAX_HISTORY)
     );
-  }, [cloneSubtitleList]);
+    applyProjectSnapshot(prevSnap);
+  }, [applyProjectSnapshot, captureProjectSnapshot]);
 
-  const handleRedoSubtitles = useCallback(() => {
+  const handleRedo = useCallback(() => {
     const curProj = projectRef.current;
-    const redoList = subRedoStackRef.current;
+    const redoList = redoStackRef.current;
     if (!curProj || redoList.length === 0) return;
 
     const nextSnap = redoList[redoList.length - 1];
-    const currentSnap: SubtitleSnapshot = {
-      subtitles: cloneSubtitleList(curProj.subtitles),
-      baselineSubtitles: timelineBaselineRef.current
-        ? cloneSubtitleList(timelineBaselineRef.current.subtitles)
-        : null,
-    };
+    const currentSnap = captureProjectSnapshot(curProj);
 
     lastSubTypingCoalesceRef.current = null;
-    setSubRedoStack((prev) => prev.slice(0, -1));
-    setSubUndoStack((prev) => [...prev.slice(-39), currentSnap]);
-
-    if (timelineBaselineRef.current && nextSnap.baselineSubtitles) {
-      timelineBaselineRef.current.subtitles = cloneSubtitleList(nextSnap.baselineSubtitles);
-    }
-    setProject((prev) =>
-      prev ? { ...prev, subtitles: cloneSubtitleList(nextSnap.subtitles) } : prev
+    setRedoStack((prev) => prev.slice(0, -1));
+    setUndoStack((prev) =>
+      prev.length > 0 && snapshotsEqual(prev[prev.length - 1], currentSnap)
+        ? prev
+        : pushCapped(prev, currentSnap, MAX_HISTORY)
     );
-  }, [cloneSubtitleList]);
+    applyProjectSnapshot(nextSnap);
+  }, [applyProjectSnapshot, captureProjectSnapshot]);
 
   const setBaselineFromProject = useCallback((proj: VideoProject | null) => {
     resyncAbortRef.current?.abort();
@@ -373,8 +428,8 @@ export default function App() {
     setRegeneratingSubIds([]);
 
     lastSubTypingCoalesceRef.current = null;
-    setSubUndoStack([]);
-    setSubRedoStack([]);
+    setUndoStack([]);
+    setRedoStack([]);
     prevSubtitlesRef.current = proj?.subtitles ?? [];
     setSelectedSubtitleId(null);
     setIsSubtitleSearchOpen(false);
@@ -457,7 +512,7 @@ export default function App() {
   }, [project?.subtitles]);
 
   useEffect(() => {
-    if (!localMedia && !project && studioSection !== "clips") {
+    if (!localMedia && !hasProjectMedia(project) && studioSection !== "clips") {
       setStudioSection("clips");
     }
   }, [localMedia, project, studioSection]);
@@ -472,7 +527,7 @@ export default function App() {
 
   useEffect(() => {
     if (isDesktop && studioSection === "timeline") {
-      setStudioSection(projectRef.current ? "captions" : "clips");
+      setStudioSection(hasGeneratedProject(projectRef.current) ? "captions" : "clips");
     }
   }, [isDesktop, studioSection]);
 
@@ -675,6 +730,50 @@ export default function App() {
     setActiveTab("youtube");
   };
 
+  const buildDraftLocalProject = useCallback(
+    (
+      media: ActiveMediaSource,
+      scenesInput: SceneSelection[],
+      overrides?: {
+        title?: string;
+        channel?: string;
+        sourceDurationSec?: number;
+        keyframeUrls?: string[];
+      }
+    ): VideoProject => {
+      const normalizedScenes: SpeakingScene[] = scenesInput.map((sc, idx) => {
+        const dur = Math.max(0.1, Number((sc.endSec - sc.startSec).toFixed(2)));
+        return {
+          id: sc.id,
+          index: idx,
+          startSec: sc.startSec,
+          endSec: sc.endSec,
+          durationSec: dur,
+          summary: `Scene ${idx + 1}`,
+        };
+      });
+      const totalDurationSec = Number(
+        normalizedScenes.reduce((acc, sc) => acc + getSceneDurationSec(sc), 0).toFixed(2)
+      );
+      return {
+        isDraft: true,
+        sourceType: "local",
+        localUrl: media.localUrl,
+        localFile: media.localFile,
+        uploadId: media.uploadId,
+        title: overrides?.title || media.title,
+        channel: overrides?.channel || media.channel,
+        sourceDurationSec: overrides?.sourceDurationSec ?? media.durationSec,
+        targetDurationSec: totalDurationSec,
+        scenes: normalizedScenes,
+        subtitles: [],
+        keyframeUrls:
+          overrides?.keyframeUrls ?? (media.thumbnail ? [media.thumbnail] : []),
+      };
+    },
+    []
+  );
+
   // Uploading a local video opens it in Watch & Scenes first without auto-generating
   const handleUploadLocalVideo = async (rawFile: File) => {
     const uploadRunId = ++activeRunIdRef.current;
@@ -685,7 +784,6 @@ export default function App() {
     setActiveSavedId(null);
     setProject(null);
     setBaselineFromProject(null);
-    setSelectedScenes([]);
 
     const resolvedMime = inferVideoMimeType(rawFile.name, rawFile.type);
     let file: File = rawFile;
@@ -740,24 +838,85 @@ export default function App() {
       return;
     }
 
-    setLocalMedia({
+    const uploadedMedia: ActiveMediaSource = {
       sourceType: "local",
       localUrl,
       localFile: file,
       title: file.name.replace(/\.[^.]+$/, ""),
       channel: "Local Video",
       durationSec,
-    });
-    setSelectedScenes([
+    };
+    const initialScenes: SceneSelection[] = [
       {
         id: `sc-${Date.now()}`,
         startSec: 0,
         endSec: durationSec,
       },
-    ]);
+    ];
+    const draftProj = buildDraftLocalProject(uploadedMedia, initialScenes);
+    setLocalMedia(uploadedMedia);
+    setProject(draftProj);
+    setBaselineFromProject(draftProj);
     setActiveTab("studio");
     setStudioSection("clips");
   };
+
+  const handleDetectedLocalDuration = useCallback((rawDur: number) => {
+    const dur = Math.max(0.5, Math.round(rawDur * 10) / 10);
+    if (!Number.isFinite(dur) || dur <= 0) return;
+
+    setLocalMedia((prev) => (prev ? { ...prev, durationSec: dur } : prev));
+
+    const curProj = projectRef.current;
+    const canAutoSyncDraftScene = Boolean(
+      UNIFIED_CUT_FLOW &&
+        curProj &&
+        curProj.sourceType === "local" &&
+        curProj.isDraft &&
+        undoStackRef.current.length === 0 &&
+        redoStackRef.current.length === 0 &&
+        curProj.scenes.length === 1 &&
+        curProj.scenes[0].startSec === 0 &&
+        Math.abs(curProj.scenes[0].endSec - (curProj.sourceDurationSec || dur)) < 0.25 &&
+        Math.abs(curProj.scenes[0].endSec - dur) > 0.05
+    );
+
+    if (canAutoSyncDraftScene && curProj) {
+      const syncedScene: SpeakingScene = {
+        ...curProj.scenes[0],
+        endSec: dur,
+        durationSec: Number(dur.toFixed(2)),
+      };
+      if (timelineBaselineRef.current) {
+        timelineBaselineRef.current = {
+          ...timelineBaselineRef.current,
+          scenes: [{ ...syncedScene }],
+        };
+      }
+      setProject((prev) => {
+        if (!prev || prev.sourceType !== "local" || !prev.isDraft || prev.scenes.length !== 1) {
+          return prev;
+        }
+        return {
+          ...prev,
+          sourceDurationSec: dur,
+          targetDurationSec: Number(dur.toFixed(2)),
+          scenes: [
+            {
+              ...prev.scenes[0],
+              endSec: dur,
+              durationSec: Number(dur.toFixed(2)),
+            },
+          ],
+        };
+      });
+      return;
+    }
+
+    setProject((prev) =>
+      prev?.sourceType === "local" ? { ...prev, sourceDurationSec: dur } : prev
+    );
+  }, []);
 
   const handleClearLocalVideo = () => {
     activeRunIdRef.current++;
@@ -771,7 +930,6 @@ export default function App() {
     setProcessError(null);
     setSaveNotice(null);
     setActiveSavedId(null);
-    setSelectedScenes([]);
     setLocalMedia(null);
     setProject((prev) => {
       if (prev?.sourceType === "local") {
@@ -784,14 +942,102 @@ export default function App() {
     setStudioSection("clips");
   };
 
+  const applySceneSelectionsToProject = (
+    updater: (prevScenes: SceneSelection[]) => SceneSelection[]
+  ) => {
+    const prev = projectRef.current;
+    if (!prev || prev.sourceType !== "local") return;
+    const prevScenes = ensureSceneIds(prev.scenes);
+    const prevSelections: SceneSelection[] = prevScenes.map((sc) => ({
+      id: sc.id!,
+      startSec: sc.startSec,
+      endSec: sc.endSec,
+    }));
+    const nextSelections = updater(prevSelections);
+    const changed =
+      nextSelections.length !== prevSelections.length ||
+      nextSelections.some(
+        (sel, idx) =>
+          sel.id !== prevSelections[idx].id ||
+          Math.abs(sel.startSec - prevSelections[idx].startSec) > 0.001 ||
+          Math.abs(sel.endSec - prevSelections[idx].endSec) > 0.001
+      );
+    if (!changed) return;
+
+    pushProjectUndo();
+
+    const nextScenes: SpeakingScene[] = nextSelections.map((sel, idx) => {
+      const dur = Math.max(0.1, Number((sel.endSec - sel.startSec).toFixed(2)));
+      const existing = prevScenes.find(
+        (ps) =>
+          ps.id === sel.id ||
+          (Math.abs(ps.startSec - sel.startSec) < 0.15 &&
+            Math.abs(ps.endSec - sel.endSec) < 0.15)
+      );
+      return {
+        id: sel.id,
+        index: idx,
+        startSec: sel.startSec,
+        endSec: sel.endSec,
+        durationSec: dur,
+        summary: existing?.summary || `Scene ${idx + 1}`,
+      };
+    });
+    const nextDuration = Number(
+      nextScenes.reduce((acc, sc) => acc + getSceneDurationSec(sc), 0).toFixed(2)
+    );
+
+    if (prev.isDraft) {
+      setProject((cur) =>
+        cur
+          ? {
+              ...cur,
+              scenes: nextScenes,
+              targetDurationSec: nextDuration,
+            }
+          : cur
+      );
+      return;
+    }
+
+    const base = timelineBaselineRef.current?.scenes;
+    if (!base) {
+      setTimelineDirty(false);
+    } else {
+      const dirty =
+        base.length !== nextScenes.length ||
+        base.some(
+          (b, idx) =>
+            Math.abs(b.startSec - nextScenes[idx].startSec) > 0.05 ||
+            Math.abs(b.endSec - nextScenes[idx].endSec) > 0.05
+        );
+      setTimelineDirty(dirty);
+    }
+    setProject((cur) => {
+      if (!cur) return cur;
+      const baselineSubs = timelineBaselineRef.current?.subtitles ?? cur.subtitles;
+      const nextSubtitles = remapSubtitlesToScenes(baselineSubs, nextScenes);
+      return {
+        ...cur,
+        scenes: nextScenes,
+        targetDurationSec: nextDuration,
+        subtitles: nextSubtitles,
+      };
+    });
+  };
+
   const handleUpdateScene = (id: string, startSec: number, endSec: number) => {
-    setSelectedScenes((prev) =>
+    applySceneSelectionsToProject((prev) =>
       prev.map((sc) => (sc.id === id ? { ...sc, startSec, endSec } : sc))
     );
   };
 
   const handleRemoveScene = (id: string) => {
-    setSelectedScenes((prev) => prev.filter((sc) => sc.id !== id));
+    applySceneSelectionsToProject((prev) => prev.filter((sc) => sc.id !== id));
+  };
+
+  const handleReplaceScenes = (nextScenes: SceneSelection[]) => {
+    applySceneSelectionsToProject(() => nextScenes);
   };
 
   const handleCancelGenerateSubtitles = useCallback(() => {
@@ -861,17 +1107,29 @@ export default function App() {
       const preservedSubs: SubtitleItem[] = [];
       if (prevProj && prevScenes.length > 0) {
         for (const sub of prevProj.subtitles) {
+          const idMatchedOldIdx = sub.sceneId
+            ? prevScenes.findIndex((ps) => ps.id === sub.sceneId)
+            : -1;
           const oldIdx =
-            sub.sceneIndex >= 0 && sub.sceneIndex < prevScenes.length ? sub.sceneIndex : 0;
+            idMatchedOldIdx !== -1
+              ? idMatchedOldIdx
+              : sub.sceneIndex >= 0 && sub.sceneIndex < prevScenes.length
+                ? sub.sceneIndex
+                : 0;
           const oldScene = prevScenes[oldIdx];
           if (!oldScene) continue;
 
-          const matchedNewIdx = mergedScenes.findIndex(
-            (ms) =>
-              ms.id === oldScene.id ||
-              (Math.abs(ms.startSec - oldScene.startSec) < 0.15 &&
-                Math.abs(ms.endSec - oldScene.endSec) < 0.15)
-          );
+          let matchedNewIdx = sub.sceneId
+            ? mergedScenes.findIndex((ms) => ms.id === sub.sceneId)
+            : -1;
+          if (matchedNewIdx === -1) {
+            matchedNewIdx = mergedScenes.findIndex(
+              (ms) =>
+                ms.id === oldScene.id ||
+                (Math.abs(ms.startSec - oldScene.startSec) < 0.15 &&
+                  Math.abs(ms.endSec - oldScene.endSec) < 0.15)
+            );
+          }
           if (matchedNewIdx === -1 || matchedNewIdx === targetIdx) {
             continue;
           }
@@ -884,12 +1142,17 @@ export default function App() {
           const newStart = Math.round(((mergedOffsets[matchedNewIdx] ?? 0) + clampedStart) * 100) / 100;
           const newEnd = Math.round(((mergedOffsets[matchedNewIdx] ?? 0) + clampedEnd) * 100) / 100;
 
-          preservedSubs.push({
-            ...sub,
-            sceneIndex: matchedNewIdx,
-            startTime: newStart,
-            endTime: Math.max(newStart + 0.08, newEnd),
-          });
+          preservedSubs.push(
+            withSceneId(
+              {
+                ...sub,
+                sceneIndex: matchedNewIdx,
+                startTime: newStart,
+                endTime: Math.max(newStart + 0.08, newEnd),
+              },
+              mergedScenes
+            )
+          );
         }
       }
 
@@ -901,13 +1164,16 @@ export default function App() {
         const clampedEnd = Math.max(clampedStart + 0.08, Math.min(targetClipDur, sub.endTime));
         const absStart = Math.round((targetOffset + clampedStart) * 100) / 100;
         const absEnd = Math.round((targetOffset + clampedEnd) * 100) / 100;
-        return {
-          ...sub,
-          id: `sub-c${targetIdx}-${batchNonce}-${k + 1}`,
-          sceneIndex: targetIdx,
-          startTime: absStart,
-          endTime: Math.max(absStart + 0.08, absEnd),
-        };
+        return withSceneId(
+          {
+            ...sub,
+            id: `sub-c${targetIdx}-${batchNonce}-${k + 1}`,
+            sceneIndex: targetIdx,
+            startTime: absStart,
+            endTime: Math.max(absStart + 0.08, absEnd),
+          },
+          mergedScenes
+        );
       });
 
       const mergedSubtitles = [...preservedSubs, ...newClipSubs].sort(
@@ -918,9 +1184,11 @@ export default function App() {
         sourceEndSec: s.sourceEndSec,
       }));
 
+      const { isDraft: _dropDraft, ...baseProj } = prevProj || returnedData;
+
       if (targetMedia.sourceType === "local") {
         return {
-          ...(prevProj || returnedData),
+          ...baseProj,
           sourceType: "local",
           title: prevProj?.title || targetMedia.title,
           channel: prevProj?.channel || targetMedia.channel,
@@ -937,7 +1205,7 @@ export default function App() {
       }
 
       return {
-        ...(prevProj || returnedData),
+        ...baseProj,
         sourceType: "youtube",
         videoId: targetMedia.videoId,
         title: prevProj?.title || targetMedia.title,
@@ -948,6 +1216,53 @@ export default function App() {
         subtitles: mergedSubtitles,
         speechRegions,
         keyframeUrls: prevProj?.keyframeUrls?.length ? prevProj.keyframeUrls : returnedData.keyframeUrls,
+      };
+    },
+    []
+  );
+
+  const attachSceneIdsFromServerProject = useCallback(
+    (
+      serverData: VideoProject,
+      priorScenes?: Array<{ id?: string; startSec: number; endSec: number }>
+    ): VideoProject => {
+      const rawScenes = Array.isArray(serverData.scenes) ? serverData.scenes : [];
+      const usedIds = new Set<string>();
+      const scenesWithPreservedIds = rawScenes.map((sc, idx) => {
+        if (sc.id) {
+          usedIds.add(sc.id);
+          return sc;
+        }
+        if (!priorScenes || priorScenes.length === 0) return sc;
+        const sameIdx = priorScenes[idx];
+        const matched =
+          sameIdx &&
+          sameIdx.id &&
+          !usedIds.has(sameIdx.id) &&
+          Math.abs(sameIdx.startSec - sc.startSec) < 0.15 &&
+          Math.abs(sameIdx.endSec - sc.endSec) < 0.15
+            ? sameIdx
+            : priorScenes.find(
+                (ps) =>
+                  ps.id &&
+                  !usedIds.has(ps.id) &&
+                  Math.abs(ps.startSec - sc.startSec) < 0.15 &&
+                  Math.abs(ps.endSec - sc.endSec) < 0.15
+              );
+        if (matched?.id) {
+          usedIds.add(matched.id);
+          return { ...sc, id: matched.id };
+        }
+        return sc;
+      });
+      const scenes = ensureSceneIds(scenesWithPreservedIds);
+      const subtitles = (Array.isArray(serverData.subtitles) ? serverData.subtitles : []).map(
+        (sub) => withSceneId(sub, scenes)
+      );
+      return {
+        ...serverData,
+        scenes,
+        subtitles,
       };
     },
     []
@@ -1122,9 +1437,9 @@ export default function App() {
         );
         if (activeRunIdRef.current !== runId) return;
 
+        const normalizedServerProj = attachSceneIdsFromServerProject(data, selectedScenes);
         const nextProj: VideoProject = {
-          ...data,
-          scenes: ensureSceneIds(data.scenes),
+          ...normalizedServerProj,
           sourceType: "local",
           localUrl: targetMedia.localUrl,
           localFile: targetMedia.localFile,
@@ -1160,10 +1475,7 @@ export default function App() {
         );
         if (activeRunIdRef.current !== runId) return;
 
-        const nextProj: VideoProject = {
-          ...data,
-          scenes: ensureSceneIds(data.scenes),
-        };
+        const nextProj: VideoProject = attachSceneIdsFromServerProject(data);
         setProject(nextProj);
         setBaselineFromProject(nextProj);
         setActiveTab("studio");
@@ -1401,8 +1713,9 @@ export default function App() {
 
       if (activeRunIdRef.current !== runId) return;
       const prevProj = projectRef.current;
-      if (prevProj) {
-        pushSubtitleUndo();
+      const hadGeneratedProj = hasGeneratedProject(prevProj);
+      if (hadGeneratedProj) {
+        pushProjectUndo();
       }
       const nextProj = mergeSingleClipIntoProject(
         prevProj,
@@ -1412,7 +1725,7 @@ export default function App() {
         resolvedMedia
       );
       setProject(nextProj);
-      if (!prevProj) {
+      if (!hadGeneratedProj) {
         setBaselineFromProject(nextProj);
       } else if (timelineBaselineRef.current) {
         timelineBaselineRef.current = {
@@ -1520,7 +1833,12 @@ export default function App() {
   }, [publishCutTime]);
 
   const handleTogglePlay = () => {
-    if (!project || project.scenes.length === 0) return;
+    const playableProj = (
+      UNIFIED_CUT_FLOW ? hasProjectMedia(project) : hasGeneratedProject(project)
+    )
+      ? project
+      : null;
+    if (!playableProj || playableProj.scenes.length === 0) return;
     resumeAllVoiceContexts();
     setIsPlaying((p) => {
       if (p) {
@@ -1539,7 +1857,12 @@ export default function App() {
 
   const handlePlayFromTime = useCallback(
     (sec: number) => {
-      if (!project || project.scenes.length === 0) return;
+      const playableProj = (
+        UNIFIED_CUT_FLOW ? hasProjectMedia(project) : hasGeneratedProject(project)
+      )
+        ? project
+        : null;
+      if (!playableProj || playableProj.scenes.length === 0) return;
       resumeAllVoiceContexts();
       setLoopingSubId(null);
       publishCutTime(sec, true);
@@ -1551,7 +1874,7 @@ export default function App() {
 
   const handleToggleLoopSubtitle = useCallback(
     (id: string) => {
-      if (!project || project.scenes.length === 0) return;
+      if (!hasGeneratedProject(project) || project.scenes.length === 0) return;
       const targetSub = project.subtitles.find((s) => s.id === id);
       if (!targetSub) return;
 
@@ -1590,7 +1913,22 @@ export default function App() {
 
   const handleUpdateProjectScenes = useCallback(
     (nextScenesRaw: SpeakingScene[]) => {
+      const curProj = projectRef.current;
+      if (!curProj) return;
+      const prevScenes = ensureSceneIds(curProj.scenes);
       const nextScenes = ensureSceneIds(nextScenesRaw);
+      const changed =
+        nextScenes.length !== prevScenes.length ||
+        nextScenes.some(
+          (sc, idx) =>
+            sc.id !== prevScenes[idx].id ||
+            Math.abs(sc.startSec - prevScenes[idx].startSec) > 0.001 ||
+            Math.abs(sc.endSec - prevScenes[idx].endSec) > 0.001 ||
+            sc.summary !== prevScenes[idx].summary
+        );
+      if (!changed) return;
+
+      pushProjectUndo();
       const nextDuration = Number(
         nextScenes.reduce((acc, sc) => acc + getSceneDurationSec(sc), 0).toFixed(2)
       );
@@ -1608,42 +1946,14 @@ export default function App() {
         };
       });
     },
-    [checkTimelineDirty]
-  );
-
-  const handleRestoreProjectSnapshot = useCallback(
-    (scenesRaw: SpeakingScene[], subtitlesOverride?: SubtitleItem[]) => {
-      const nextScenes = ensureSceneIds(scenesRaw);
-      const nextDuration = Number(
-        nextScenes.reduce((acc, sc) => acc + getSceneDurationSec(sc), 0).toFixed(2)
-      );
-      checkTimelineDirty(nextScenes);
-
-      setProject((prev) => {
-        if (!prev) return prev;
-        const nextSubtitles = subtitlesOverride
-          ? subtitlesOverride.map((sub) => ({
-              ...sub,
-              words: (Array.isArray(sub.words) ? sub.words : []).map((w) => ({ ...w })),
-            }))
-          : remapSubtitlesToScenes(
-              timelineBaselineRef.current?.subtitles ?? prev.subtitles,
-              nextScenes
-            );
-        return {
-          ...prev,
-          scenes: nextScenes,
-          targetDurationSec: nextDuration,
-          subtitles: nextSubtitles,
-        };
-      });
-    },
-    [checkTimelineDirty]
+    [checkTimelineDirty, pushProjectUndo]
   );
 
   const handleResetTimeline = useCallback(() => {
     const base = timelineBaselineRef.current;
-    if (!base) return;
+    const curProj = projectRef.current;
+    if (!base || !curProj) return;
+    pushProjectUndo();
     const nextScenes = ensureSceneIds(base.scenes).map((s) => ({ ...s }));
     const nextDuration = Number(
       nextScenes.reduce((acc, sc) => acc + getSceneDurationSec(sc), 0).toFixed(2)
@@ -1661,7 +1971,7 @@ export default function App() {
         })),
       };
     });
-  }, []);
+  }, [pushProjectUndo]);
 
   const handleUpdateSubtitle = (
     id: string,
@@ -1821,20 +2131,23 @@ export default function App() {
     const mappedStart = mapCutTimeToSource(project.scenes, startTime);
     const mappedEnd = mapCutTimeToSource(project.scenes, endTime);
 
-    const newItem: SubtitleItem = {
-      id: `sub-custom-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      sceneIndex: mappedStart.sceneIndex,
-      startTime,
-      endTime,
-      sourceStartSec: Number(mappedStart.sourceSec.toFixed(2)),
-      sourceEndSec: Number(mappedEnd.sourceSec.toFixed(2)),
-      originalSpokenText: input.originalSpokenText?.trim() || "Custom subtitle",
-      thaiPhonetic,
-      thaiScript: thaiPhonetic,
-      burmese,
-      words: buildWordsFromPhonetic(thaiPhonetic, 0, duration),
-      isManuallyEdited: true,
-    };
+    const newItem: SubtitleItem = withSceneId(
+      {
+        id: `sub-custom-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        sceneIndex: mappedStart.sceneIndex,
+        startTime,
+        endTime,
+        sourceStartSec: Number(mappedStart.sourceSec.toFixed(2)),
+        sourceEndSec: Number(mappedEnd.sourceSec.toFixed(2)),
+        originalSpokenText: input.originalSpokenText?.trim() || "Custom subtitle",
+        thaiPhonetic,
+        thaiScript: thaiPhonetic,
+        burmese,
+        words: buildWordsFromPhonetic(thaiPhonetic, 0, duration),
+        isManuallyEdited: true,
+      },
+      project.scenes
+    );
 
     if (timelineBaselineRef.current) {
       timelineBaselineRef.current.subtitles = [
@@ -1971,15 +2284,18 @@ export default function App() {
                   endOffsetSec: Number(Math.min(newDur, w.endOffsetSec * scale).toFixed(2)),
                 }))
               : buildWordsFromPhonetic(sub.thaiPhonetic, 0, newDur);
-          return {
-            ...sub,
-            sceneIndex: mappedStart.sceneIndex,
-            startTime,
-            endTime,
-            sourceStartSec: Number(mappedStart.sourceSec.toFixed(2)),
-            sourceEndSec: Number(mappedEnd.sourceSec.toFixed(2)),
-            words,
-          };
+          return withSceneId(
+            {
+              ...sub,
+              sceneIndex: mappedStart.sceneIndex,
+              startTime,
+              endTime,
+              sourceStartSec: Number(mappedStart.sourceSec.toFixed(2)),
+              sourceEndSec: Number(mappedEnd.sourceSec.toFixed(2)),
+              words,
+            },
+            project.scenes
+          );
         })
         .sort((a, b) => a.startTime - b.startTime);
 
@@ -2007,14 +2323,17 @@ export default function App() {
           );
           const mappedStart = mapCutTimeToSource(project.scenes, nextStart);
           const mappedEnd = mapCutTimeToSource(project.scenes, nextEnd);
-          return {
-            ...sub,
-            sceneIndex: mappedStart.sceneIndex,
-            startTime: nextStart,
-            endTime: nextEnd,
-            sourceStartSec: Number(mappedStart.sourceSec.toFixed(2)),
-            sourceEndSec: Number(mappedEnd.sourceSec.toFixed(2)),
-          };
+          return withSceneId(
+            {
+              ...sub,
+              sceneIndex: mappedStart.sceneIndex,
+              startTime: nextStart,
+              endTime: nextEnd,
+              sourceStartSec: Number(mappedStart.sourceSec.toFixed(2)),
+              sourceEndSec: Number(mappedEnd.sourceSec.toFixed(2)),
+            },
+            project.scenes
+          );
         })
         .sort((a, b) => a.startTime - b.startTime);
 
@@ -2122,32 +2441,38 @@ export default function App() {
       const mappedSplit = mapCutTimeToSource(project.scenes, splitTime);
       const mappedEnd = mapCutTimeToSource(project.scenes, target.endTime);
 
-      const firstItem: SubtitleItem = {
-        ...target,
-        endTime: splitTime,
-        sourceStartSec: Number(mappedStart.sourceSec.toFixed(2)),
-        sourceEndSec: Number(mappedSplit.sourceSec.toFixed(2)),
-        originalSpokenText: spoken1,
-        thaiScript: thaiScript1,
-        thaiPhonetic: phonetic1,
-        burmese: burmese1,
-        words: words1,
-        isManuallyEdited: true,
-      };
-      const secondItem: SubtitleItem = {
-        id: `${target.id}-sp-${Date.now().toString(36).slice(-4)}`,
-        sceneIndex: mappedSplit.sceneIndex,
-        startTime: splitTime,
-        endTime: target.endTime,
-        sourceStartSec: Number(mappedSplit.sourceSec.toFixed(2)),
-        sourceEndSec: Number(mappedEnd.sourceSec.toFixed(2)),
-        originalSpokenText: spoken2,
-        thaiScript: thaiScript2,
-        thaiPhonetic: phonetic2,
-        burmese: burmese2,
-        words: words2,
-        isManuallyEdited: true,
-      };
+      const firstItem: SubtitleItem = withSceneId(
+        {
+          ...target,
+          endTime: splitTime,
+          sourceStartSec: Number(mappedStart.sourceSec.toFixed(2)),
+          sourceEndSec: Number(mappedSplit.sourceSec.toFixed(2)),
+          originalSpokenText: spoken1,
+          thaiScript: thaiScript1,
+          thaiPhonetic: phonetic1,
+          burmese: burmese1,
+          words: words1,
+          isManuallyEdited: true,
+        },
+        project.scenes
+      );
+      const secondItem: SubtitleItem = withSceneId(
+        {
+          id: `${target.id}-sp-${Date.now().toString(36).slice(-4)}`,
+          sceneIndex: mappedSplit.sceneIndex,
+          startTime: splitTime,
+          endTime: target.endTime,
+          sourceStartSec: Number(mappedSplit.sourceSec.toFixed(2)),
+          sourceEndSec: Number(mappedEnd.sourceSec.toFixed(2)),
+          originalSpokenText: spoken2,
+          thaiScript: thaiScript2,
+          thaiPhonetic: phonetic2,
+          burmese: burmese2,
+          words: words2,
+          isManuallyEdited: true,
+        },
+        project.scenes
+      );
 
       const next = [...list];
       next.splice(idx, 1, firstItem, secondItem);
@@ -2185,31 +2510,34 @@ export default function App() {
       const mappedStart = mapCutTimeToSource(project.scenes, mergedStart);
       const mappedEnd = mapCutTimeToSource(project.scenes, mergedEnd);
 
-      const mergedItem: SubtitleItem = {
-        ...cur,
-        startTime: Number(mergedStart.toFixed(2)),
-        endTime: Number(mergedEnd.toFixed(2)),
-        sourceStartSec: Number(mappedStart.sourceSec.toFixed(2)),
-        sourceEndSec: Number(mappedEnd.sourceSec.toFixed(2)),
-        originalSpokenText: [cur.originalSpokenText, nxt.originalSpokenText]
-          .map((s) => s.trim())
-          .filter(Boolean)
-          .join(" "),
-        thaiScript: [cur.thaiScript, nxt.thaiScript]
-          .map((s) => s.trim())
-          .filter(Boolean)
-          .join(" "),
-        thaiPhonetic: [cur.thaiPhonetic, nxt.thaiPhonetic]
-          .map((s) => s.trim())
-          .filter(Boolean)
-          .join(" "),
-        burmese: [cur.burmese, nxt.burmese]
-          .map((s) => s.trim())
-          .filter(Boolean)
-          .join(" "),
-        words: mergedWords,
-        isManuallyEdited: true,
-      };
+      const mergedItem: SubtitleItem = withSceneId(
+        {
+          ...cur,
+          startTime: Number(mergedStart.toFixed(2)),
+          endTime: Number(mergedEnd.toFixed(2)),
+          sourceStartSec: Number(mappedStart.sourceSec.toFixed(2)),
+          sourceEndSec: Number(mappedEnd.sourceSec.toFixed(2)),
+          originalSpokenText: [cur.originalSpokenText, nxt.originalSpokenText]
+            .map((s) => s.trim())
+            .filter(Boolean)
+            .join(" "),
+          thaiScript: [cur.thaiScript, nxt.thaiScript]
+            .map((s) => s.trim())
+            .filter(Boolean)
+            .join(" "),
+          thaiPhonetic: [cur.thaiPhonetic, nxt.thaiPhonetic]
+            .map((s) => s.trim())
+            .filter(Boolean)
+            .join(" "),
+          burmese: [cur.burmese, nxt.burmese]
+            .map((s) => s.trim())
+            .filter(Boolean)
+            .join(" "),
+          words: mergedWords,
+          isManuallyEdited: true,
+        },
+        project.scenes
+      );
 
       const next = [...list];
       next.splice(idx, 2, mergedItem);
@@ -2618,15 +2946,18 @@ export default function App() {
               })
             : buildWordsFromPhonetic(sub.thaiPhonetic, 0, newDur);
 
-        return {
-          ...sub,
-          sceneIndex: mappedStart.sceneIndex,
-          startTime,
-          endTime,
-          sourceStartSec: Number(mappedStart.sourceSec.toFixed(2)),
-          sourceEndSec: Number(mappedEnd.sourceSec.toFixed(2)),
-          words,
-        };
+        return withSceneId(
+          {
+            ...sub,
+            sceneIndex: mappedStart.sceneIndex,
+            startTime,
+            endTime,
+            sourceStartSec: Number(mappedStart.sourceSec.toFixed(2)),
+            sourceEndSec: Number(mappedEnd.sourceSec.toFixed(2)),
+            words,
+          },
+          scenes
+        );
       })
       .sort((a, b) => a.startTime - b.startTime);
   };
@@ -3068,20 +3399,23 @@ export default function App() {
               }))
             : buildWordsFromPhonetic(thaiPhonetic, 0, dur);
 
-        return {
-          id: `sub-range-${stamp}-${idx}-${Math.random().toString(36).slice(2, 6)}`,
-          sceneIndex: mappedStart.sceneIndex,
-          startTime: itemStart,
-          endTime: itemEnd,
-          sourceStartSec: Number(mappedStart.sourceSec.toFixed(2)),
-          sourceEndSec: Number(mappedEnd.sourceSec.toFixed(2)),
-          originalSpokenText: (rawItem.originalSpokenText || "").trim() || thaiPhonetic,
-          thaiPhonetic,
-          thaiScript: (rawItem.thaiScript || "").trim() || thaiPhonetic,
-          burmese: (rawItem.burmese || "").trim(),
-          words,
-          isManuallyEdited: false,
-        };
+        return withSceneId(
+          {
+            id: `sub-range-${stamp}-${idx}-${Math.random().toString(36).slice(2, 6)}`,
+            sceneIndex: mappedStart.sceneIndex,
+            startTime: itemStart,
+            endTime: itemEnd,
+            sourceStartSec: Number(mappedStart.sourceSec.toFixed(2)),
+            sourceEndSec: Number(mappedEnd.sourceSec.toFixed(2)),
+            originalSpokenText: (rawItem.originalSpokenText || "").trim() || thaiPhonetic,
+            thaiPhonetic,
+            thaiScript: (rawItem.thaiScript || "").trim() || thaiPhonetic,
+            burmese: (rawItem.burmese || "").trim(),
+            words,
+            isManuallyEdited: false,
+          },
+          latestProj.scenes
+        );
       });
 
       if (newItems.length === 0) {
@@ -3206,7 +3540,7 @@ export default function App() {
   }, []);
 
   const startBackgroundExport = async (openSheet = false) => {
-    if (!project || project.scenes.length === 0 || exportProgress) return;
+    if (!hasGeneratedProject(project) || project.scenes.length === 0 || exportProgress) return;
     setProcessError(null);
     setExportError(null);
     setHasSavedExport(false);
@@ -3259,7 +3593,10 @@ export default function App() {
     void startBackgroundExport(false);
   };
 
-  const canSaveCurrent = Boolean(project || (localMedia && selectedScenes.length > 0));
+  const canSaveCurrent = Boolean(
+    hasGeneratedProject(project) ||
+      ((hasProjectMedia(project) || localMedia) && selectedScenes.length > 0)
+  );
 
   const handleSaveProject = useCallback(
     async (asNew = false) => {
@@ -3270,10 +3607,12 @@ export default function App() {
 
       try {
         const mediaForSave =
-          project?.sourceType === "youtube" ? youtubeMedia : (localMedia ?? youtubeMedia);
+          hasGeneratedProject(project) && project.sourceType === "youtube"
+            ? youtubeMedia
+            : (localMedia ?? youtubeMedia);
 
         const snapshotProject: VideoProject | null =
-          project ??
+          (hasGeneratedProject(project) ? project : null) ??
           (mediaForSave
             ? {
                 sourceType: mediaForSave.sourceType,
@@ -3356,10 +3695,10 @@ export default function App() {
   handleSplitSubtitleRef.current = handleSplitSubtitle;
   const handleSaveProjectRef = useRef(handleSaveProject);
   handleSaveProjectRef.current = handleSaveProject;
-  const handleUndoSubtitlesRef = useRef(handleUndoSubtitles);
-  handleUndoSubtitlesRef.current = handleUndoSubtitles;
-  const handleRedoSubtitlesRef = useRef(handleRedoSubtitles);
-  handleRedoSubtitlesRef.current = handleRedoSubtitles;
+  const handleUndoRef = useRef(handleUndo);
+  handleUndoRef.current = handleUndo;
+  const handleRedoRef = useRef(handleRedo);
+  handleRedoRef.current = handleRedo;
   const canSaveCurrentRef = useRef(canSaveCurrent);
   canSaveCurrentRef.current = canSaveCurrent;
 
@@ -3388,7 +3727,9 @@ export default function App() {
         !e.shiftKey &&
         (e.key === "ArrowUp" || e.key === "ArrowDown")
       ) {
-        const subs = projectRef.current?.subtitles;
+        const subs = hasGeneratedProject(projectRef.current)
+          ? projectRef.current.subtitles
+          : undefined;
         if (activeTabRef.current !== "studio" || !subs || subs.length === 0) return;
 
         e.preventDefault();
@@ -3434,24 +3775,28 @@ export default function App() {
 
         if (
           activeTabRef.current === "studio" &&
-          studioSectionRef.current === "captions" &&
-          projectRef.current
+          Boolean(projectRef.current) &&
+          !exportSheetOpenRef.current
         ) {
-          const target = e.target as HTMLElement | null;
-          const tag = target?.tagName;
-          const inTextField =
-            tag === "INPUT" ||
-            tag === "TEXTAREA" ||
-            tag === "SELECT" ||
-            Boolean(target?.isContentEditable);
+          const elements = [e.target, document.activeElement];
+          const inTextField = elements.some((el) => {
+            if (!(el instanceof HTMLElement)) return false;
+            const tag = el.tagName;
+            return (
+              tag === "INPUT" ||
+              tag === "TEXTAREA" ||
+              tag === "SELECT" ||
+              el.isContentEditable
+            );
+          });
           if (inTextField) return;
 
           if (key === "z" && !e.shiftKey) {
             e.preventDefault();
-            handleUndoSubtitlesRef.current();
-          } else if ((key === "z" && e.shiftKey) || key === "y") {
+            handleUndoRef.current();
+          } else if ((key === "z" && e.shiftKey) || (key === "y" && !e.shiftKey)) {
             e.preventDefault();
-            handleRedoSubtitlesRef.current();
+            handleRedoRef.current();
           }
         }
         return;
@@ -3479,9 +3824,13 @@ export default function App() {
       }
 
       if (hasPrimaryMod || e.altKey) return;
+      const activeProj = projectRef.current;
+      const canPlayActive = UNIFIED_CUT_FLOW
+        ? hasProjectMedia(activeProj)
+        : hasGeneratedProject(activeProj);
       if (
         activeTabRef.current !== "studio" ||
-        !projectRef.current ||
+        !canPlayActive ||
         exportSheetOpenRef.current
       ) {
         return;
@@ -3490,13 +3839,16 @@ export default function App() {
       if (isKeyboardShortcutBlockedByElement(e.target, document.activeElement)) return;
 
       if (e.code === "Space" || e.key === " ") {
+        if (e.defaultPrevented) return;
         e.preventDefault();
         handleTogglePlayRef.current();
         return;
       }
 
+      if (!hasGeneratedProject(activeProj)) return;
+
       if (key === "l" && !e.shiftKey) {
-        const subs = projectRef.current.subtitles;
+        const subs = activeProj.subtitles;
         const targetId =
           selectedSubtitleIdRef.current ??
           findActiveSubtitle(subs, liveCutTimeRef.current)?.id ??
@@ -3511,7 +3863,7 @@ export default function App() {
       if (key === "s" && !e.shiftKey) {
         e.preventDefault();
         const curTime = liveCutTimeRef.current;
-        const exactSub = findExactSubtitleAtTime(projectRef.current.subtitles, curTime);
+        const exactSub = findExactSubtitleAtTime(activeProj.subtitles, curTime);
         if (!exactSub) {
           showShortcutToast("Move playhead onto a subtitle to split.");
           return;
@@ -3566,7 +3918,6 @@ export default function App() {
     }
 
     setActiveSavedId(record.id);
-    setSelectedScenes(record.selectedScenes.map((s) => ({ ...s })));
     setVoiceSettings(sanitizeVoiceSettings(record.voiceSettings));
     setVideoEdit(sanitizeEditSettings(record.editSettings));
     const openedMedia: ActiveMediaSource = {
@@ -3585,35 +3936,65 @@ export default function App() {
       setLocalMedia(null);
       setYoutubeMedia(openedMedia);
     }
-    const openedProj: VideoProject = {
-      sourceType: record.sourceType,
-      videoId: record.videoId,
-      localUrl,
-      localFile,
-      title: record.title,
-      channel: record.channel,
-      sourceDurationSec: record.sourceDurationSec,
-      targetDurationSec: record.targetDurationSec,
-      scenes: ensureSceneIds(
-        (Array.isArray(record.scenes) ? record.scenes : []).map((s) => ({ ...s }))
-      ),
-      subtitles: (Array.isArray(record.subtitles) ? record.subtitles : []).map((sub) => ({
-        ...sub,
-        words: (Array.isArray(sub.words) ? sub.words : []).map((w) => ({ ...w })),
-      })),
-      speechRegions:
-        Array.isArray(record.speechRegions) && record.speechRegions.length > 0
-          ? record.speechRegions.map((sr) => ({ ...sr }))
-          : (Array.isArray(record.subtitles) ? record.subtitles : []).map((sub) => ({
-              sourceStartSec: sub.sourceStartSec,
-              sourceEndSec: sub.sourceEndSec,
-            })),
-      keyframeUrls: Array.isArray(record.keyframeUrls) ? [...record.keyframeUrls] : [],
-    };
+    const isDraftLocalRecord =
+      record.sourceType === "local" && record.subtitles.length === 0;
+    const openedProj: VideoProject = isDraftLocalRecord
+      ? buildDraftLocalProject(
+          openedMedia,
+          record.selectedScenes.length > 0
+            ? record.selectedScenes.map((s) => ({ ...s }))
+            : (Array.isArray(record.scenes) ? record.scenes : []).map((s, idx) => ({
+                id: s.id || `sc-${idx}-${s.startSec}-${s.endSec}`,
+                startSec: s.startSec,
+                endSec: s.endSec,
+              })),
+          {
+            title: record.title,
+            channel: record.channel,
+            sourceDurationSec: record.sourceDurationSec,
+            keyframeUrls: Array.isArray(record.keyframeUrls) ? [...record.keyframeUrls] : [],
+          }
+        )
+      : (() => {
+          const openedScenes = ensureSceneIds(
+            (Array.isArray(record.scenes) ? record.scenes : []).map((s) => ({ ...s }))
+          );
+          return {
+            sourceType: record.sourceType,
+            videoId: record.videoId,
+            localUrl,
+            localFile,
+            title: record.title,
+            channel: record.channel,
+            sourceDurationSec: record.sourceDurationSec,
+            targetDurationSec: record.targetDurationSec,
+            scenes: openedScenes,
+            subtitles: (Array.isArray(record.subtitles) ? record.subtitles : []).map((sub) =>
+              withSceneId(
+                {
+                  ...sub,
+                  words: (Array.isArray(sub.words) ? sub.words : []).map((w) => ({ ...w })),
+                },
+                openedScenes
+              )
+            ),
+            speechRegions:
+              Array.isArray(record.speechRegions) && record.speechRegions.length > 0
+                ? record.speechRegions.map((sr) => ({ ...sr }))
+                : (Array.isArray(record.subtitles) ? record.subtitles : []).map((sub) => ({
+                    sourceStartSec: sub.sourceStartSec,
+                    sourceEndSec: sub.sourceEndSec,
+                  })),
+            keyframeUrls: Array.isArray(record.keyframeUrls) ? [...record.keyframeUrls] : [],
+          };
+        })();
     setProject(openedProj);
     setBaselineFromProject(openedProj);
 
-    if (record.subtitles.length > 0 || record.scenes.length > 0) {
+    if (openedProj.isDraft) {
+      setActiveTab("studio");
+      setStudioSection("clips");
+    } else if (record.subtitles.length > 0 || record.scenes.length > 0) {
       setActiveTab("studio");
       setStudioSection("captions");
     } else if (record.sourceType === "local" && localUrl) {
@@ -3743,11 +4124,19 @@ export default function App() {
 
   const clipSubtitleCounts = useMemo(() => {
     const counts: Record<string, number> = {};
-    if (!project) return counts;
+    if (!hasGeneratedProject(project)) return counts;
     const projScenes = project.scenes;
     const matchedCounts = new Map<number, number>();
+    const sceneIdxById = new Map<string, number>();
+    projScenes.forEach((ps, idx) => {
+      if (ps.id) sceneIdxById.set(ps.id, idx);
+    });
     for (const sub of project.subtitles) {
-      matchedCounts.set(sub.sceneIndex, (matchedCounts.get(sub.sceneIndex) ?? 0) + 1);
+      const resolvedIdx =
+        sub.sceneId && sceneIdxById.has(sub.sceneId)
+          ? sceneIdxById.get(sub.sceneId)!
+          : sub.sceneIndex;
+      matchedCounts.set(resolvedIdx, (matchedCounts.get(resolvedIdx) ?? 0) + 1);
     }
     selectedScenes.forEach((sel, selIdx) => {
       let projIdx = projScenes.findIndex(
@@ -3778,7 +4167,7 @@ export default function App() {
       id: "studio" as const,
       label: "Studio",
       icon: Clapperboard,
-      count: !project && selectedScenes.length > 0 ? selectedScenes.length : 0,
+      count: !hasGeneratedProject(project) && selectedScenes.length > 0 ? selectedScenes.length : 0,
     },
     { id: "projects" as const, label: "Projects", icon: FolderOpen, count: savedProjects.length },
   ];
@@ -3926,7 +4315,7 @@ export default function App() {
 
           {/* Right: Quick Mobile Utilities + Dominant Export MP4 CTA */}
           <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-            {project && (
+            {hasGeneratedProject(project) && (
               <span className="hidden sm:inline-block text-[11px] font-mono-tabular text-[#4d597d] dark:text-[#919ec4] pr-2 border-r border-[#d2dcf0] dark:border-[#21284c] whitespace-nowrap">
                 {project.scenes.length} {project.scenes.length === 1 ? "clip" : "clips"} ·{" "}
                 {Math.round(project.targetDurationSec)}s
@@ -3970,7 +4359,7 @@ export default function App() {
                 !exportProgress &&
                 !readyDownload &&
                 !exportError &&
-                (!project || project.scenes.length === 0 || isProcessing)
+                (!hasGeneratedProject(project) || project.scenes.length === 0 || isProcessing)
               }
               title={
                 exportProgress
@@ -4064,6 +4453,8 @@ export default function App() {
               }
               selectedSubtitleId={selectedSubtitleId}
               onSelectSubtitle={handleSelectStageSubtitle}
+              onUploadVideo={UNIFIED_CUT_FLOW ? handleUploadLocalVideo : undefined}
+              onDetectedDuration={UNIFIED_CUT_FLOW ? handleDetectedLocalDuration : undefined}
             />
           ) : null;
 
@@ -4107,10 +4498,8 @@ export default function App() {
               onRefreshRecommended={handleRefreshRecommended}
               onUpdateScene={handleUpdateScene}
               onRemoveScene={handleRemoveScene}
-              onReplaceScenes={setSelectedScenes}
-              onDetectedLocalDuration={(dur) =>
-                setLocalMedia((prev) => (prev ? { ...prev, durationSec: dur } : prev))
-              }
+              onReplaceScenes={handleReplaceScenes}
+              onDetectedLocalDuration={handleDetectedLocalDuration}
               onDetectedYouTubeDuration={(dur) =>
                 setYoutubeMedia((prev) => (prev ? { ...prev, durationSec: dur } : prev))
               }
@@ -4126,7 +4515,6 @@ export default function App() {
               onPause={handlePause}
               onPlayFromTime={handlePlayFromTime}
               onUpdateProjectScenes={handleUpdateProjectScenes}
-              onRestoreProjectSnapshot={handleRestoreProjectSnapshot}
               onResetTimeline={handleResetTimeline}
               onUpdateSubtitle={handleUpdateSubtitle}
               onUpdateWordGloss={handleUpdateWordGloss}
@@ -4139,10 +4527,14 @@ export default function App() {
               onShiftAllSubtitles={handleShiftAllSubtitles}
               loopingSubId={loopingSubId}
               onToggleLoopSubtitle={handleToggleLoopSubtitle}
-              canUndoSubtitles={subUndoStack.length > 0}
-              canRedoSubtitles={subRedoStack.length > 0}
-              onUndoSubtitles={handleUndoSubtitles}
-              onRedoSubtitles={handleRedoSubtitles}
+              canUndo={undoStack.length > 0}
+              canRedo={redoStack.length > 0}
+              onUndo={handleUndo}
+              onRedo={handleRedo}
+              canUndoSubtitles={undoStack.length > 0}
+              canRedoSubtitles={redoStack.length > 0}
+              onUndoSubtitles={handleUndo}
+              onRedoSubtitles={handleRedo}
               onAutoFixSubtitleTimings={handleAutoFixSubtitleTimings}
               onAiResyncSubtitles={handleAiResyncSubtitles}
               onCancelAiResync={handleCancelAiResync}
@@ -4275,7 +4667,8 @@ export default function App() {
                 </div>
 
                 {/* Lower Studio Area: Edge-to-Edge Bottom Timeline Dock */}
-                {(project || studioSection !== "clips") && (
+                {((UNIFIED_CUT_FLOW ? hasProjectMedia(project) : hasGeneratedProject(project)) ||
+                  studioSection !== "clips") && (
                   <div className="shrink-0">
                     <ProjectTimelineEditor
                       dockMode
@@ -4293,12 +4686,20 @@ export default function App() {
                       onUpdateScenes={handleUpdateProjectScenes}
                       onUpdateSubtitleTiming={handleUpdateSubtitleTiming}
                       onShiftAllSubtitles={handleShiftAllSubtitles}
-                      onRestoreSnapshot={handleRestoreProjectSnapshot}
+                      onUndo={handleUndo}
+                      onRedo={handleRedo}
+                      canUndo={undoStack.length > 0}
+                      canRedo={redoStack.length > 0}
                       onResetTimeline={handleResetTimeline}
                       onGoToScenes={() => setStudioSection("clips")}
                       cutSpeechRegions={cutSpeechRegions}
                       onTranscribeRange={handleTranscribeRange}
                       transcribingRange={transcribingRange}
+                      clipSubtitleCounts={UNIFIED_CUT_FLOW ? clipSubtitleCounts : undefined}
+                      regeneratingClipId={UNIFIED_CUT_FLOW ? regeneratingClipId : undefined}
+                      regeneratingClipPercent={UNIFIED_CUT_FLOW ? regeneratingClipPercent : undefined}
+                      onGenerateSingleClip={UNIFIED_CUT_FLOW ? handleGenerateSingleClip : undefined}
+                      isBusy={UNIFIED_CUT_FLOW ? isProcessing : undefined}
                     />
                   </div>
                 )}

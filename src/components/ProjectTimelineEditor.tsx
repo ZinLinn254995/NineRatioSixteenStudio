@@ -8,6 +8,8 @@ import {
   Loader2,
   Pause,
   Play,
+  Redo2,
+  RefreshCw,
   RotateCcw,
   Scissors,
   Sparkles,
@@ -18,6 +20,8 @@ import {
 } from "lucide-react";
 import type { SpeechRegion, SpeakingScene, SubtitleItem, VideoProject } from "../types";
 import { ensureSceneIds, roundTenth } from "../utils/projectTimeline";
+import { hasGeneratedProject, hasProjectMedia } from "../utils/projectState";
+import { UNIFIED_CUT_FLOW } from "../config/flags";
 import {
   projectSpeechRegionsToCutTimeline,
   type CutSpeechRegion,
@@ -43,13 +47,22 @@ interface ProjectTimelineEditorProps {
     endSec: number
   ) => Promise<{ addedCount: number; message?: string } | void>;
   transcribingRange?: { startSec: number; endSec: number } | null;
-  onRestoreSnapshot: (scenes: SpeakingScene[], subtitles?: SubtitleItem[]) => void;
+  onUndo?: () => void;
+  onRedo?: () => void;
+  canUndo?: boolean;
+  canRedo?: boolean;
+  onRestoreSnapshot?: (scenes: SpeakingScene[], subtitles?: SubtitleItem[]) => void;
   onResetTimeline: () => void;
   onGoToScenes?: () => void;
   dockMode?: boolean;
   isCollapsed?: boolean;
   onToggleCollapse?: () => void;
   cutSpeechRegions?: CutSpeechRegion[];
+  clipSubtitleCounts?: Record<string, number>;
+  regeneratingClipId?: string | null;
+  regeneratingClipPercent?: number | null;
+  onGenerateSingleClip?: (sceneId: string) => void;
+  isBusy?: boolean;
 }
 
 interface ClipSegment {
@@ -61,11 +74,6 @@ interface ClipSegment {
   clipDur: number;
   cutStart: number;
   cutEnd: number;
-}
-
-interface UndoEntry {
-  scenes: SpeakingScene[];
-  subtitles: SubtitleItem[];
 }
 
 type DragMode =
@@ -154,13 +162,21 @@ export function ProjectTimelineEditor({
   onShiftAllSubtitles,
   onTranscribeRange,
   transcribingRange = null,
-  onRestoreSnapshot,
+  onUndo,
+  onRedo,
+  canUndo = false,
+  canRedo = false,
   onResetTimeline,
   onGoToScenes,
   dockMode = false,
   isCollapsed = false,
   onToggleCollapse,
   cutSpeechRegions: controlledCutSpeechRegions,
+  clipSubtitleCounts,
+  regeneratingClipId = null,
+  regeneratingClipPercent = null,
+  onGenerateSingleClip,
+  isBusy = false,
 }: ProjectTimelineEditorProps) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const trackSlideRef = useRef<HTMLDivElement | null>(null);
@@ -195,7 +211,6 @@ export function ProjectTimelineEditor({
   const [dragBadge, setDragBadge] = useState<{ label: string; sec: number } | null>(null);
   const [thumbnails, setThumbnails] = useState<string[]>([]);
   const [baselineSubRegions, setBaselineSubRegions] = useState<SpeechRegion[]>([]);
-  const [undoStack, setUndoStack] = useState<UndoEntry[]>([]);
 
   const dragStateRef = useRef<DragMode | null>(null);
   const windowDragCleanupRef = useRef<(() => void) | null>(null);
@@ -227,7 +242,6 @@ export function ProjectTimelineEditor({
   } | null>(null);
   trimPreviewRef.current = trimPreview;
   const lastDragTargetRef = useRef<{ cutTime: number; sourceSec: number } | null>(null);
-  const trimPreUndoRef = useRef<UndoEntry | null>(null);
   const lastSeekDispatchAtRef = useRef<number>(0);
   const seekThrottleTimerRef = useRef<number | null>(null);
   const queuedSeekSecRef = useRef<number | null>(null);
@@ -241,16 +255,23 @@ export function ProjectTimelineEditor({
     moved: boolean;
   } | null>(null);
 
+  const activeTimelineProject = (
+    UNIFIED_CUT_FLOW ? hasProjectMedia(project) : hasGeneratedProject(project)
+  )
+    ? project
+    : null;
+  const isDraft = Boolean(activeTimelineProject?.isDraft);
+
   const normalizedScenes = useMemo(
-    () => (project ? ensureSceneIds(project.scenes) : []),
-    [project]
+    () => (activeTimelineProject ? ensureSceneIds(activeTimelineProject.scenes) : []),
+    [activeTimelineProject]
   );
 
   const sourceDuration = useMemo(() => {
-    if (!project) return 1;
+    if (!activeTimelineProject) return 1;
     const maxSceneEnd = normalizedScenes.reduce((m, s) => Math.max(m, s.endSec), 0);
-    return Math.max(1, project.sourceDurationSec || 0, maxSceneEnd);
-  }, [project, normalizedScenes]);
+    return Math.max(1, activeTimelineProject.sourceDurationSec || 0, maxSceneEnd);
+  }, [activeTimelineProject, normalizedScenes]);
 
   const { segments, totalCutDuration } = useMemo(() => {
     const list: ClipSegment[] = [];
@@ -287,8 +308,8 @@ export function ProjectTimelineEditor({
   cutTimeRef.current = cutTime;
 
   // Reset undo & drag state only when switching to a genuinely different source project
-  const projectIdentity = project
-    ? `${project.sourceType}:${project.videoId || ""}:${project.localUrl || ""}:${project.title}`
+  const projectIdentity = activeTimelineProject
+    ? `${activeTimelineProject.sourceType}:${activeTimelineProject.videoId || ""}:${activeTimelineProject.localUrl || ""}:${activeTimelineProject.title}`
     : "none";
 
   useEffect(() => {
@@ -308,17 +329,22 @@ export function ProjectTimelineEditor({
     setShowRangeFill(false);
     setRangeNotice(null);
     setBaselineSubRegions(
-      project?.subtitles.map((s) => ({
-        sourceStartSec: s.sourceStartSec,
-        sourceEndSec: s.sourceEndSec,
-      })) ?? []
+      hasGeneratedProject(project)
+        ? project.subtitles.map((s) => ({
+            sourceStartSec: s.sourceStartSec,
+            sourceEndSec: s.sourceEndSec,
+          }))
+        : []
     );
-    setUndoStack([]);
   }, [projectIdentity]);
 
   // Capture initial subtitle baseline if project mounted with subtitles after identity init
   useEffect(() => {
-    if (baselineSubRegions.length === 0 && project && project.subtitles.length > 0) {
+    if (
+      baselineSubRegions.length === 0 &&
+      hasGeneratedProject(project) &&
+      project.subtitles.length > 0
+    ) {
       setBaselineSubRegions(
         project.subtitles.map((s) => ({
           sourceStartSec: s.sourceStartSec,
@@ -361,15 +387,17 @@ export function ProjectTimelineEditor({
 
   // Capture filmstrip frames for local videos; fallback thumbnail for YouTube
   useEffect(() => {
-    if (!project) {
+    if (!activeTimelineProject) {
       setThumbnails([]);
       return;
     }
 
-    if (project.sourceType !== "local" || !project.localUrl) {
+    if (activeTimelineProject.sourceType !== "local" || !activeTimelineProject.localUrl) {
       const fallback =
-        project.keyframeUrls[0] ||
-        (project.videoId ? `https://i.ytimg.com/vi/${project.videoId}/hqdefault.jpg` : "");
+        activeTimelineProject.keyframeUrls[0] ||
+        (activeTimelineProject.videoId
+          ? `https://i.ytimg.com/vi/${activeTimelineProject.videoId}/hqdefault.jpg`
+          : "");
       setThumbnails(fallback ? [fallback] : []);
       return;
     }
@@ -377,7 +405,7 @@ export function ProjectTimelineEditor({
     if (isCollapsed) return;
 
     let cancelled = false;
-    const estDur = Math.max(1, project.sourceDurationSec || sourceDuration);
+    const estDur = Math.max(1, activeTimelineProject.sourceDurationSec || sourceDuration);
     const targetCount = Math.min(12, Math.max(6, Math.ceil(estDur / 6)));
     const hiddenVid = document.createElement("video");
     hiddenVid.muted = true;
@@ -400,7 +428,7 @@ export function ProjectTimelineEditor({
       // Let primary 9:16 video stage initialize decoder cleanly first
       await new Promise((r) => setTimeout(r, 420));
       if (cancelled) return;
-      hiddenVid.src = project.localUrl!;
+      hiddenVid.src = activeTimelineProject.localUrl!;
 
       await new Promise<void>((resolve) => {
         if (hiddenVid.readyState >= 1) return resolve();
@@ -504,21 +532,6 @@ export function ProjectTimelineEditor({
     };
   }, []);
 
-  const pushUndoSnapshot = useCallback(() => {
-    const curProj = projectRef.current;
-    if (!curProj) return;
-    setUndoStack((prev) => [
-      ...prev.slice(-29),
-      {
-        scenes: normalizedScenesRef.current.map((s) => ({ ...s })),
-        subtitles: curProj.subtitles.map((sub) => ({
-          ...sub,
-          words: sub.words.map((w) => ({ ...w })),
-        })),
-      },
-    ]);
-  }, []);
-
   // Segment currently underneath the center playhead
   const segmentAtPlayhead = useMemo(() => {
     if (segments.length === 0) return null;
@@ -550,8 +563,6 @@ export function ProjectTimelineEditor({
       return;
     }
 
-    pushUndoSnapshot();
-
     const leftClip: SpeakingScene = {
       ...segmentAtPlayhead.scene,
       id: segmentAtPlayhead.sceneId,
@@ -582,7 +593,6 @@ export function ProjectTimelineEditor({
     isPlaying,
     onPause,
     cutTime,
-    pushUndoSnapshot,
     normalizedScenes,
     onUpdateScenes,
   ]);
@@ -604,7 +614,6 @@ export function ProjectTimelineEditor({
       if (!segToDelete) return;
 
       if (isPlaying) onPause();
-      pushUndoSnapshot();
 
       const nextScenes = normalizedScenes.filter((_, i) => i !== segToDelete.index);
       onUpdateScenes(nextScenes);
@@ -625,7 +634,6 @@ export function ProjectTimelineEditor({
       targetClipForDelete,
       isPlaying,
       onPause,
-      pushUndoSnapshot,
       normalizedScenes,
       onUpdateScenes,
       dispatchSeek,
@@ -633,25 +641,28 @@ export function ProjectTimelineEditor({
   );
 
   const handleUndo = useCallback(() => {
-    if (undoStack.length === 0) return;
+    if (!canUndo || !onUndo) return;
     if (isPlaying) onPause();
-    const prev = undoStack[undoStack.length - 1];
-    setUndoStack((s) => s.slice(0, -1));
-    onRestoreSnapshot(prev.scenes, prev.subtitles);
-    setActiveSceneId((cur) => (cur && prev.scenes.some((s) => s.id === cur) ? cur : null));
-  }, [undoStack, isPlaying, onPause, onRestoreSnapshot]);
+    onUndo();
+  }, [canUndo, onUndo, isPlaying, onPause]);
+
+  const handleRedo = useCallback(() => {
+    if (!canRedo || !onRedo) return;
+    if (isPlaying) onPause();
+    onRedo();
+  }, [canRedo, onRedo, isPlaying, onPause]);
 
   const handleRestoreOriginal = useCallback(() => {
     if (isPlaying) onPause();
-    pushUndoSnapshot();
     onResetTimeline();
     dispatchSeek(0, true);
-  }, [isPlaying, onPause, pushUndoSnapshot, onResetTimeline, dispatchSeek]);
+  }, [isPlaying, onPause, onResetTimeline, dispatchSeek]);
 
   // Keyboard shortcuts: Space to Play/Pause, Delete/Backspace to remove selected clip
   useEffect(() => {
-    if (!isActive || !project) return;
+    if (!isActive || !activeTimelineProject) return;
     const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       const target = e.target as HTMLElement | null;
       const tag = target?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target?.isContentEditable) {
@@ -667,7 +678,7 @@ export function ProjectTimelineEditor({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [isActive, project, onTogglePlay, targetClipForDelete, handleDeleteClip]);
+  }, [isActive, activeTimelineProject, onTogglePlay, targetClipForDelete, handleDeleteClip]);
 
   const trackCenterTime = frozenTrackTime ?? liveScrubCutTime ?? cutTime;
   const centerX = viewportWidth / 2;
@@ -908,17 +919,6 @@ export function ProjectTimelineEditor({
     startWindowPointerTracking();
     if (isPlaying) onPause();
 
-    const curProj = projectRef.current;
-    trimPreUndoRef.current = curProj
-      ? {
-          scenes: normalizedScenesRef.current.map((s) => ({ ...s })),
-          subtitles: curProj.subtitles.map((sub) => ({
-            ...sub,
-            words: sub.words.map((w) => ({ ...w })),
-          })),
-        }
-      : null;
-
     const freezeCut = liveScrubCutRef.current ?? cutTimeRef.current;
     frozenTrackTimeRef.current = freezeCut;
     setActiveSceneId(seg.sceneId);
@@ -961,17 +961,6 @@ export function ProjectTimelineEditor({
     }
     startWindowPointerTracking();
     if (isPlaying) onPause();
-
-    const curProj = projectRef.current;
-    trimPreUndoRef.current = curProj
-      ? {
-          scenes: normalizedScenesRef.current.map((s) => ({ ...s })),
-          subtitles: curProj.subtitles.map((s) => ({
-            ...s,
-            words: s.words.map((w) => ({ ...w })),
-          })),
-        }
-      : null;
 
     lastDragTargetRef.current = null;
     setActiveSubId(sub.id);
@@ -1226,18 +1215,14 @@ export function ProjectTimelineEditor({
         if (
           preview &&
           target &&
-          trimPreUndoRef.current &&
           (Math.abs(preview.startTime - activeDrag.origStartTime) >= 0.01 ||
             Math.abs(preview.endTime - activeDrag.origEndTime) >= 0.01)
         ) {
-          const snapshot = trimPreUndoRef.current;
-          setUndoStack((prev) => [...prev.slice(-29), snapshot]);
           onUpdateSubtitleTiming?.(preview.id, preview.startTime, preview.endTime);
           dispatchSeek(target.cutTime, true);
         } else if (activeDrag.type === "sub-move" && !target) {
           dispatchSeek(activeDrag.origStartTime, true);
         }
-        trimPreUndoRef.current = null;
         lastDragTargetRef.current = null;
         dragSubPreviewRef.current = null;
         setDragSubPreview(null);
@@ -1252,12 +1237,9 @@ export function ProjectTimelineEditor({
 
         if (
           preview &&
-          trimPreUndoRef.current &&
           (Math.abs(preview.nextStartSec - preview.origStartSec) >= 0.01 ||
             Math.abs(preview.nextEndSec - preview.origEndSec) >= 0.01)
         ) {
-          const snapshot = trimPreUndoRef.current;
-          setUndoStack((prev) => [...prev.slice(-29), snapshot]);
           const nextScenes = normalizedScenesRef.current.map((sc) =>
             sc.id === preview.sceneId
               ? {
@@ -1276,7 +1258,6 @@ export function ProjectTimelineEditor({
           const stayCut = Math.max(0, Math.min(newMaxCut, stayFrozen ?? cutTimeRef.current));
           dispatchSeek(stayCut, true);
         }
-        trimPreUndoRef.current = null;
         lastDragTargetRef.current = null;
       }
 
@@ -1355,8 +1336,8 @@ export function ProjectTimelineEditor({
     };
   }, [projectIdentity, isCollapsed]);
 
-  // Empty "No video" state when subtitles have not been generated yet
-  if (!project) {
+  // Empty "No video" state when no active project media is loaded
+  if (!activeTimelineProject) {
     if (dockMode) {
       return (
         <div className="border-t border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] overflow-hidden">
@@ -1437,16 +1418,16 @@ export function ProjectTimelineEditor({
           : "flex flex-col gap-3.5 pb-6"
       }
     >
-      {/* Generated 9:16 Video Summary Header (Standard Mode) */}
+      {/* Video Summary Header (Standard Mode) */}
       {!dockMode && (
         <div className="px-3 py-2 border-b border-[#d2dcf0] dark:border-[#21284c] flex items-center justify-between gap-3">
           <div className="min-w-0 flex-1">
             <p className="text-xs font-semibold text-[#0c1026] dark:text-[#f3f5fc] truncate">
-              {project.title}
+              {activeTimelineProject.title}
             </p>
             <p className="text-[11px] font-mono-tabular text-[#4d597d] dark:text-[#919ec4]">
-              9:16 Subtitle Video · {segments.length} {segments.length === 1 ? "clip" : "clips"} ·{" "}
-              {roundTenth(totalCutDuration)}s
+              {isDraft ? "Local Video" : "9:16 Subtitle Video"} · {segments.length}{" "}
+              {segments.length === 1 ? "clip" : "clips"} · {roundTenth(totalCutDuration)}s
             </p>
           </div>
         </div>
@@ -1491,7 +1472,7 @@ export function ProjectTimelineEditor({
 
           {dockMode && (
             <span className="hidden xl:inline text-[11px] text-[#4d597d] dark:text-[#919ec4] truncate max-w-[260px]">
-              · {project.title}
+              · {activeTimelineProject.title}
             </span>
           )}
         </div>
@@ -1531,12 +1512,26 @@ export function ProjectTimelineEditor({
               e.currentTarget.blur();
               handleUndo();
             }}
-            disabled={undoStack.length === 0}
+            disabled={!canUndo || !onUndo}
             title="Undo last edit"
             aria-label="Undo last edit"
             className="h-7 px-2 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
           >
             <Undo2 className="w-3.5 h-3.5" />
+          </button>
+
+          <button
+            type="button"
+            onClick={(e) => {
+              e.currentTarget.blur();
+              handleRedo();
+            }}
+            disabled={!canRedo || !onRedo}
+            title="Redo last edit"
+            aria-label="Redo last edit"
+            className="h-7 px-2 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
+          >
+            <Redo2 className="w-3.5 h-3.5" />
           </button>
 
           <button
@@ -1552,7 +1547,7 @@ export function ProjectTimelineEditor({
             <RotateCcw className="w-3.5 h-3.5" />
           </button>
 
-          {onShiftAllSubtitles && (
+          {!isDraft && onShiftAllSubtitles && (
             <div
               role="group"
               aria-label="Subtitle timing micro-nudge"
@@ -1563,7 +1558,7 @@ export function ProjectTimelineEditor({
               </span>
               <button
                 type="button"
-                disabled={!project.subtitles.length}
+                disabled={!activeTimelineProject.subtitles.length}
                 onClick={(e) => {
                   e.currentTarget.blur();
                   onShiftAllSubtitles(-0.1);
@@ -1576,7 +1571,7 @@ export function ProjectTimelineEditor({
               </button>
               <button
                 type="button"
-                disabled={!project.subtitles.length}
+                disabled={!activeTimelineProject.subtitles.length}
                 onClick={(e) => {
                   e.currentTarget.blur();
                   onShiftAllSubtitles(0.1);
@@ -1615,7 +1610,7 @@ export function ProjectTimelineEditor({
             </button>
           </div>
 
-          {onTranscribeRange && (
+          {!isDraft && onTranscribeRange && (
             <button
               type="button"
               disabled={segments.length === 0 || Boolean(transcribingRange)}
@@ -1681,7 +1676,7 @@ export function ProjectTimelineEditor({
         </div>
       </div>
 
-      {onTranscribeRange && showRangeFill && (
+      {!isDraft && onTranscribeRange && showRangeFill && (
         <div
           className={`flex flex-wrap items-center gap-2 text-xs bg-[#eef2fc] dark:bg-[#10152e] border-b border-[#d2dcf0] dark:border-[#21284c] ${
             dockMode ? "px-4 py-1.5" : "px-2.5 py-2 rounded-md border"
@@ -1938,6 +1933,7 @@ export function ProjectTimelineEditor({
           </div>
 
           {/* Interactive Subtitles Track + Underlying Original Speech & Waveform Markers */}
+          {!isDraft && (
           <div className="relative h-16 mt-2">
             {/* Background Speech Bands (align vertically behind subtitles so handles snap visually) */}
             <div className="pointer-events-none absolute inset-0">
@@ -2040,7 +2036,7 @@ export function ProjectTimelineEditor({
               })}
 
             {/* Upper Subtitle Clips Row */}
-            {project.subtitles.map((sub, subIdx) => {
+            {activeTimelineProject.subtitles.map((sub, subIdx) => {
               const preview = dragSubPreview?.id === sub.id ? dragSubPreview : null;
               const startTime = preview ? preview.startTime : sub.startTime;
               const endTime = preview ? preview.endTime : sub.endTime;
@@ -2132,6 +2128,7 @@ export function ProjectTimelineEditor({
               );
             })}
           </div>
+          )}
 
           {/* Dedicated Open Scroll Space Below Clips & Subtitles */}
           <div
@@ -2187,6 +2184,11 @@ export function ProjectTimelineEditor({
             {segments.map((seg, idx) => {
               const isSelected = seg.sceneId === activeSceneId;
               const dur = roundTenth(seg.clipDur);
+              const subCount = clipSubtitleCounts?.[seg.sceneId] ?? 0;
+              const hasExistingSubs = subCount > 0;
+              const isRegeneratingThis = regeneratingClipId === seg.sceneId;
+              const busyElsewhere = Boolean(isBusy) || (Boolean(regeneratingClipId) && !isRegeneratingThis);
+
               return (
                 <div
                   key={seg.sceneId}
@@ -2209,15 +2211,65 @@ export function ProjectTimelineEditor({
                     >
                       {String(idx + 1).padStart(2, "0")}
                     </span>
-                    <span className="text-xs font-semibold text-[#0c1026] dark:text-[#f3f5fc]">
+                    <span className="text-xs font-semibold text-[#0c1026] dark:text-[#f3f5fc] whitespace-nowrap">
                       Clip {idx + 1}
                     </span>
-                    <span className="text-xs font-mono-tabular text-[#4d597d] dark:text-[#919ec4]">
+                    <span className="text-xs font-mono-tabular text-[#4d597d] dark:text-[#919ec4] truncate">
                       {formatTimePrecise(seg.startSec)} – {formatTimePrecise(seg.endSec)}
                     </span>
+                    {onGenerateSingleClip && hasExistingSubs && (
+                      <span className="text-[11px] font-mono-tabular text-teal-700 dark:text-teal-400 whitespace-nowrap shrink-0">
+                        · {subCount} sub
+                      </span>
+                    )}
                   </div>
 
                   <div className="flex items-center gap-2 shrink-0">
+                    {onGenerateSingleClip && (
+                      <button
+                        type="button"
+                        disabled={busyElsewhere || isRegeneratingThis}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          e.currentTarget.blur();
+                          setActiveSceneId(seg.sceneId);
+                          onGenerateSingleClip(seg.sceneId);
+                        }}
+                        title={
+                          hasExistingSubs
+                            ? `Replace subtitles for Clip ${idx + 1}`
+                            : `Generate subtitles for Clip ${idx + 1}`
+                        }
+                        aria-label={
+                          hasExistingSubs
+                            ? `Replace subtitles for Clip ${idx + 1}`
+                            : `Generate subtitles for Clip ${idx + 1}`
+                        }
+                        className="h-6 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] hover:border-teal-700/50 dark:hover:border-teal-400/50 hover:text-teal-700 dark:hover:text-teal-400 text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] inline-flex items-center gap-1 whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
+                      >
+                        {isRegeneratingThis ? (
+                          <>
+                            <Loader2 className="w-3 h-3 animate-spin text-teal-700 dark:text-teal-400 shrink-0" />
+                            <span className="font-mono-tabular">
+                              {typeof regeneratingClipPercent === "number"
+                                ? `${regeneratingClipPercent}%`
+                                : "..."}
+                            </span>
+                          </>
+                        ) : hasExistingSubs ? (
+                          <>
+                            <RefreshCw className="w-3 h-3 shrink-0" />
+                            <span>Replace</span>
+                          </>
+                        ) : (
+                          <>
+                            <Sparkles className="w-3 h-3 shrink-0" />
+                            <span>Generate</span>
+                          </>
+                        )}
+                      </button>
+                    )}
+
                     <button
                       type="button"
                       onClick={(e) => {
@@ -2237,13 +2289,14 @@ export function ProjectTimelineEditor({
                     </span>
                     <button
                       type="button"
+                      disabled={isRegeneratingThis}
                       onClick={(e) => {
                         e.stopPropagation();
                         e.currentTarget.blur();
                         handleDeleteClip(seg.sceneId);
                       }}
                       aria-label={`Delete clip ${idx + 1}`}
-                      className="p-1 text-[#4d597d] dark:text-[#919ec4] hover:text-red-600 dark:hover:text-red-400 transition-colors cursor-pointer"
+                      className="p-1 text-[#4d597d] dark:text-[#919ec4] hover:text-red-600 dark:hover:text-red-400 disabled:opacity-40 transition-colors cursor-pointer"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>

@@ -27,6 +27,17 @@ export function ensureSceneIds(scenes: SpeakingScene[]): SpeakingScene[] {
   }));
 }
 
+export function withSceneId(sub: SubtitleItem, scenes: SpeakingScene[]): SubtitleItem {
+  const matchedSceneId = scenes[sub.sceneIndex]?.id;
+  if (matchedSceneId) {
+    return sub.sceneId === matchedSceneId ? sub : { ...sub, sceneId: matchedSceneId };
+  }
+  if (sub.sceneId !== undefined) {
+    return { ...sub, sceneId: undefined };
+  }
+  return sub;
+}
+
 /**
  * Returns the active subtitle when timeSec falls within [startTime, endTime].
  * During silent gaps after a subtitle finishes and before the next subtitle starts,
@@ -200,17 +211,23 @@ export function remapSubtitlesToScenes(
       }
       usedIds.add(uniqueId);
 
-      mapped.push({
-        ...sub,
-        id: uniqueId,
-        sceneIndex: findSceneIndexInBlock(block, ovStart),
-        startTime: cutStart,
-        endTime: cutEnd,
-        sourceStartSec: Number(ovStart.toFixed(2)),
-        sourceEndSec: Number(ovEnd.toFixed(2)),
-        words,
-        isManuallyEdited: Boolean(sub.isManuallyEdited),
-      });
+      const mappedSceneIndex = findSceneIndexInBlock(block, ovStart);
+      mapped.push(
+        withSceneId(
+          {
+            ...sub,
+            id: uniqueId,
+            sceneIndex: mappedSceneIndex,
+            startTime: cutStart,
+            endTime: cutEnd,
+            sourceStartSec: Number(ovStart.toFixed(2)),
+            sourceEndSec: Number(ovEnd.toFixed(2)),
+            words,
+            isManuallyEdited: Boolean(sub.isManuallyEdited),
+          },
+          nextScenes
+        )
+      );
     });
   }
 
