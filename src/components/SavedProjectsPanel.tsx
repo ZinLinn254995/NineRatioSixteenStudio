@@ -14,6 +14,7 @@ import {
   X,
 } from "lucide-react";
 import type { SavedProjectRecord } from "../types";
+import { isLegacyYouTubeProject } from "../utils/offlineProjects";
 import { getEffectivePlaybackSpeed } from "../utils/voicePresets";
 
 interface SavedProjectsPanelProps {
@@ -89,6 +90,7 @@ export function SavedProjectsPanel({
   }, [projects, filterText]);
 
   const startRename = (record: SavedProjectRecord) => {
+    if (isLegacyYouTubeProject(record)) return;
     setEditingId(record.id);
     setEditingTitle(record.title);
     setConfirmDeleteId(null);
@@ -207,11 +209,11 @@ export function SavedProjectsPanel({
       ) : (
         <div className="divide-y divide-[#d2dcf0] dark:divide-[#21284c] border-y border-[#d2dcf0] dark:border-[#21284c]">
           {filtered.map((record) => {
-            const isActive = record.id === activeSavedId;
-            const isEditing = editingId === record.id;
+            const isLegacy = isLegacyYouTubeProject(record);
+            const isActive = !isLegacy && record.id === activeSavedId;
+            const isEditing = !isLegacy && editingId === record.id;
             const isDeleting = confirmDeleteId === record.id;
             const spd = getEffectivePlaybackSpeed(
-              record.sourceType,
               record.editSettings.playbackSpeed,
               record.voiceSettings.speed
             );
@@ -228,28 +230,51 @@ export function SavedProjectsPanel({
               >
                 <div className="flex items-start gap-3.5">
                   {/* Thumbnail */}
-                  <button
-                    type="button"
-                    onClick={() => onOpenProject(record)}
-                    aria-label={`Open ${record.title}`}
-                    className="relative w-24 sm:w-28 aspect-video rounded-md overflow-hidden bg-[#e7ecf8] dark:bg-[#141933] border border-[#d2dcf0] dark:border-[#21284c] shrink-0 cursor-pointer group"
-                  >
-                    {record.thumbnail ? (
-                      <img
-                        src={record.thumbnail}
-                        alt={record.title}
-                        referrerPolicy="no-referrer"
-                        className="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-200"
-                      />
-                    ) : (
-                      <div className="w-full h-full flex items-center justify-center text-[#4d597d] dark:text-[#919ec4]">
-                        <Film className="w-4 h-4" />
-                      </div>
-                    )}
-                    <span className="absolute bottom-1 right-1 px-1 py-0.5 rounded bg-black/80 text-white text-[10px] font-mono-tabular leading-none">
-                      {scaledDur}s
-                    </span>
-                  </button>
+                  {isLegacy ? (
+                    <div
+                      aria-label={`${record.title} (Legacy YouTube read-only)`}
+                      className="relative w-24 sm:w-28 aspect-video rounded-md overflow-hidden bg-[#e7ecf8] dark:bg-[#141933] border border-[#d2dcf0] dark:border-[#21284c] shrink-0 opacity-80"
+                    >
+                      {record.thumbnail ? (
+                        <img
+                          src={record.thumbnail}
+                          alt={record.title}
+                          referrerPolicy="no-referrer"
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center text-[#4d597d] dark:text-[#919ec4]">
+                          <Film className="w-4 h-4" />
+                        </div>
+                      )}
+                      <span className="absolute bottom-1 right-1 px-1 py-0.5 rounded bg-black/80 text-white text-[10px] font-mono-tabular leading-none">
+                        {scaledDur}s
+                      </span>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => onOpenProject(record)}
+                      aria-label={`Open ${record.title}`}
+                      className="relative w-24 sm:w-28 aspect-video rounded-md overflow-hidden bg-[#e7ecf8] dark:bg-[#141933] border border-[#d2dcf0] dark:border-[#21284c] shrink-0 cursor-pointer group"
+                    >
+                      {record.thumbnail ? (
+                        <img
+                          src={record.thumbnail}
+                          alt={record.title}
+                          referrerPolicy="no-referrer"
+                          className="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-200"
+                        />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center text-[#4d597d] dark:text-[#919ec4]">
+                          <Film className="w-4 h-4" />
+                        </div>
+                      )}
+                      <span className="absolute bottom-1 right-1 px-1 py-0.5 rounded bg-black/80 text-white text-[10px] font-mono-tabular leading-none">
+                        {scaledDur}s
+                      </span>
+                    </button>
+                  )}
 
                   {/* Details */}
                   <div className="flex-1 min-w-0">
@@ -284,6 +309,10 @@ export function SavedProjectsPanel({
                           <X className="w-3.5 h-3.5" />
                         </button>
                       </div>
+                    ) : isLegacy ? (
+                      <div className="text-left text-[13px] font-semibold text-[#4d597d] dark:text-[#919ec4] truncate block max-w-full">
+                        {record.title}
+                      </div>
                     ) : (
                       <button
                         type="button"
@@ -295,7 +324,7 @@ export function SavedProjectsPanel({
                     )}
 
                     <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-[#4d597d] dark:text-[#919ec4] font-mono-tabular">
-                      <span>{record.sourceType === "youtube" ? "YouTube" : "Local"}</span>
+                      <span>{isLegacy ? "Legacy YouTube · Read-only" : "Local"}</span>
                       <span aria-hidden="true">·</span>
                       <span>
                         {record.scenes.length}{" "}
@@ -308,7 +337,7 @@ export function SavedProjectsPanel({
                       </span>
                       <span aria-hidden="true">·</span>
                       <span>{formatShortDate(record.updatedAt)}</span>
-                      {record.sourceType === "local" && (
+                      {!isLegacy && (
                         <>
                           <span aria-hidden="true">·</span>
                           <span>
@@ -322,41 +351,52 @@ export function SavedProjectsPanel({
 
                     {/* Row Actions */}
                     <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() => onOpenProject(record)}
-                        className={`h-7 px-3 rounded-md text-[11px] font-semibold cursor-pointer transition-colors whitespace-nowrap shrink-0 ${
-                          isActive
-                            ? "bg-teal-700 text-white dark:bg-teal-400 dark:text-[#060918]"
-                            : "bg-[#0c1026] text-white dark:bg-[#f3f5fc] dark:text-[#070814] hover:bg-teal-700 dark:hover:bg-teal-400 dark:hover:text-[#060918]"
-                        }`}
-                      >
-                        {isActive ? "Active" : "Open"}
-                      </button>
-
-                      {record.sourceType === "local" && !record.hasLocalVideoBlob && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setRelinkTargetId(record.id);
-                            relinkInputRef.current?.click();
-                          }}
-                          className="h-7 px-2.5 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center gap-1 cursor-pointer transition-colors whitespace-nowrap"
+                      {isLegacy ? (
+                        <span
+                          title="Legacy YouTube projects are read-only and cannot open in Studio. Export JSON for backup or upload a local video to edit."
+                          className="h-7 px-2.5 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-[#e7ecf8]/70 dark:bg-[#141933]/70 text-[11px] font-medium text-[#4d597d] dark:text-[#919ec4] inline-flex items-center whitespace-nowrap shrink-0"
                         >
-                          <Link2 className="w-3 h-3" />
-                          <span>Link Video</span>
-                        </button>
-                      )}
+                          Read-only (Legacy)
+                        </span>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => onOpenProject(record)}
+                            className={`h-7 px-3 rounded-md text-[11px] font-semibold cursor-pointer transition-colors whitespace-nowrap shrink-0 ${
+                              isActive
+                                ? "bg-teal-700 text-white dark:bg-teal-400 dark:text-[#060918]"
+                                : "bg-[#0c1026] text-white dark:bg-[#f3f5fc] dark:text-[#070814] hover:bg-teal-700 dark:hover:bg-teal-400 dark:hover:text-[#060918]"
+                            }`}
+                          >
+                            {isActive ? "Active" : "Open"}
+                          </button>
 
-                      <button
-                        type="button"
-                        onClick={() => startRename(record)}
-                        title="Rename project"
-                        aria-label={`Rename ${record.title}`}
-                        className="h-7 w-7 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] flex items-center justify-center text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] cursor-pointer transition-colors"
-                      >
-                        <Pencil className="w-3 h-3" />
-                      </button>
+                          {!record.hasLocalVideoBlob && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setRelinkTargetId(record.id);
+                                relinkInputRef.current?.click();
+                              }}
+                              className="h-7 px-2.5 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center gap-1 cursor-pointer transition-colors whitespace-nowrap"
+                            >
+                              <Link2 className="w-3 h-3" />
+                              <span>Link Video</span>
+                            </button>
+                          )}
+
+                          <button
+                            type="button"
+                            onClick={() => startRename(record)}
+                            title="Rename project"
+                            aria-label={`Rename ${record.title}`}
+                            className="h-7 w-7 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] flex items-center justify-center text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] cursor-pointer transition-colors"
+                          >
+                            <Pencil className="w-3 h-3" />
+                          </button>
+                        </>
+                      )}
 
                       <button
                         type="button"

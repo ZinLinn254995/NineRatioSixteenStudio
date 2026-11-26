@@ -2638,7 +2638,6 @@ async function processUploadedVideo(
     return {
       status: 200 as const,
       body: {
-        sourceType: "local",
         uploadId,
         title,
         channel: embedded ? "Local Video · Embedded Subtitles" : "Local Video",
@@ -3025,7 +3024,6 @@ app.post("/api/process-clip-audio", async (req, res) => {
     }));
 
     const payload = {
-      sourceType: "local" as const,
       title,
       channel: "Local Video",
       sourceDurationSec: totalDuration,
@@ -3246,225 +3244,6 @@ app.post(
   }
 );
 
-// Transcribe ONLY the user-selected multiple scenes from a YouTube video
-app.post("/api/process-video", async (req, res) => {
-  const {
-    videoId,
-    title,
-    channel,
-    durationSec = 180,
-    selectedScenes = [],
-    translationTone,
-    stream = false,
-  } = req.body as {
-    videoId?: string;
-    title?: string;
-    channel?: string;
-    durationSec?: number;
-    selectedScenes?: { startSec: number; endSec: number }[];
-    translationTone?: TranslationTone;
-    stream?: boolean;
-  };
-
-  const wantStream = Boolean(stream) || Boolean(req.headers.accept?.includes("application/x-ndjson"));
-  const sendNdjson = (payload: Record<string, unknown>) => {
-    if (!res.writableEnded) {
-      res.write(`${JSON.stringify(payload)}\n`);
-    }
-  };
-  const emitProgress = (ev: ProcessProgressEvent) => {
-    if (wantStream) {
-      sendNdjson({ type: "progress", ...ev });
-    }
-  };
-
-  try {
-    if (!videoId) {
-      res.status(400).json({ error: "Missing YouTube videoId." });
-      return;
-    }
-
-    const tone = normalizeTranslationTone(translationTone);
-    const scenes = normalizeSelectedScenes(selectedScenes, Math.max(10, Number(durationSec) || 600));
-    if (scenes.length === 0) {
-      res.status(400).json({ error: "Please select at least one scene before generating subtitles." });
-      return;
-    }
-
-    if (wantStream) {
-      res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
-      res.setHeader("Cache-Control", "no-cache, no-transform");
-      res.setHeader("X-Accel-Buffering", "no");
-      res.flushHeaders?.();
-    }
-
-    const ai = getGeminiClient();
-    const totalClips = scenes.length;
-    emitProgress({
-      stage: "extracting",
-      label:
-        totalClips === 1
-          ? "Preparing clip stream..."
-          : `Preparing ${totalClips} clip streams...`,
-      percent: 18,
-      clipIndex: 1,
-      totalClips,
-    });
-
-    emitProgress({
-      stage: "detecting",
-      label:
-        totalClips === 1
-          ? "Detecting speech in clip..."
-          : `Detecting speech in ${totalClips} clips...`,
-      percent: 32,
-      clipIndex: 1,
-      totalClips,
-    });
-
-    emitProgress({
-      stage: "generating",
-      label:
-        totalClips === 1
-          ? "Generating Thai & Burmese subtitles..."
-          : `Generating subtitles (0/${totalClips} clips)...`,
-      percent: 42,
-      clipIndex: 1,
-      totalClips,
-    });
-
-    let completedClips = 0;
-    // Analyze each user-selected scene with bounded concurrency to avoid API burst 503s
-    const results = await mapWithConcurrency(scenes, 2, async (sc, idx) => {
-      const resp = await generateGroundedWithFailover(
-        ai,
-        [
-          {
-            role: "user",
-            parts: [
-              {
-                fileData: {
-                  fileUri: `https://www.youtube.com/watch?v=${videoId}`,
-                },
-                videoMetadata: {
-                  startOffset: `${sc.startSec}s`,
-                  endOffset: `${sc.endSec}s`,
-                  fps: 0.5,
-                },
-              },
-              {
-                text: getClipPrompt(
-                  sc.durationSec,
-                  sc.startSec,
-                  sc.endSec,
-                  undefined,
-                  false,
-                  tone
-                ),
-              },
-            ],
-          },
-        ],
-        sceneTranscriptSchema,
-        ThinkingLevel.LOW,
-        {
-          onRetry: ({ attempt, maxAttempts }) => {
-            const pct = 42 + Math.round((completedClips / Math.max(1, totalClips)) * 48);
-            emitProgress({
-              stage: "generating",
-              label: `AI model busy, retrying automatically (${attempt}/${maxAttempts})...`,
-              percent: Math.min(92, pct),
-              clipIndex: idx + 1,
-              totalClips,
-            });
-          },
-        }
-      );
-      completedClips++;
-      const pct = 42 + Math.round((completedClips / Math.max(1, totalClips)) * 48);
-      emitProgress({
-        stage: "generating",
-        label:
-          totalClips === 1
-            ? "Translating Thai dialogue..."
-            : `Generating subtitles (${completedClips}/${totalClips} clips)...`,
-        percent: Math.min(92, pct),
-        clipIndex: idx + 1,
-        totalClips,
-      });
-      return JSON.parse((resp.text || "{}").trim()) as RawSceneUtterances;
-    });
-
-    emitProgress({
-      stage: "compiling",
-      label: "Compiling & syncing subtitles...",
-      percent: 96,
-      totalClips,
-    });
-
-    const compiled = compileSceneTranscripts(scenes, results);
-    if (compiled.subtitles.length === 0) {
-      const msg = "No spoken dialogue was detected inside your selected scenes.";
-      if (wantStream) {
-        sendNdjson({ type: "error", status: 422, error: msg });
-        res.end();
-      } else {
-        res.status(422).json({ error: msg });
-      }
-      return;
-    }
-
-    const keyframeUrls = [
-      `/api/image-proxy?url=${encodeURIComponent(`https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`)}`,
-      `/api/image-proxy?url=${encodeURIComponent(`https://i.ytimg.com/vi/${videoId}/1.jpg`)}`,
-      `/api/image-proxy?url=${encodeURIComponent(`https://i.ytimg.com/vi/${videoId}/2.jpg`)}`,
-      `/api/image-proxy?url=${encodeURIComponent(`https://i.ytimg.com/vi/${videoId}/3.jpg`)}`,
-      `/api/image-proxy?url=${encodeURIComponent(`https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`)}`,
-    ];
-
-    const speechRegions = compiled.subtitles.map((s) => ({
-      sourceStartSec: s.sourceStartSec,
-      sourceEndSec: s.sourceEndSec,
-    }));
-
-    const payload = {
-      sourceType: "youtube" as const,
-      videoId,
-      title: title || "YouTube Video",
-      channel: channel || "YouTube",
-      sourceDurationSec: durationSec,
-      targetDurationSec: compiled.targetDurationSec,
-      scenes: compiled.scenes,
-      subtitles: compiled.subtitles,
-      speechRegions,
-      keyframeUrls,
-    };
-
-    if (wantStream) {
-      emitProgress({
-        stage: "compiling",
-        label: "Subtitles ready",
-        percent: 100,
-        totalClips,
-      });
-      sendNdjson({ type: "result", status: 200, data: payload });
-      res.end();
-      return;
-    }
-
-    res.json(payload);
-  } catch (err) {
-    console.error("Process video error:", err);
-    const formatted = formatGeminiError(err, "Failed to transcribe selected scenes.");
-    if (wantStream && res.headersSent) {
-      sendNdjson({ type: "error", status: formatted.status, error: formatted.message });
-      res.end();
-      return;
-    }
-    res.status(formatted.status).json({ error: formatted.message });
-  }
-});
-
 const singleSubtitleSchema = {
   type: Type.OBJECT,
   properties: {
@@ -3517,8 +3296,6 @@ app.post("/api/regenerate-subtitle", async (req, res) => {
   const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "thai-regen-sub-"));
   try {
     const {
-      sourceType,
-      videoId,
       uploadId,
       clipAudioBase64,
       clipMimeType,
@@ -3528,8 +3305,6 @@ app.post("/api/regenerate-subtitle", async (req, res) => {
       customHint,
       translationTone,
     } = (req.body || {}) as {
-      sourceType?: "local" | "youtube";
-      videoId?: string;
       uploadId?: string;
       clipAudioBase64?: string;
       clipMimeType?: string;
@@ -3591,7 +3366,7 @@ app.post("/api/regenerate-subtitle", async (req, res) => {
 - burmese: ${subtitle.burmese || "(none)"}`;
 
     let audioBase64: string | null = null;
-    if (sourceType === "local" && clipAudioBase64) {
+    if (clipAudioBase64) {
       const rawBuf = Buffer.from(clipAudioBase64, "base64");
       const ext = clipMimeType?.includes("wav") ? ".wav" : ".m4a";
       const inClip = path.join(tmpDir, `inline-line${ext}`);
@@ -3609,7 +3384,7 @@ app.post("/api/regenerate-subtitle", async (req, res) => {
       } catch {
         audioBase64 = null;
       }
-    } else if (sourceType === "local" && uploadId) {
+    } else if (uploadId) {
       audioBase64 = await withUploadSessionLock(uploadId, async (uploadedPath) => {
         const clipStart = Math.max(0, srcStart - 0.18);
         const clipDur = Math.max(0.5, srcEnd - clipStart + 0.18);
@@ -3647,8 +3422,7 @@ app.post("/api/regenerate-subtitle", async (req, res) => {
       });
     }
 
-    const useYouTubeAudio = sourceType === "youtube" && Boolean(videoId);
-    const hasAudio = Boolean(audioBase64) || useYouTubeAudio;
+    const hasAudio = Boolean(audioBase64);
 
     const promptText = `${
       hasAudio
@@ -3670,38 +3444,14 @@ TASK:
 3. Provide accurate "thaiScript", clear English "thaiPhonetic" pronunciation (e.g. "Sa-wat-dee khrap"), and a matching word-by-word "words" breakdown aligned within [0.0, ${lineDur.toFixed(2)}] seconds (each word having "phonetic", "thai", 1-2 word "burmeseGloss" for content words or "" for particles, "startSec", and "endSec").`;
 
     const ai = getGeminiClient();
-    let contents: Parameters<typeof generateGroundedWithFailover>[1];
-    if (audioBase64) {
-      contents = {
-        parts: [
-          { inlineData: { mimeType: "audio/wav", data: audioBase64 } },
-          { text: promptText },
-        ],
-      };
-    } else if (useYouTubeAudio && videoId) {
-      const metaStart = Math.max(0, Math.floor(srcStart - 0.8));
-      const metaEnd = Math.max(metaStart + 2, Math.ceil(srcEnd + 0.8));
-      contents = [
-        {
-          role: "user",
+    const contents: Parameters<typeof generateGroundedWithFailover>[1] = audioBase64
+      ? {
           parts: [
-            {
-              fileData: {
-                fileUri: `https://www.youtube.com/watch?v=${videoId}`,
-              },
-              videoMetadata: {
-                startOffset: `${metaStart}s`,
-                endOffset: `${metaEnd}s`,
-                fps: 0.5,
-              },
-            },
+            { inlineData: { mimeType: "audio/wav", data: audioBase64 } },
             { text: promptText },
           ],
-        },
-      ];
-    } else {
-      contents = promptText;
-    }
+        }
+      : promptText;
 
     const resp = await generateGroundedWithFailover(
       ai,
@@ -3922,15 +3672,11 @@ app.post("/api/resync-subtitles", async (req, res) => {
   const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "thai-resync-"));
   try {
     const {
-      sourceType,
-      videoId,
       uploadId,
       clipsAudio,
       scenes = [],
       subtitles = [],
     } = (req.body || {}) as {
-      sourceType?: "local" | "youtube";
-      videoId?: string;
       uploadId?: string;
       clipsAudio?: Array<{
         trimLeadSec?: number;
@@ -3982,14 +3728,13 @@ app.post("/api/resync-subtitles", async (req, res) => {
 
     const ai = getGeminiClient();
 
-    if (sourceType === "local") {
-      let audioPrep: {
-        mp3Base64: string;
-        rms: Float32Array;
-        speechWindows: SpeechWindow[];
-      } | null = null;
+    let audioPrep: {
+      mp3Base64: string;
+      rms: Float32Array;
+      speechWindows: SpeechWindow[];
+    } | null = null;
 
-      if (Array.isArray(clipsAudio) && clipsAudio.length > 0) {
+    if (Array.isArray(clipsAudio) && clipsAudio.length > 0) {
         const pcmBuffers: Buffer[] = [];
         for (let i = 0; i < clipsAudio.length; i++) {
           const clip = clipsAudio[i];
@@ -4242,99 +3987,7 @@ CRITICAL RULES:
         }
       }
 
-      res.json({ subtitles: synced, usedAudio: true });
-      return;
-    }
-
-    if (sourceType === "youtube" && videoId) {
-      let cutCursor = 0;
-      const sceneTable = normalizedScenes.map((sc, idx) => {
-        const entry = {
-          sceneIndex: idx,
-          youtubeStartSec: sc.startSec,
-          youtubeEndSec: sc.endSec,
-          cutStartSec: Number(cutCursor.toFixed(2)),
-          cutEndSec: Number((cutCursor + sc.durationSec).toFixed(2)),
-        };
-        cutCursor += sc.durationSec;
-        return entry;
-      });
-      const minYt = sceneTable.length > 0 ? Math.max(0, Math.floor(Math.min(...sceneTable.map((s) => s.youtubeStartSec)))) : 0;
-      const maxYt = sceneTable.length > 0 ? Math.ceil(Math.max(...sceneTable.map((s) => s.youtubeEndSec))) : Math.ceil(totalCutDur);
-
-      const prompt = `Listen to the spoken dialogue in this YouTube video clip and re-align the cut-timeline "startTime" and "endTime" (in seconds from 0.00 to ${totalCutDur.toFixed(2)}) for EVERY subtitle line below so each line accurately matches when it is spoken.
-
-SCENE CUT TIMELINE MAPPING (YouTube time -> Cut Timeline seconds):
-${JSON.stringify(sceneTable)}
-
-EXISTING SUBTITLE LINES (keep EVERY "id" intact):
-${JSON.stringify(compactSubs)}
-
-RULES:
-- Return an item for EVERY single subtitle "id" in the input list.
-- All returned "startTime" and "endTime" MUST be in cut-timeline seconds [0.00, ${totalCutDur.toFixed(2)}], monotonically increasing, with NO overlaps.`;
-
-      const resp = await generateGroundedWithFailover(
-        ai,
-        [
-          {
-            role: "user",
-            parts: [
-              {
-                fileData: { fileUri: `https://www.youtube.com/watch?v=${videoId}` },
-                videoMetadata: {
-                  startOffset: `${minYt}s`,
-                  endOffset: `${Math.max(minYt + 2, maxYt)}s`,
-                  fps: 0.5,
-                },
-              },
-              { text: prompt },
-            ],
-          },
-        ],
-        resyncSubtitlesSchema,
-        ThinkingLevel.MEDIUM
-      );
-
-      const parsed = JSON.parse((resp.text || "{}").trim()) as {
-        items?: Array<{ id?: string; startTime?: number; endTime?: number }>;
-      };
-
-      const rawMap = new Map<string, { startTime: number; endTime: number }>();
-      for (const item of Array.isArray(parsed.items) ? parsed.items : []) {
-        if (!item?.id) continue;
-        const s = Math.max(0, Math.min(totalCutDur - 0.25, Number(item.startTime) || 0));
-        const e = Math.max(s + 0.25, Math.min(totalCutDur, Number(item.endTime) || s + 1));
-        rawMap.set(item.id, { startTime: s, endTime: e });
-      }
-
-      const synced = subtitles
-        .map((sub) => {
-          const hit = rawMap.get(sub.id);
-          const s = hit ? hit.startTime : Math.max(0, Math.min(totalCutDur - 0.25, sub.startTime));
-          const e = hit ? hit.endTime : Math.max(s + 0.25, Math.min(totalCutDur, sub.endTime));
-          return {
-            id: sub.id,
-            startTime: Number(s.toFixed(2)),
-            endTime: Number(e.toFixed(2)),
-          };
-        })
-        .sort((a, b) => a.startTime - b.startTime);
-
-      for (let i = 1; i < synced.length; i++) {
-        if (synced[i].startTime < synced[i - 1].endTime + 0.02) {
-          const mid = (synced[i - 1].endTime + synced[i].startTime) / 2;
-          synced[i - 1].endTime = Number(Math.max(synced[i - 1].startTime + 0.25, mid - 0.01).toFixed(2));
-          synced[i].startTime = Number(Math.max(synced[i - 1].endTime + 0.02, synced[i].startTime).toFixed(2));
-          synced[i].endTime = Number(Math.max(synced[i].startTime + 0.25, Math.min(totalCutDur, synced[i].endTime)).toFixed(2));
-        }
-      }
-
-      res.json({ subtitles: synced, usedAudio: true });
-      return;
-    }
-
-    res.status(400).json({ error: "No audio or video source available to AI-resync subtitles." });
+    res.json({ subtitles: synced, usedAudio: true });
   } catch (err) {
     console.error("Resync subtitles error:", err);
     const formatted = formatGeminiError(err, "Failed to resync subtitle timings with AI.");
@@ -4367,28 +4020,6 @@ function mapCutTimeToSourceServer(
   return { sceneIndex: 0, sourceSec: 0 };
 }
 
-function mapSourceTimeToCutServer(
-  scenes: Array<{ startSec: number; endSec: number; durationSec?: number }>,
-  sourceSec: number,
-  fallbackOriginCut = 0,
-  fallbackOriginSrc = 0
-): number {
-  if (!Array.isArray(scenes) || scenes.length === 0) {
-    return Math.max(0, sourceSec);
-  }
-  let acc = 0;
-  for (let i = 0; i < scenes.length; i++) {
-    const s = scenes[i];
-    const dur = Math.max(0.1, Number(s.durationSec) || Number(s.endSec) - Number(s.startSec) || 0.1);
-    if (sourceSec >= s.startSec - 0.5 && sourceSec <= s.endSec + 0.5) {
-      const off = Math.max(0, Math.min(dur, sourceSec - s.startSec));
-      return Number((acc + off).toFixed(2));
-    }
-    acc += dur;
-  }
-  return Math.max(0, Number((fallbackOriginCut + (sourceSec - fallbackOriginSrc)).toFixed(2)));
-}
-
 app.post("/api/transcribe-range", async (req, res) => {
   const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "thai-range-sub-"));
   try {
@@ -4398,9 +4029,7 @@ app.post("/api/transcribe-range", async (req, res) => {
       prevContext,
       nextContext,
       translationTone,
-      sourceType,
       uploadId,
-      videoId,
       clipAudioBase64,
       mimeType,
       trimLeadSec,
@@ -4412,9 +4041,7 @@ app.post("/api/transcribe-range", async (req, res) => {
       prevContext?: RegenerateContextLine | null;
       nextContext?: RegenerateContextLine | null;
       translationTone?: TranslationTone;
-      sourceType?: "local" | "youtube";
       uploadId?: string;
-      videoId?: string;
       clipAudioBase64?: string;
       mimeType?: string;
       trimLeadSec?: number;
@@ -4500,18 +4127,9 @@ app.post("/api/transcribe-range", async (req, res) => {
     }
 
     let localAudioPrep: LocalRangeAudioPrep | null = null;
-    let ytMeta: {
-      metaStart: number;
-      metaEnd: number;
-      metaDur: number;
-      srcReqStart: number;
-      srcReqEnd: number;
-    } | null = null;
+    const targetDur = Math.max(0.4, paddedCutEnd - paddedCutStart);
 
-    if (sourceType === "local") {
-      const targetDur = Math.max(0.4, paddedCutEnd - paddedCutStart);
-
-      if (clipAudioBase64) {
+    if (clipAudioBase64) {
         const ext = mimeType?.includes("wav") ? ".wav" : ".m4a";
         const inClip = path.join(tmpDir, `inline-range${ext}`);
         const pcmPath = path.join(tmpDir, "inline-range.pcm");
@@ -4699,37 +4317,17 @@ app.post("/api/transcribe-range", async (req, res) => {
         });
       }
 
-      if (!localAudioPrep) {
-        res.status(404).json({ error: "Uploaded video audio segment could not be extracted." });
-        return;
-      }
-    } else if (sourceType === "youtube" && videoId) {
-      const mappedStart = mapCutTimeToSourceServer(normalizedScenes, reqStart).sourceSec;
-      const mappedEnd = mapCutTimeToSourceServer(normalizedScenes, reqEnd).sourceSec;
-      const srcReqStart = Math.min(mappedStart, mappedEnd);
-      const srcReqEnd = Math.max(srcReqStart + 0.25, mappedEnd);
-      const metaStart = Math.max(0, Math.floor(srcReqStart - PAD_SEC));
-      const metaEnd = Math.max(metaStart + 2, Math.ceil(srcReqEnd + PAD_SEC));
-      ytMeta = {
-        metaStart,
-        metaEnd,
-        metaDur: metaEnd - metaStart,
-        srcReqStart,
-        srcReqEnd,
-      };
-    } else {
-      res.status(400).json({ error: "No local or YouTube audio source available for range transcription." });
+    if (!localAudioPrep) {
+      res.status(404).json({ error: "Uploaded video audio segment could not be extracted." });
       return;
     }
 
-    let rawRes: RawSceneUtterances;
-    if (localAudioPrep) {
-      const vadWindows = localAudioPrep.speechWindows
-        .filter((w) => w.endSec > focusStartInClip - 0.15 && w.startSec < focusEndInClip + 0.15)
-        .map((w) => ({
-          startSec: Number(Math.max(0, w.startSec).toFixed(2)),
-          endSec: Number(Math.min(localAudioPrep!.clipDur, w.endSec).toFixed(2)),
-        }));
+    const vadWindows = localAudioPrep.speechWindows
+      .filter((w) => w.endSec > focusStartInClip - 0.15 && w.startSec < focusEndInClip + 0.15)
+      .map((w) => ({
+        startSec: Number(Math.max(0, w.startSec).toFixed(2)),
+        endSec: Number(Math.min(localAudioPrep.clipDur, w.endSec).toFixed(2)),
+      }));
 
       const vadBlock =
         vadWindows.length > 0
@@ -4768,56 +4366,13 @@ For each spoken utterance:
         sceneTranscriptSchema,
         ThinkingLevel.HIGH
       );
-      const parsed = JSON.parse((resp.text || "{}").trim()) as RawSceneUtterances;
-      rawRes = refineUtterancesWithEnvelope(
-        parsed,
-        localAudioPrep.rms,
-        localAudioPrep.clipDur,
-        localAudioPrep.speechWindows
-      );
-    } else if (ytMeta && videoId) {
-      const ytFocusStart = Number((ytMeta.srcReqStart - ytMeta.metaStart).toFixed(2));
-      const ytFocusEnd = Number((ytMeta.srcReqEnd - ytMeta.metaStart).toFixed(2));
-      const prompt = `Listen carefully to the YouTube video segment from ${ytMeta.metaStart}s to ${ytMeta.metaEnd}s (clip duration ${ytMeta.metaDur.toFixed(1)}s).
-The user wants to fill missed subtitle(s) specifically for the TARGET RANGE [${ytFocusStart.toFixed(2)}s – ${ytFocusEnd.toFixed(2)}s] relative to the start of this clip (${ytMeta.srcReqStart.toFixed(2)}s – ${ytMeta.srcReqEnd.toFixed(2)}s in the video).
-${contextBlock}
-CRITICAL RULES:
-- ONLY transcribe and translate spoken dialogue actually heard inside the target range.
-- Do NOT duplicate Previous/Next surrounding context lines if their edges bleed into the clip padding.
-- If there is NO spoken dialogue in the target range (only silence or music), set "hasDialogue": false and return an empty "utterances" array.
-- Report ALL utterance and word "startSec"/"endSec" relative to the start of this clip (0.0s to ${ytMeta.metaDur.toFixed(1)}s), chronological and non-overlapping.
-
-${getTranslationToneInstruction(tone)}
-
-For each spoken utterance:
-- "originalSpokenText", "thaiScript", "thaiPhonetic", "burmese", and "words" (space-separated tokens matching "thaiPhonetic" with "phonetic", "thai", "burmeseGloss", "startSec", "endSec").`;
-
-      const resp = await generateGroundedWithFailover(
-        ai,
-        [
-          {
-            role: "user",
-            parts: [
-              {
-                fileData: { fileUri: `https://www.youtube.com/watch?v=${videoId}` },
-                videoMetadata: {
-                  startOffset: `${ytMeta.metaStart}s`,
-                  endOffset: `${ytMeta.metaEnd}s`,
-                  fps: 0.5,
-                },
-              },
-              { text: prompt },
-            ],
-          },
-        ],
-        sceneTranscriptSchema,
-        ThinkingLevel.HIGH
-      );
-      rawRes = JSON.parse((resp.text || "{}").trim()) as RawSceneUtterances;
-    } else {
-      res.status(400).json({ error: "Audio source could not be prepared." });
-      return;
-    }
+    const parsed = JSON.parse((resp.text || "{}").trim()) as RawSceneUtterances;
+    const rawRes = refineUtterancesWithEnvelope(
+      parsed,
+      localAudioPrep.rms,
+      localAudioPrep.clipDur,
+      localAudioPrep.speechWindows
+    );
 
     if (rawRes.hasDialogue === false || !Array.isArray(rawRes.utterances) || rawRes.utterances.length === 0) {
       res.json({
@@ -4828,16 +4383,6 @@ For each spoken utterance:
       });
       return;
     }
-
-    const ytLooksAbsolute =
-      Boolean(ytMeta) &&
-      ytMeta!.metaStart > 2 &&
-      rawRes.utterances.some((u) => Number(u.endSec) > ytMeta!.metaDur + 0.8) &&
-      rawRes.utterances.every(
-        (u) =>
-          Number(u.startSec) >= ytMeta!.metaStart - 1 &&
-          Number(u.endSec) <= ytMeta!.metaEnd + 1.5
-      );
 
     interface MappedRangeUtt {
       cutStart: number;
@@ -4857,21 +4402,9 @@ For each spoken utterance:
       );
       if (!hasText) continue;
 
-      let rawCutStart = 0;
-      let rawCutEnd = 0;
-      if (localAudioPrep) {
-        rawCutStart = paddedCutStart + (Number(u.startSec) || 0);
-        rawCutEnd = paddedCutStart + Math.max((Number(u.startSec) || 0) + 0.25, Number(u.endSec) || 0);
-      } else if (ytMeta) {
-        const srcS = ytLooksAbsolute
-          ? Number(u.startSec) || ytMeta.srcReqStart
-          : ytMeta.metaStart + (Number(u.startSec) || 0);
-        const srcE = ytLooksAbsolute
-          ? Number(u.endSec) || srcS + 0.5
-          : ytMeta.metaStart + Math.max((Number(u.startSec) || 0) + 0.25, Number(u.endSec) || 0);
-        rawCutStart = mapSourceTimeToCutServer(normalizedScenes, srcS, reqStart, ytMeta.srcReqStart);
-        rawCutEnd = mapSourceTimeToCutServer(normalizedScenes, srcE, reqStart, ytMeta.srcReqStart);
-      }
+      const rawCutStart = paddedCutStart + (Number(u.startSec) || 0);
+      const rawCutEnd =
+        paddedCutStart + Math.max((Number(u.startSec) || 0) + 0.25, Number(u.endSec) || 0);
 
       const ovStart = Math.max(reqStart - 0.12, rawCutStart);
       const ovEnd = Math.min(reqEnd + 0.12, rawCutEnd);
@@ -4913,13 +4446,7 @@ For each spoken utterance:
               .map((w) => ({ phonetic: w, thai: w, burmeseGloss: "" }));
 
       // Shift Gemini word timestamps to be relative to cutStart when clip-relative
-      const rawOriginInClip = localAudioPrep
-        ? rawCutStart - paddedCutStart
-        : ytMeta
-          ? ytLooksAbsolute
-            ? mapCutTimeToSourceServer(normalizedScenes, rawCutStart).sourceSec
-            : mapCutTimeToSourceServer(normalizedScenes, rawCutStart).sourceSec - ytMeta.metaStart
-          : 0;
+      const rawOriginInClip = rawCutStart - paddedCutStart;
       const firstWordStart = rawWords.find((w) => typeof w.startSec === "number")?.startSec;
       const wordsAreClipOrAbs =
         typeof firstWordStart === "number" &&
@@ -4977,37 +4504,6 @@ For each spoken utterance:
     res.status(formatted.status).json({ error: formatted.message });
   } finally {
     await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
-  }
-});
-
-// Proxy YouTube storyboard/thumbnail images cleanly with CORS for canvas export
-app.get("/api/image-proxy", async (req, res) => {
-  try {
-    const target = String(req.query.url ?? "");
-    if (!target.startsWith("https://i.ytimg.com/")) {
-      res.status(400).send("Invalid image URL");
-      return;
-    }
-    const resp = await fetch(target);
-    if (!resp.ok) {
-      const fallbackUrl = target.replace("maxresdefault.jpg", "hqdefault.jpg");
-      const fallbackResp = await fetch(fallbackUrl);
-      if (!fallbackResp.ok) {
-        res.status(404).send("Image not found");
-        return;
-      }
-      const buf = Buffer.from(await fallbackResp.arrayBuffer());
-      res.setHeader("Content-Type", "image/jpeg");
-      res.setHeader("Cache-Control", "public, max-age=3600");
-      res.send(buf);
-      return;
-    }
-    const buf = Buffer.from(await resp.arrayBuffer());
-    res.setHeader("Content-Type", resp.headers.get("content-type") || "image/jpeg");
-    res.setHeader("Cache-Control", "public, max-age=3600");
-    res.send(buf);
-  } catch {
-    res.status(500).send("Proxy error");
   }
 });
 
@@ -5663,6 +5159,53 @@ function buildTopVideoFfmpegFilter(
     "setsar=1",
   ];
 
+  // Apply CSS-equivalent color/blur filters BEFORE rotate/pad/crop so #111111 matte stays pure #111111
+  const brightnessPct = editSettings?.brightness ?? 100;
+  const contrastPct = editSettings?.contrast ?? 100;
+  const satPct = editSettings?.saturation ?? 100;
+  const hueDeg = editSettings?.hueDeg ?? 0;
+  const grayscalePct = editSettings?.grayscale ?? 0;
+  const sepiaPct = editSettings?.sepia ?? 0;
+  const blurPx = editSettings?.blurPx ?? 0;
+  const vignettePct = editSettings?.vignette ?? 0;
+
+  if (Math.abs(brightnessPct - 100) >= 1 || Math.abs(contrastPct - 100) >= 1) {
+    const b = Math.max(0.1, Math.min(3, brightnessPct / 100)).toFixed(3);
+    const c = Math.max(0.2, Math.min(3, contrastPct / 100)).toFixed(3);
+    // Exact CSS Filter Effects order & math: multiplicative brightness then contrast around 127.5
+    const expr = `clip((clip(val*${b},0,255)-127.5)*${c}+127.5,0,255)`;
+    parts.push(`format=rgb24,lutrgb=r='${expr}':g='${expr}':b='${expr}',format=yuv420p`);
+  }
+  if (Math.abs(satPct - 100) >= 1) {
+    const sat = Math.max(0, Math.min(3, satPct / 100));
+    parts.push(`eq=saturation=${sat.toFixed(3)}`);
+  }
+  if (Math.abs(hueDeg) >= 1) {
+    parts.push(`hue=h=${hueDeg.toFixed(1)}`);
+  }
+  if (sepiaPct >= 1) {
+    const s = Math.max(0, Math.min(1, sepiaPct / 100));
+    const rr = (1 - s + 0.393 * s).toFixed(3);
+    const rg = (0.769 * s).toFixed(3);
+    const rb = (0.189 * s).toFixed(3);
+    const gr = (0.349 * s).toFixed(3);
+    const gg = (1 - s + 0.686 * s).toFixed(3);
+    const gb = (0.168 * s).toFixed(3);
+    const br = (0.272 * s).toFixed(3);
+    const bg = (0.534 * s).toFixed(3);
+    const bb = (1 - s + 0.131 * s).toFixed(3);
+    parts.push(
+      `format=rgb24,colorchannelmixer=${rr}:${rg}:${rb}:0:${gr}:${gg}:${gb}:0:${br}:${bg}:${bb}:0,format=yuv420p`
+    );
+  }
+  if (grayscalePct >= 1) {
+    const graySat = Math.max(0, Math.min(1, 1 - grayscalePct / 100));
+    parts.push(`hue=s=${graySat.toFixed(3)}`);
+  }
+  if (blurPx >= 0.4) {
+    parts.push(`gblur=sigma=${Math.min(8, blurPx).toFixed(2)}`);
+  }
+
   // Apply rotate before hflip/vflip to match CSS/Canvas transform order (scale(flip) * rotate(deg))
   if (Math.abs(rotateDeg) >= 0.5) {
     const rad = ((rotateDeg * Math.PI) / 180).toFixed(5);
@@ -5683,56 +5226,15 @@ function buildTopVideoFfmpegFilter(
     `crop=w=${width}:h=${topVideoH}:x='(iw-${width})/2-(${shiftX})':y='(ih-${topVideoH})/2-(${shiftY})'`
   );
 
-  // Optional color/filter adjustments (only appended when non-default for max speed)
-  const brightnessPct = editSettings?.brightness ?? 100;
-  const contrastPct = editSettings?.contrast ?? 100;
-  const satPct = editSettings?.saturation ?? 100;
-  const hueDeg = editSettings?.hueDeg ?? 0;
-  const grayscalePct = editSettings?.grayscale ?? 0;
-  const sepiaPct = editSettings?.sepia ?? 0;
-  const blurPx = editSettings?.blurPx ?? 0;
-  const vignettePct = editSettings?.vignette ?? 0;
-
-  if (
-    Math.abs(brightnessPct - 100) >= 1 ||
-    Math.abs(contrastPct - 100) >= 1 ||
-    Math.abs(satPct - 100) >= 1 ||
-    grayscalePct >= 1
-  ) {
-    const eqBright = Math.max(-0.5, Math.min(0.5, (brightnessPct - 100) / 200));
-    const eqContrast = Math.max(0.2, Math.min(2.5, contrastPct / 100));
-    const effectiveSat = Math.max(0, Math.min(3, (satPct / 100) * (1 - grayscalePct / 100)));
-    parts.push(
-      `eq=brightness=${eqBright.toFixed(3)}:contrast=${eqContrast.toFixed(3)}:saturation=${effectiveSat.toFixed(3)}`
-    );
-  }
-  if (Math.abs(hueDeg) >= 1) {
-    parts.push(`hue=h=${hueDeg.toFixed(1)}`);
-  }
-  if (sepiaPct >= 5) {
-    const s = Math.max(0, Math.min(1, sepiaPct / 100));
-    const rr = (1 - s + 0.393 * s).toFixed(3);
-    const rg = (0.769 * s).toFixed(3);
-    const rb = (0.189 * s).toFixed(3);
-    const gr = (0.349 * s).toFixed(3);
-    const gg = (1 - s + 0.686 * s).toFixed(3);
-    const gb = (0.168 * s).toFixed(3);
-    const br = (0.272 * s).toFixed(3);
-    const bg = (0.534 * s).toFixed(3);
-    const bb = (1 - s + 0.131 * s).toFixed(3);
-    parts.push(
-      `colorchannelmixer=${rr}:${rg}:${rb}:0:${gr}:${gg}:${gb}:0:${br}:${bg}:${bb}:0`
-    );
-  }
-  if (blurPx >= 0.4) {
-    parts.push(`gblur=sigma=${Math.min(8, blurPx).toFixed(2)}`);
-  }
+  // Viewport overlays applied AFTER crop so noise and vignette center cleanly on the final frame
   if (editSettings?.adversarialNoise) {
     const strength = Math.max(2, Math.min(12, Math.round((Number(editSettings.adversarialStrength) || 12) / 3)));
     parts.push(`noise=alls=${strength}:allf=t+u`);
   }
-  if (vignettePct >= 5) {
-    const angle = Math.max(0.25, Math.min(1.2, (vignettePct / 100) * 0.9)).toFixed(3);
+  if (vignettePct >= 1) {
+    const alpha = Math.max(0, Math.min(0.85, (vignettePct / 100) * 0.85));
+    const transmission = Math.max(0.08, 1 - alpha);
+    const angle = Math.max(0.08, Math.min(1.15, Math.acos(Math.pow(transmission, 0.25)))).toFixed(3);
     parts.push(`vignette=angle=${angle}`);
   }
 
@@ -5849,18 +5351,36 @@ app.post("/api/export-fast-mp4", async (req, res) => {
         if (normalizedScenes.length === 0) {
           ffmpegInputs.push("-i", uploadedPath);
           const speedExpr = Math.abs(speed - 1) > 0.01 ? `,setpts=PTS/${speed.toFixed(4)}` : "";
-          filterChains.push(`[0:v]${topFilter}${speedExpr},fps=24,format=yuv420p[topv]`);
+          filterChains.push(`[0:v]fps=24,${topFilter}${speedExpr},fps=24,format=yuv420p[topv]`);
         } else if (normalizedScenes.length === 1) {
           const sc = normalizedScenes[0];
-          ffmpegInputs.push("-ss", String(sc.startSec), "-t", String(sc.durationSec), "-i", uploadedPath);
+          ffmpegInputs.push(
+            "-ss",
+            String(sc.startSec),
+            "-t",
+            (sc.durationSec + 0.15).toFixed(4),
+            "-i",
+            uploadedPath
+          );
           const speedExpr = Math.abs(speed - 1) > 0.01 ? `,setpts=PTS/${speed.toFixed(4)}` : "";
-          filterChains.push(`[0:v]${topFilter}${speedExpr},fps=24,format=yuv420p[topv]`);
+          filterChains.push(
+            `[0:v]fps=24,${topFilter},tpad=stop_mode=clone:stop_duration=0.25,trim=duration=${sc.durationSec.toFixed(4)},setpts=PTS-STARTPTS${speedExpr},fps=24,format=yuv420p[topv]`
+          );
         } else {
           const concatLabels: string[] = [];
           for (let i = 0; i < normalizedScenes.length; i++) {
             const sc = normalizedScenes[i];
-            ffmpegInputs.push("-ss", String(sc.startSec), "-t", String(sc.durationSec), "-i", uploadedPath);
-            filterChains.push(`[${i}:v]${topFilter}[v${i}]`);
+            ffmpegInputs.push(
+              "-ss",
+              String(sc.startSec),
+              "-t",
+              (sc.durationSec + 0.15).toFixed(4),
+              "-i",
+              uploadedPath
+            );
+            filterChains.push(
+              `[${i}:v]fps=24,${topFilter},tpad=stop_mode=clone:stop_duration=0.25,trim=duration=${sc.durationSec.toFixed(4)},setpts=PTS-STARTPTS[v${i}]`
+            );
             concatLabels.push(`[v${i}]`);
           }
           const speedExpr = Math.abs(speed - 1) > 0.01 ? `,setpts=PTS/${speed.toFixed(4)}` : "";

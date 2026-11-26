@@ -229,23 +229,64 @@ function uint8ToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+const myGraphemeSegmenter =
+  typeof Intl !== "undefined" && typeof Intl.Segmenter === "function"
+    ? new Intl.Segmenter("my", { granularity: "grapheme" })
+    : null;
+
+function splitGraphemes(text: string): string[] {
+  if (!text) return [];
+  if (myGraphemeSegmenter) {
+    const out: string[] = [];
+    for (const seg of myGraphemeSegmenter.segment(text)) {
+      out.push(seg.segment);
+    }
+    return out;
+  }
+  return Array.from(text);
+}
+
 function wrapTextLines(
   ctx: CanvasRenderingContext2D,
   text: string,
   maxWidth: number
 ): string[] {
-  const chars = Array.from(text);
+  const safeMaxW = Math.max(24, maxWidth);
+  const trimmed = text.trim();
+  if (!trimmed) return [];
+
+  const pushByGraphemes = (token: string, lines: string[]): string => {
+    let cur = "";
+    for (const g of splitGraphemes(token)) {
+      const test = cur + g;
+      if (ctx.measureText(test).width > safeMaxW && cur) {
+        lines.push(cur);
+        cur = g;
+      } else {
+        cur = test;
+      }
+    }
+    return cur;
+  };
+
   const lines: string[] = [];
-  let current = "";
-  // Prefer space splitting for Latin/spaced text; character wrapping for Burmese
-  const hasSpaces = /\s/.test(text);
-  if (hasSpaces && !/[\u1000-\u109F]/.test(text)) {
-    const words = text.split(/\s+/);
+  // Prefer space splitting for spaced non-Myanmar text; grapheme cluster wrapping for Myanmar/Thai/unspaced
+  const hasSpaces = /\s/.test(trimmed);
+  if (hasSpaces && !/[\u1000-\u109F\uAA60-\uAA7F]/.test(trimmed)) {
+    const words = trimmed.split(/\s+/);
+    let current = "";
     for (const w of words) {
       const test = current ? `${current} ${w}` : w;
-      if (ctx.measureText(test).width > maxWidth && current) {
-        lines.push(current);
-        current = w;
+      if (ctx.measureText(test).width > safeMaxW) {
+        if (current) {
+          lines.push(current);
+          current = "";
+        }
+        if (ctx.measureText(w).width > safeMaxW) {
+          current = pushByGraphemes(w, lines);
+        } else {
+          current = w;
+        }
       } else {
         current = test;
       }
@@ -254,16 +295,8 @@ function wrapTextLines(
     return lines;
   }
 
-  for (const ch of chars) {
-    const test = current + ch;
-    if (ctx.measureText(test).width > maxWidth && current) {
-      lines.push(current);
-      current = ch;
-    } else {
-      current = test;
-    }
-  }
-  if (current) lines.push(current);
+  const tail = pushByGraphemes(trimmed, lines);
+  if (tail) lines.push(tail);
   return lines;
 }
 
@@ -273,16 +306,19 @@ interface MeasuredCard {
   height: number;
   wordLayouts: {
     phonetic: string;
-    gloss: string;
+    glossLines: string[];
     x: number;
     y: number;
-    w: number;
-    h: number;
+    pillW: number;
+    pillH: number;
+    pillPadX: number;
+    glossTopY: number;
     startTime: number;
     endTime: number;
   }[];
   thaiLines: string[];
   thaiStartY: number;
+  dividerY: number | null;
   burmeseLines: string[];
   burmeseStartY: number;
 }
@@ -302,69 +338,131 @@ function measureSubtitleList(
   const showWordGloss = opts.showWordGloss !== false;
   const showBurmeseLine = opts.showBurmeseLine !== false;
   const fs = opts.fontScale ?? 1;
-  const padX = 40;
-  const maxInnerW = width - padX * 2 - 28;
+
+  // Match Stage9x16.tsx 720px box model verbatim:
+  // list padding: 34px 22px 0 22px -> card x=22, w=width-44
+  // card padding: 16px 26px 20px 32px -> content x=54, innerW=cardW-58 (618px at 720w)
+  const cardX = 22;
+  const cardW = width - 44;
+  const padTop = 16;
+  const padRight = 26;
+  const padBottom = 20;
+  const padLeft = 32;
+  const contentX = cardX + padLeft;
+  const maxInnerW = cardW - padLeft - padRight;
+
   let cursorY = 34;
   const cards: MeasuredCard[] = [];
 
   const phoneticFontPx = Math.round(28 * fs);
+  const glossFontPx = Math.round(13 * fs);
   const thaiFontPx = Math.round(20 * fs);
   const burmeseFontPx = Math.round(22 * fs);
-  const thaiLineH = Math.round(28 * fs);
-  const burmeseLineH = Math.round(34 * fs);
+
+  const pillPadX = Math.round(9 * fs);
+  const pillPadY = Math.round(4 * fs);
+  const pillLineH = Math.round(phoneticFontPx * 1.2);
+  const pillH = pillLineH + pillPadY * 2;
+  const glossLineH = Math.round(glossFontPx * 1.25);
+  const glossMarginTop = Math.round(4 * fs);
+  const colGap = 8;
+  const rowGap = Math.round(10 * fs);
+
+  const thaiLineH = Math.round(thaiFontPx * 1.4);
+  const burmeseLineH = Math.round(burmeseFontPx * 1.54);
+
+  const phoneticFont = `600 ${phoneticFontPx}px 'DM Sans', 'Noto Sans Myanmar', 'Noto Sans Thai', sans-serif`;
+  const glossFont = `500 ${glossFontPx}px 'Noto Sans Myanmar', 'DM Sans', sans-serif`;
+  const thaiFont = `500 ${thaiFontPx}px 'Noto Sans Thai', 'DM Sans', sans-serif`;
+  const burmeseFont = `500 ${burmeseFontPx}px 'Noto Sans Myanmar', 'DM Sans', sans-serif`;
 
   for (const sub of subtitles) {
     const cardTop = cursorY;
-    let y = 28;
+    let y = padTop;
 
-    ctx.font = `600 ${phoneticFontPx}px 'DM Sans', 'Noto Sans Myanmar', 'Noto Sans Thai', sans-serif`;
     let lineX = 0;
-    const rowGap = showWordGloss ? Math.round(56 * fs) : Math.round(42 * fs);
+    let currentRowH = 0;
     const wordLayouts: MeasuredCard["wordLayouts"] = [];
+    const words = Array.isArray(sub.words) ? sub.words : [];
 
-    for (const w of sub.words) {
-      const tokenWidth = ctx.measureText(w.phonetic).width + 18;
-      if (lineX + tokenWidth > maxInnerW && lineX > 0) {
-        lineX = 0;
-        y += rowGap;
+    for (const w of words) {
+      ctx.font = phoneticFont;
+      const phoneticTextW = ctx.measureText(w.phonetic).width;
+      const pillW = Math.min(maxInnerW, phoneticTextW + pillPadX * 2);
+
+      let glossLines: string[] = [];
+      let glossBoxW = 0;
+      if (showWordGloss && w.burmeseGloss && w.burmeseGloss.trim()) {
+        ctx.font = glossFont;
+        glossLines = wrapTextLines(ctx, w.burmeseGloss.trim(), Math.max(40, maxInnerW - pillPadX));
+        let maxGlossW = 0;
+        for (const gl of glossLines) {
+          const gw = ctx.measureText(gl).width;
+          if (gw > maxGlossW) maxGlossW = gw;
+        }
+        glossBoxW = Math.min(maxInnerW, pillPadX + maxGlossW);
       }
+
+      const colW = Math.max(pillW, glossBoxW);
+      const blockH =
+        pillH + (glossLines.length > 0 ? glossMarginTop + glossLines.length * glossLineH : 0);
+
+      if (lineX + colW > maxInnerW && lineX > 0) {
+        y += currentRowH + rowGap;
+        lineX = 0;
+        currentRowH = 0;
+      }
+
       wordLayouts.push({
         phonetic: w.phonetic,
-        gloss: showWordGloss ? w.burmeseGloss || "" : "",
-        x: padX + 18 + lineX,
+        glossLines,
+        x: contentX + lineX,
         y: cardTop + y,
-        w: tokenWidth,
-        h: Math.round(36 * fs),
+        pillW,
+        pillH,
+        pillPadX,
+        glossTopY: cardTop + y + pillH + glossMarginTop,
         startTime: sub.startTime + w.startOffsetSec,
         endTime: sub.startTime + w.endOffsetSec,
       });
-      lineX += tokenWidth + 8;
+
+      if (blockH > currentRowH) currentRowH = blockH;
+      lineX += colW + colGap;
     }
 
-    y += sub.words.length > 0 ? (showWordGloss ? Math.round(48 * fs) : Math.round(34 * fs)) : 12;
+    if (currentRowH > 0) {
+      y += currentRowH;
+    }
 
     let thaiLines: string[] = [];
     let thaiStartY = cardTop + y;
     if (showThaiScript && sub.thaiScript && sub.thaiScript.trim()) {
-      ctx.font = `500 ${thaiFontPx}px 'Noto Sans Thai', 'DM Sans', sans-serif`;
-      thaiLines = wrapTextLines(ctx, sub.thaiScript.trim(), maxInnerW - 10);
-      y += 4;
-      thaiStartY = cardTop + y;
-      y += thaiLines.length * thaiLineH + 14;
-    } else if (showBurmeseLine) {
-      y += 14;
+      ctx.font = thaiFont;
+      thaiLines = wrapTextLines(ctx, sub.thaiScript.trim(), maxInnerW - 4);
+      if (thaiLines.length > 0) {
+        y += Math.round(12 * fs);
+        thaiStartY = cardTop + y;
+        y += thaiLines.length * thaiLineH;
+      }
     }
 
+    let dividerY: number | null = null;
     let burmeseLines: string[] = [];
     let burmeseStartY = cardTop + y;
     if (showBurmeseLine) {
-      ctx.font = `500 ${burmeseFontPx}px 'Noto Sans Myanmar', 'DM Sans', sans-serif`;
-      burmeseLines = wrapTextLines(ctx, sub.burmese, maxInnerW - 34);
+      const hasAbove = wordLayouts.length > 0 || thaiLines.length > 0;
+      y += Math.round(14 * fs);
+      if (hasAbove) {
+        dividerY = cardTop + y;
+      }
+      y += Math.round(14 * fs);
+      ctx.font = burmeseFont;
+      burmeseLines = wrapTextLines(ctx, sub.burmese || "", maxInnerW - 32);
       burmeseStartY = cardTop + y;
-      y += burmeseLines.length * burmeseLineH + 22;
-    } else {
-      y += 14;
+      y += Math.max(1, burmeseLines.length) * burmeseLineH;
     }
+
+    y += padBottom;
 
     cards.push({
       sub,
@@ -373,6 +471,7 @@ function measureSubtitleList(
       wordLayouts,
       thaiLines,
       thaiStartY,
+      dividerY,
       burmeseLines,
       burmeseStartY,
     });
@@ -381,6 +480,322 @@ function measureSubtitleList(
   }
 
   return { cards, totalHeight: cursorY };
+}
+
+function getActiveSubtitleCardIndex(cards: MeasuredCard[], t: number): number {
+  let activeIdx = -1;
+  let lastStartedIdx = -1;
+  for (let i = 0; i < cards.length; i++) {
+    const sub = cards[i].sub;
+    if (t >= sub.startTime) {
+      if (lastStartedIdx === -1 || sub.startTime >= cards[lastStartedIdx].sub.startTime) {
+        lastStartedIdx = i;
+      }
+      if (t <= sub.endTime) {
+        activeIdx = i;
+      }
+    }
+  }
+  return activeIdx >= 0 ? activeIdx : lastStartedIdx;
+}
+
+function getTargetSubtitleScrollY(cards: MeasuredCard[], t: number): number {
+  let anchorIdx = getActiveSubtitleCardIndex(cards, t);
+  if (anchorIdx < 0) {
+    for (let i = 0; i < cards.length; i++) {
+      if (t >= cards[i].sub.startTime) anchorIdx = i;
+      else break;
+    }
+  }
+  const active = cards[Math.max(0, anchorIdx)];
+  if (!active) return 0;
+  return Math.max(0, active.topY - 34);
+}
+
+interface SubtitlePanelRenderConfig {
+  cards: MeasuredCard[];
+  width: number;
+  panelTopY: number;
+  panelHeight: number;
+  subTheme: "light" | "dark" | "warm";
+  subHl: string;
+  subFontScale: number;
+  showBurmeseLine: boolean;
+  highlightTime: number;
+  scrollY: number;
+}
+
+function renderSubtitleViewport(
+  ctx: CanvasRenderingContext2D,
+  cfg: SubtitlePanelRenderConfig
+): void {
+  const {
+    cards,
+    width,
+    panelTopY,
+    panelHeight,
+    subTheme,
+    subHl,
+    subFontScale,
+    showBurmeseLine,
+    highlightTime,
+    scrollY,
+  } = cfg;
+
+  const isDarkPanel = subTheme === "dark";
+  const isWarmPanel = subTheme === "warm";
+
+  // Panel background (only fill full panel when panelTopY === 0; full-canvas caller already filled bg)
+  if (panelTopY === 0) {
+    ctx.fillStyle = isDarkPanel ? "#080b1a" : isWarmPanel ? "#fbf7ef" : "#f8faff";
+    ctx.fillRect(0, 0, width, panelHeight);
+  }
+
+  // Top 1px divider separating video and subtitle panel
+  ctx.fillStyle = isDarkPanel ? "#21284c" : isWarmPanel ? "#e7dcc8" : "#d2dcf0";
+  ctx.fillRect(0, panelTopY, width, 1);
+
+  const phoneticPx = Math.round(28 * subFontScale);
+  const glossPx = Math.round(13 * subFontScale);
+  const glossLineH = Math.round(glossPx * 1.25);
+  const thaiPx = Math.round(20 * subFontScale);
+  const thaiLineH = Math.round(thaiPx * 1.4);
+  const idxPx = Math.round(15 * subFontScale);
+  const burmesePx = Math.round(22 * subFontScale);
+  const burmeseLineH = Math.round(burmesePx * 1.54);
+
+  const pillFill =
+    subHl === "emerald"
+      ? isDarkPanel
+        ? "#127d5c"
+        : "#0d7456"
+      : subHl === "indigo"
+        ? isDarkPanel
+          ? "#2952d6"
+          : "#1c3db8"
+        : subHl === "rose"
+          ? isDarkPanel
+            ? "#a12f88"
+            : "#8b2574"
+          : isDarkPanel
+            ? "#cc801a"
+            : "#b0580c";
+  const pillTextFill = subHl === "amber" && isDarkPanel ? "#0f172a" : "#ffffff";
+
+  const phoneticFont = `600 ${phoneticPx}px 'DM Sans', 'Noto Sans Myanmar', 'Noto Sans Thai', sans-serif`;
+  const glossFont = `500 ${glossPx}px 'Noto Sans Myanmar', 'DM Sans', sans-serif`;
+  const thaiFont = `500 ${thaiPx}px 'Noto Sans Thai', 'DM Sans', sans-serif`;
+  const idxFont = `600 ${idxPx}px 'JetBrains Mono', monospace`;
+  const burmeseFont = `500 ${burmesePx}px 'Noto Sans Myanmar', 'DM Sans', sans-serif`;
+
+  const activeCardIdx = getActiveSubtitleCardIndex(cards, highlightTime);
+  const contentX = 54;
+  const innerContentW = width - 44 - 32 - 26;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, panelTopY + 1, width, Math.max(0, panelHeight - 1));
+  ctx.clip();
+  ctx.translate(0, panelTopY - scrollY);
+  ctx.textBaseline = "middle";
+
+  for (let ci = 0; ci < cards.length; ci++) {
+    const card = cards[ci];
+    const screenTop = card.topY - scrollY;
+    if (screenTop + card.height < -60 || screenTop > panelHeight + 60) continue;
+
+    const isActive = ci === activeCardIdx;
+    ctx.fillStyle = isActive
+      ? isDarkPanel
+        ? "#12183a"
+        : isWarmPanel
+          ? "#fffdf8"
+          : "#ffffff"
+      : isDarkPanel
+        ? "rgba(13, 18, 41, 0.72)"
+        : isWarmPanel
+          ? "rgba(244, 237, 224, 0.72)"
+          : "rgba(255, 255, 255, 0.75)";
+    drawRoundedRect(ctx, 22, card.topY, width - 44, card.height, 18);
+    ctx.fill();
+    ctx.strokeStyle = isActive
+      ? isDarkPanel
+        ? "rgba(78, 126, 247, 0.5)"
+        : isWarmPanel
+          ? "#dfae52"
+          : "#8da2ea"
+      : isDarkPanel
+        ? "#1e264a"
+        : isWarmPanel
+          ? "#e5dac6"
+          : "#e2e8f5";
+    ctx.lineWidth = isActive ? 2 : 1;
+    ctx.stroke();
+
+    // Left accent bar (matching Stage9x16 left:10px inside card -> x=32, top/bottom 18px)
+    ctx.fillStyle = isActive
+      ? isDarkPanel
+        ? "#5b85f7"
+        : isWarmPanel
+          ? "#b86310"
+          : "#1c3db8"
+      : isDarkPanel
+        ? "#1e264a"
+        : isWarmPanel
+          ? "#dfd3be"
+          : "#e2e8f5";
+    drawRoundedRect(ctx, 32, card.topY + 18, 5, Math.max(24, card.height - 36), 3);
+    ctx.fill();
+
+    // Line 1: Phonetic word tokens + optional per-word Burmese gloss
+    for (let wi = 0; wi < card.wordLayouts.length; wi++) {
+      const wl = card.wordLayouts[wi];
+      const isLastWord = wi === card.wordLayouts.length - 1;
+      const isSpoken =
+        isActive &&
+        highlightTime >= wl.startTime &&
+        (isLastWord ? highlightTime <= wl.endTime : highlightTime < wl.endTime);
+      const wasSpoken =
+        isActive && (isLastWord ? highlightTime > wl.endTime : highlightTime >= wl.endTime);
+
+      if (isSpoken) {
+        ctx.fillStyle = pillFill;
+        drawRoundedRect(ctx, wl.x, wl.y, wl.pillW, wl.pillH, 9);
+        ctx.fill();
+      }
+
+      ctx.font = phoneticFont;
+      if (isSpoken) {
+        ctx.fillStyle = pillTextFill;
+      } else if (isActive) {
+        ctx.fillStyle = isDarkPanel
+          ? wasSpoken
+            ? "#8cb5f5"
+            : "#cbd5e1"
+          : isWarmPanel
+            ? wasSpoken
+              ? "#944808"
+              : "#292524"
+            : wasSpoken
+              ? "#1938a8"
+              : "#334155";
+      } else {
+        ctx.fillStyle = isWarmPanel ? "#78716c" : "#64748b";
+      }
+      ctx.fillText(wl.phonetic, wl.x + wl.pillPadX, wl.y + wl.pillH / 2 + 1);
+
+      if (wl.glossLines.length > 0) {
+        ctx.font = glossFont;
+        ctx.fillStyle = isSpoken
+          ? subHl === "emerald"
+            ? isDarkPanel
+              ? "#43b892"
+              : "#0b664b"
+            : subHl === "indigo"
+              ? isDarkPanel
+                ? "#80a6ff"
+                : "#1836a3"
+              : subHl === "rose"
+                ? isDarkPanel
+                  ? "#e386cf"
+                  : "#7d1e68"
+                : isDarkPanel
+                  ? "#e5a64e"
+                  : "#9c4b08"
+          : isActive
+            ? isDarkPanel
+              ? "#6c97f8"
+              : "#1c3db8"
+            : isDarkPanel
+              ? "#515e87"
+              : isWarmPanel
+                ? "#a8a29e"
+                : "#94a3b8";
+        for (let gi = 0; gi < wl.glossLines.length; gi++) {
+          ctx.fillText(
+            wl.glossLines[gi],
+            wl.x + wl.pillPadX,
+            wl.glossTopY + gi * glossLineH + glossLineH / 2
+          );
+        }
+      }
+    }
+
+    // Optional Thai Script Line
+    if (card.thaiLines.length > 0) {
+      ctx.font = thaiFont;
+      ctx.fillStyle = isActive
+        ? isDarkPanel
+          ? "#e2e8f0"
+          : isWarmPanel
+            ? "#44403c"
+            : "#334155"
+        : isWarmPanel
+          ? "#78716c"
+          : "#64748b";
+      for (let li = 0; li < card.thaiLines.length; li++) {
+        ctx.fillText(
+          card.thaiLines[li],
+          contentX + 4,
+          card.thaiStartY + li * thaiLineH + thaiLineH / 2
+        );
+      }
+    }
+
+    // Line 2: Divider + Index Number + Burmese Translation
+    if (showBurmeseLine) {
+      if (card.dividerY !== null) {
+        ctx.fillStyle = isActive
+          ? isDarkPanel
+            ? "rgba(78, 126, 247, 0.28)"
+            : isWarmPanel
+              ? "#ebd197"
+              : "#d3dff8"
+          : isDarkPanel
+            ? "#1e264a"
+            : isWarmPanel
+              ? "#e7dcc8"
+              : "#f1f5f9";
+        ctx.fillRect(contentX, card.dividerY, innerContentW, 1);
+      }
+
+      ctx.font = idxFont;
+      ctx.fillStyle = isActive
+        ? isDarkPanel
+          ? "#5b85f7"
+          : isWarmPanel
+            ? "#a3550b"
+            : "#1c3db8"
+        : isDarkPanel
+          ? "#515e87"
+          : isWarmPanel
+            ? "#a8a29e"
+            : "#94a3b8";
+      ctx.fillText(
+        String(ci + 1).padStart(2, "0"),
+        contentX,
+        card.burmeseStartY + burmeseLineH / 2
+      );
+
+      ctx.font = burmeseFont;
+      ctx.fillStyle = isActive
+        ? isDarkPanel
+          ? "#99b8ff"
+          : "#122b87"
+        : isWarmPanel
+          ? "#57534e"
+          : "#64748b";
+      for (let li = 0; li < card.burmeseLines.length; li++) {
+        ctx.fillText(
+          card.burmeseLines[li],
+          contentX + 32,
+          card.burmeseStartY + li * burmeseLineH + burmeseLineH / 2
+        );
+      }
+    }
+  }
+
+  ctx.restore();
 }
 
 function drawRoundedRect(
@@ -407,30 +822,6 @@ function drawRoundedRect(
     ctx.quadraticCurveTo(x, y, x + rr, y);
   }
   ctx.closePath();
-}
-
-function toProxiedImageUrl(url: string): string {
-  if (url.startsWith("https://i.ytimg.com/")) {
-    return `/api/image-proxy?url=${encodeURIComponent(url)}`;
-  }
-  return url;
-}
-
-async function loadImage(url: string): Promise<HTMLImageElement | null> {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.crossOrigin = "anonymous";
-    const timer = window.setTimeout(() => resolve(null), 8000);
-    img.onload = () => {
-      clearTimeout(timer);
-      resolve(img);
-    };
-    img.onerror = () => {
-      clearTimeout(timer);
-      resolve(null);
-    };
-    img.src = toProxiedImageUrl(url);
-  });
 }
 
 function mapCutTimeToSourceTime(project: VideoProject, cutTime: number): number {
@@ -582,7 +973,6 @@ export async function exportProjectToMp4(
   const listH = height - topVideoH;
   const fps = 24;
   const speed = getEffectivePlaybackSpeed(
-    project.sourceType,
     editSettings.playbackSpeed,
     voiceSettings.speed
   );
@@ -592,7 +982,7 @@ export async function exportProjectToMp4(
   const totalFrames = Math.max(1, Math.ceil(totalDuration * fps));
   const fileName = buildSafeMp4FileName(project.title);
 
-  if (project.sourceType === "local" && !project.localUrl && !project.localFile) {
+  if (!project.localUrl && !project.localFile) {
     throw new Error("Local video file is not linked. Please re-link or upload the video first.");
   }
 
@@ -628,50 +1018,48 @@ export async function exportProjectToMp4(
     };
 
     let resolvedUploadId = project.uploadId;
-    if (project.sourceType === "local") {
-      if (resolvedUploadId) {
-        const existsTimed = makeTimedController(6000);
-        try {
-          const checkResp = await fetch(
-            `/api/upload-exists/${encodeURIComponent(resolvedUploadId)}`,
-            { signal: existsTimed.signal }
-          );
-          if (checkResp.ok) {
-            const checkData = (await checkResp.json()) as { exists?: boolean };
-            if (!checkData.exists) {
-              resolvedUploadId = undefined;
-            }
-          }
-        } catch (err) {
-          throwIfAborted(signal);
-          void err;
-        } finally {
-          existsTimed.cleanup();
-        }
-      }
-      if (!resolvedUploadId && project.localFile) {
-        throwIfAborted(signal);
-        const totalMb = formatMb(project.localFile.size);
-        onProgress({
-          phase: "uploading",
-          percent: 5,
-          detail: `0.0 / ${totalMb} MB`,
-        });
-        resolvedUploadId = await uploadBlobInChunks(
-          project.localFile,
-          project.localFile.name,
-          signal,
-          (fraction) => {
-            const sentMb = formatMb(project.localFile!.size * fraction);
-            onProgress({
-              phase: "uploading",
-              percent: 5 + Math.round(fraction * 23),
-              detail: `${sentMb} / ${totalMb} MB`,
-            });
-          }
+    if (resolvedUploadId) {
+      const existsTimed = makeTimedController(6000);
+      try {
+        const checkResp = await fetch(
+          `/api/upload-exists/${encodeURIComponent(resolvedUploadId)}`,
+          { signal: existsTimed.signal }
         );
-        project.uploadId = resolvedUploadId;
+        if (checkResp.ok) {
+          const checkData = (await checkResp.json()) as { exists?: boolean };
+          if (!checkData.exists) {
+            resolvedUploadId = undefined;
+          }
+        }
+      } catch (err) {
+        throwIfAborted(signal);
+        void err;
+      } finally {
+        existsTimed.cleanup();
       }
+    }
+    if (!resolvedUploadId && project.localFile) {
+      throwIfAborted(signal);
+      const totalMb = formatMb(project.localFile.size);
+      onProgress({
+        phase: "uploading",
+        percent: 5,
+        detail: `0.0 / ${totalMb} MB`,
+      });
+      resolvedUploadId = await uploadBlobInChunks(
+        project.localFile,
+        project.localFile.name,
+        signal,
+        (fraction) => {
+          const sentMb = formatMb(project.localFile!.size * fraction);
+          onProgress({
+            phase: "uploading",
+            percent: 5 + Math.round(fraction * 23),
+            detail: `${sentMb} / ${totalMb} MB`,
+          });
+        }
+      );
+      project.uploadId = resolvedUploadId;
     }
 
     throwIfAborted(signal);
@@ -704,7 +1092,7 @@ export async function exportProjectToMp4(
     // Eliminates downloading prepared clips & eliminates slow Android <video> frame-by-frame seeking!
     // Phone renders ONLY the lightweight 2D subtitle strip (if subtitles exist) at 15fps,
     // and server FFmpeg composites native source video + subtitle strip + voice audio in ONE fast pass.
-    if (project.sourceType === "local" && resolvedUploadId) {
+    if (resolvedUploadId) {
       let subtitleBase64: string | undefined;
       let subtitleUploadId: string | undefined;
       let subtitleFormat: "mp4" | "webm" = "mp4";
@@ -745,270 +1133,29 @@ export async function exportProjectToMp4(
           fontScale: subFontScale,
         });
 
-        const getSubActiveCardIndex = (t: number): number => {
-          let activeIdx = -1;
-          let lastStartedIdx = -1;
-          for (let i = 0; i < cards.length; i++) {
-            const sub = cards[i].sub;
-            if (t >= sub.startTime) {
-              if (lastStartedIdx === -1 || sub.startTime >= cards[lastStartedIdx].sub.startTime) {
-                lastStartedIdx = i;
-              }
-              if (t <= sub.endTime) {
-                activeIdx = i;
-              }
-            }
-          }
-          return activeIdx >= 0 ? activeIdx : lastStartedIdx;
-        };
-
-        const getSubScrollYForTime = (t: number): number => {
-          let anchorIdx = getSubActiveCardIndex(t);
-          if (anchorIdx < 0) {
-            for (let i = 0; i < cards.length; i++) {
-              if (t >= cards[i].sub.startTime) anchorIdx = i;
-              else break;
-            }
-          }
-          const active = cards[Math.max(0, anchorIdx)];
-          if (!active) return 0;
-          return Math.max(0, active.topY - 34);
-        };
-
         let subScrollY = 0;
-        const isDarkPanel = subTheme === "dark";
-        const isWarmPanel = subTheme === "warm";
-        const phoneticPx = Math.round(28 * subFontScale);
-        const glossPx = Math.round(13 * subFontScale);
-        const thaiPx = Math.round(20 * subFontScale);
-        const thaiLineH = Math.round(28 * subFontScale);
-        const idxPx = Math.round(15 * subFontScale);
-        const burmesePx = Math.round(22 * subFontScale);
-        const burmeseLineH = Math.round(34 * subFontScale);
-        const pillFill =
-          subHl === "emerald"
-            ? isDarkPanel
-              ? "#127d5c"
-              : "#0d7456"
-            : subHl === "indigo"
-              ? isDarkPanel
-                ? "#2952d6"
-                : "#1c3db8"
-              : subHl === "rose"
-                ? isDarkPanel
-                  ? "#a12f88"
-                  : "#8b2574"
-                : isDarkPanel
-                  ? "#cc801a"
-                  : "#b0580c";
-        const pillTextFill =
-          subHl === "amber" && isDarkPanel ? "#0f172a" : "#ffffff";
-
         const renderSubtitleOnlyFrame = (t: number) => {
-          subCtx.fillStyle = isDarkPanel ? "#080b1a" : isWarmPanel ? "#fbf7ef" : "#f8faff";
-          subCtx.fillRect(0, 0, width, listH);
-
-          // Top 1px divider separating video and subtitle panel
-          subCtx.fillStyle = isDarkPanel ? "#21284c" : isWarmPanel ? "#e7dcc8" : "#d2dcf0";
-          subCtx.fillRect(0, 0, width, 1);
-
           const ht = Math.min(sourceTotalDuration, t + 0.06);
-          const targetScroll = getSubScrollYForTime(ht);
-          subScrollY += (targetScroll - subScrollY) * 0.22;
+          const targetScroll = getTargetSubtitleScrollY(cards, ht);
+          const delta = targetScroll - subScrollY;
+          subScrollY = Math.abs(delta) < 0.5 ? targetScroll : subScrollY + delta * 0.24;
 
-          subCtx.save();
-          subCtx.beginPath();
-          subCtx.rect(0, 1, width, listH - 1);
-          subCtx.clip();
-          subCtx.translate(0, -subScrollY);
-
-          const activeCardIdx = getSubActiveCardIndex(ht);
-
-          for (let ci = 0; ci < cards.length; ci++) {
-            const card = cards[ci];
-            const screenTop = card.topY - subScrollY;
-            if (screenTop + card.height < -60 || screenTop > listH + 60) continue;
-
-            const isActive = ci === activeCardIdx;
-            subCtx.fillStyle = isActive
-              ? isDarkPanel
-                ? "#12183a"
-                : isWarmPanel
-                  ? "#fffdf8"
-                  : "#ffffff"
-              : isDarkPanel
-                ? "rgba(13, 18, 41, 0.72)"
-                : isWarmPanel
-                  ? "rgba(244, 237, 224, 0.72)"
-                  : "rgba(255, 255, 255, 0.75)";
-            drawRoundedRect(subCtx, 22, card.topY, width - 44, card.height, 18);
-            subCtx.fill();
-            subCtx.strokeStyle = isActive
-              ? isDarkPanel
-                ? "rgba(78, 126, 247, 0.5)"
-                : isWarmPanel
-                  ? "#dfae52"
-                  : "#8da2ea"
-              : isDarkPanel
-                ? "#1e264a"
-                : isWarmPanel
-                  ? "#e5dac6"
-                  : "#e2e8f5";
-            subCtx.lineWidth = isActive ? 1.75 : 1;
-            subCtx.stroke();
-
-            subCtx.fillStyle = isActive
-              ? isDarkPanel
-                ? "#5b85f7"
-                : isWarmPanel
-                  ? "#b86310"
-                  : "#1c3db8"
-              : isDarkPanel
-                ? "#1e264a"
-                : isWarmPanel
-                  ? "#dfd3be"
-                  : "#e2e8f5";
-            drawRoundedRect(subCtx, 32, card.topY + 18, 5, Math.max(24, card.height - 36), 3);
-            subCtx.fill();
-
-            for (let wi = 0; wi < card.wordLayouts.length; wi++) {
-              const wl = card.wordLayouts[wi];
-              const isLastWord = wi === card.wordLayouts.length - 1;
-              const isSpoken =
-                isActive &&
-                ht >= wl.startTime &&
-                (isLastWord ? ht <= wl.endTime : ht < wl.endTime);
-              const wasSpoken = isActive && (isLastWord ? ht > wl.endTime : ht >= wl.endTime);
-
-              if (isSpoken) {
-                const pillH = Math.round(38 * subFontScale);
-                subCtx.fillStyle = pillFill;
-                drawRoundedRect(
-                  subCtx,
-                  wl.x - 4,
-                  wl.y - Math.round(26 * subFontScale),
-                  wl.w + 2,
-                  pillH,
-                  9
-                );
-                subCtx.fill();
-              }
-
-              subCtx.font = `600 ${phoneticPx}px 'DM Sans', 'Noto Sans Myanmar', 'Noto Sans Thai', sans-serif`;
-              if (isSpoken) {
-                subCtx.fillStyle = pillTextFill;
-              } else if (isActive) {
-                subCtx.fillStyle = isDarkPanel
-                  ? wasSpoken
-                    ? "#8cb5f5"
-                    : "#cbd5e1"
-                  : isWarmPanel
-                    ? wasSpoken
-                      ? "#944808"
-                      : "#292524"
-                    : wasSpoken
-                      ? "#1938a8"
-                      : "#334155";
-              } else {
-                subCtx.fillStyle = isWarmPanel ? "#78716c" : "#64748b";
-              }
-              subCtx.fillText(wl.phonetic, wl.x + 5, wl.y);
-
-              if (wl.gloss) {
-                subCtx.font = `500 ${glossPx}px 'Noto Sans Myanmar', sans-serif`;
-                subCtx.fillStyle = isSpoken
-                  ? subHl === "emerald"
-                    ? isDarkPanel
-                      ? "#43b892"
-                      : "#0b664b"
-                    : subHl === "indigo"
-                      ? isDarkPanel
-                        ? "#80a6ff"
-                        : "#1836a3"
-                      : subHl === "rose"
-                        ? isDarkPanel
-                          ? "#e386cf"
-                          : "#7d1e68"
-                        : isDarkPanel
-                          ? "#e5a64e"
-                          : "#9c4b08"
-                  : isActive
-                    ? isDarkPanel
-                      ? "#6c97f8"
-                      : "#1c3db8"
-                    : isDarkPanel
-                      ? "#515e87"
-                      : isWarmPanel
-                        ? "#a8a29e"
-                        : "#94a3b8";
-                subCtx.fillText(wl.gloss, wl.x + 5, wl.y + Math.round(22 * subFontScale));
-              }
-            }
-
-            if (card.thaiLines.length > 0) {
-              subCtx.font = `500 ${thaiPx}px 'Noto Sans Thai', 'DM Sans', sans-serif`;
-              subCtx.fillStyle = isActive
-                ? isDarkPanel
-                  ? "#e2e8f0"
-                  : isWarmPanel
-                    ? "#44403c"
-                    : "#334155"
-                : isWarmPanel
-                  ? "#78716c"
-                  : "#64748b";
-              card.thaiLines.forEach((line, li) => {
-                subCtx.fillText(line, 58, card.thaiStartY + li * thaiLineH);
-              });
-            }
-
-            if (showBurmeseLine) {
-              if (card.wordLayouts.length > 0 || card.thaiLines.length > 0) {
-                const dividerY = card.burmeseStartY - 30;
-                subCtx.fillStyle = isActive
-                  ? isDarkPanel
-                    ? "rgba(78, 126, 247, 0.28)"
-                    : isWarmPanel
-                      ? "#ebd197"
-                      : "#d3dff8"
-                  : isDarkPanel
-                    ? "#1e264a"
-                    : isWarmPanel
-                      ? "#e7dcc8"
-                      : "#f1f5f9";
-                subCtx.fillRect(54, dividerY, width - 96, 1);
-              }
-
-              subCtx.font = `600 ${idxPx}px 'JetBrains Mono', monospace`;
-              subCtx.fillStyle = isActive
-                ? isDarkPanel
-                  ? "#5b85f7"
-                  : isWarmPanel
-                    ? "#a3550b"
-                    : "#1c3db8"
-                : isDarkPanel
-                  ? "#515e87"
-                  : isWarmPanel
-                    ? "#a8a29e"
-                    : "#94a3b8";
-              subCtx.fillText(String(ci + 1).padStart(2, "0"), 54, card.burmeseStartY - 1);
-
-              subCtx.font = `500 ${burmesePx}px 'Noto Sans Myanmar', 'DM Sans', sans-serif`;
-              subCtx.fillStyle = isActive
-                ? isDarkPanel
-                  ? "#99b8ff"
-                  : "#122b87"
-                : isWarmPanel
-                  ? "#57534e"
-                  : "#64748b";
-              card.burmeseLines.forEach((line, li) => {
-                subCtx.fillText(line, 86, card.burmeseStartY + li * burmeseLineH);
-              });
-            }
-          }
-          subCtx.restore();
+          renderSubtitleViewport(subCtx, {
+            cards,
+            width,
+            panelTopY: 0,
+            panelHeight: listH,
+            subTheme,
+            subHl,
+            subFontScale,
+            showBurmeseLine,
+            highlightTime: ht,
+            scrollY: subScrollY,
+          });
         };
 
-        const subTotalFrames = Math.max(1, Math.ceil(totalDuration * subFps));
+        // Add 1 extra pad frame so subtitle strip never ends earlier than top video on vstack shortest=1
+        const subTotalFrames = Math.max(1, Math.ceil(totalDuration * subFps) + 1);
         const encodeSubStripWebCodecs = async (
           hwAccel: HardwareAcceleration
         ): Promise<Uint8Array | null> => {
@@ -1329,116 +1476,95 @@ export async function exportProjectToMp4(
     let hasCapturedVideoFrame = false;
     let usingPreparedClip = false;
 
-    const loadedFrames: HTMLImageElement[] = [];
-
-    if (project.sourceType === "local") {
-      // Ask server ffmpeg to pre-extract an adaptive all-keyframe yuv420p H.264 clip (30s timeout)
-      // so every browser frame seek completes in a few ms; fall back cleanly to localUrl if unavailable.
-      if (resolvedUploadId) {
-        const prepTimed = makeTimedController(30_000);
-        try {
-          const prepResp = await fetch("/api/prepare-export-clip", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              uploadId: resolvedUploadId,
-              scenes: project.scenes,
-            }),
-            signal: prepTimed.signal,
-          });
-          if (prepResp.ok) {
-            const prepBlob = await prepResp.blob();
-            throwIfAborted(signal);
-            if (prepBlob.size > 512) {
-              preparedClipUrl = URL.createObjectURL(prepBlob);
-              usingPreparedClip = true;
-            }
-          }
-        } catch (err) {
+    // Ask server ffmpeg to pre-extract an adaptive all-keyframe yuv420p H.264 clip (30s timeout)
+    // so every browser frame seek completes in a few ms; fall back cleanly to localUrl if unavailable.
+    if (resolvedUploadId) {
+      const prepTimed = makeTimedController(30_000);
+      try {
+        const prepResp = await fetch("/api/prepare-export-clip", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            uploadId: resolvedUploadId,
+            scenes: project.scenes,
+          }),
+          signal: prepTimed.signal,
+        });
+        if (prepResp.ok) {
+          const prepBlob = await prepResp.blob();
           throwIfAborted(signal);
-          void err;
-          // Fall back to direct browser localUrl decoding below
-        } finally {
-          prepTimed.cleanup();
-        }
-      }
-
-      throwIfAborted(signal);
-      onProgress({ phase: "preparing", percent: 9 });
-
-      let activeVideoSrc = preparedClipUrl || project.localUrl || "";
-      if (!activeVideoSrc && project.localFile) {
-        tempLocalUrl = URL.createObjectURL(project.localFile);
-        activeVideoSrc = tempLocalUrl;
-      }
-
-      if (activeVideoSrc) {
-        hiddenVideoHost = document.createElement("div");
-        // Keep inside viewport at 2x2 opacity:0.001 so Android Chrome does not throttle offscreen <video> decoding
-        hiddenVideoHost.style.cssText =
-          "position:fixed;left:0;top:0;width:2px;height:2px;opacity:0.001;pointer-events:none;overflow:hidden;z-index:-1;";
-        localVideoEl = document.createElement("video");
-        localVideoEl.preload = "auto";
-        localVideoEl.muted = true;
-        localVideoEl.playsInline = true;
-        localVideoEl.src = activeVideoSrc;
-        hiddenVideoHost.appendChild(localVideoEl);
-        document.body.appendChild(hiddenVideoHost);
-
-        await waitForVideoReady(localVideoEl, signal);
-
-        // If prepared clip failed to decode in browser for any reason, fall back to original localUrl
-        if ((localVideoEl.readyState < 2 || localVideoEl.videoWidth === 0) && usingPreparedClip) {
-          usingPreparedClip = false;
-          const fallbackSrc =
-            project.localUrl ||
-            (project.localFile
-              ? (tempLocalUrl ?? (tempLocalUrl = URL.createObjectURL(project.localFile)))
-              : "");
-          if (fallbackSrc) {
-            localVideoEl.src = fallbackSrc;
-            await waitForVideoReady(localVideoEl, signal);
+          if (prepBlob.size > 512) {
+            preparedClipUrl = URL.createObjectURL(prepBlob);
+            usingPreparedClip = true;
           }
         }
+      } catch (err) {
+        throwIfAborted(signal);
+        void err;
+        // Fall back to direct browser localUrl decoding below
+      } finally {
+        prepTimed.cleanup();
+      }
+    }
 
-        if (localVideoEl.readyState >= 2 && localVideoEl.videoWidth > 0) {
-          const initialTime = usingPreparedClip ? 0 : mapCutTimeToSourceTime(project, 0);
-          await seekVideoToTime(localVideoEl, initialTime, signal);
-          if (
-            lastFrameCtx &&
-            localVideoEl.readyState >= 2 &&
-            !localVideoEl.seeking &&
-            localVideoEl.videoWidth > 0 &&
-            localVideoEl.videoHeight > 0
-          ) {
-            lastFrameCanvas.width = localVideoEl.videoWidth;
-            lastFrameCanvas.height = localVideoEl.videoHeight;
-            lastFrameCtx.drawImage(
-              localVideoEl,
-              0,
-              0,
-              lastFrameCanvas.width,
-              lastFrameCanvas.height
-            );
-            hasCapturedVideoFrame = true;
-          }
+    throwIfAborted(signal);
+    onProgress({ phase: "preparing", percent: 9 });
+
+    let activeVideoSrc = preparedClipUrl || project.localUrl || "";
+    if (!activeVideoSrc && project.localFile) {
+      tempLocalUrl = URL.createObjectURL(project.localFile);
+      activeVideoSrc = tempLocalUrl;
+    }
+
+    if (activeVideoSrc) {
+      hiddenVideoHost = document.createElement("div");
+      // Keep inside viewport at 2x2 opacity:0.001 so Android Chrome does not throttle offscreen <video> decoding
+      hiddenVideoHost.style.cssText =
+        "position:fixed;left:0;top:0;width:2px;height:2px;opacity:0.001;pointer-events:none;overflow:hidden;z-index:-1;";
+      localVideoEl = document.createElement("video");
+      localVideoEl.preload = "auto";
+      localVideoEl.muted = true;
+      localVideoEl.playsInline = true;
+      localVideoEl.src = activeVideoSrc;
+      hiddenVideoHost.appendChild(localVideoEl);
+      document.body.appendChild(hiddenVideoHost);
+
+      await waitForVideoReady(localVideoEl, signal);
+
+      // If prepared clip failed to decode in browser for any reason, fall back to original localUrl
+      if ((localVideoEl.readyState < 2 || localVideoEl.videoWidth === 0) && usingPreparedClip) {
+        usingPreparedClip = false;
+        const fallbackSrc =
+          project.localUrl ||
+          (project.localFile
+            ? (tempLocalUrl ?? (tempLocalUrl = URL.createObjectURL(project.localFile)))
+            : "");
+        if (fallbackSrc) {
+          localVideoEl.src = fallbackSrc;
+          await waitForVideoReady(localVideoEl, signal);
         }
       }
-    } else {
-      const candidateUrls = [...(project.keyframeUrls || [])];
-      if (candidateUrls.length === 0 && project.videoId) {
-        candidateUrls.push(`https://i.ytimg.com/vi/${project.videoId}/hqdefault.jpg`);
-      }
-      const imgs = await Promise.all(candidateUrls.map((u) => loadImage(u)));
-      for (const img of imgs) {
-        if (img && img.naturalWidth > 0) loadedFrames.push(img);
-      }
-      if (loadedFrames.length === 0 && project.videoId) {
-        const fallbackImg = await loadImage(
-          `https://i.ytimg.com/vi/${project.videoId}/hqdefault.jpg`
-        );
-        if (fallbackImg && fallbackImg.naturalWidth > 0) {
-          loadedFrames.push(fallbackImg);
+
+      if (localVideoEl.readyState >= 2 && localVideoEl.videoWidth > 0) {
+        const initialTime = usingPreparedClip ? 0 : mapCutTimeToSourceTime(project, 0);
+        await seekVideoToTime(localVideoEl, initialTime, signal);
+        if (
+          lastFrameCtx &&
+          localVideoEl.readyState >= 2 &&
+          !localVideoEl.seeking &&
+          localVideoEl.videoWidth > 0 &&
+          localVideoEl.videoHeight > 0
+        ) {
+          lastFrameCanvas.width = localVideoEl.videoWidth;
+          lastFrameCanvas.height = localVideoEl.videoHeight;
+          lastFrameCtx.drawImage(
+            localVideoEl,
+            0,
+            0,
+            lastFrameCanvas.width,
+            lastFrameCanvas.height
+          );
+          hasCapturedVideoFrame = true;
         }
       }
     }
@@ -1469,36 +1595,6 @@ export async function exportProjectToMp4(
       showBurmeseLine,
       fontScale: subFontScale,
     });
-
-    const getActiveCardIndex = (t: number): number => {
-      let activeIdx = -1;
-      let lastStartedIdx = -1;
-      for (let i = 0; i < cards.length; i++) {
-        const sub = cards[i].sub;
-        if (t >= sub.startTime) {
-          if (lastStartedIdx === -1 || sub.startTime >= cards[lastStartedIdx].sub.startTime) {
-            lastStartedIdx = i;
-          }
-          if (t <= sub.endTime) {
-            activeIdx = i;
-          }
-        }
-      }
-      return activeIdx >= 0 ? activeIdx : lastStartedIdx;
-    };
-
-    const getScrollYForTime = (t: number): number => {
-      let anchorIdx = getActiveCardIndex(t);
-      if (anchorIdx < 0) {
-        for (let i = 0; i < cards.length; i++) {
-          if (t >= cards[i].sub.startTime) anchorIdx = i;
-          else break;
-        }
-      }
-      const active = cards[Math.max(0, anchorIdx)];
-      if (!active) return 0;
-      return Math.max(0, active.topY - 34);
-    };
 
     let currentScrollY = 0;
     const cssFilterStr = buildCssFilterString(editSettings);
@@ -1590,21 +1686,6 @@ export async function exportProjectToMp4(
         } else if (localVideoEl.readyState >= 2 && localVideoEl.videoWidth > 0) {
           drawEditedSource(localVideoEl, localVideoEl.videoWidth, localVideoEl.videoHeight);
         }
-      } else if (loadedFrames.length > 0) {
-        const activeSub = project.subtitles.find((s) => t >= s.startTime && t < s.endTime);
-        const sceneIdx =
-          activeSub?.sceneIndex ?? Math.floor((t / sourceTotalDuration) * loadedFrames.length);
-        const frameImg = loadedFrames[sceneIdx % loadedFrames.length];
-        const sceneProgress = (t % 8) / 8;
-        const zoom = 1.04 + 0.08 * Math.sin(sceneProgress * Math.PI);
-        const panX = (sceneIdx % 2 === 0 ? 1 : -1) * 18 * (sceneProgress - 0.5);
-        drawEditedSource(
-          frameImg,
-          frameImg.naturalWidth || 1280,
-          frameImg.naturalHeight || 720,
-          panX,
-          zoom
-        );
       }
 
       if (advTiles && advTiles.length > 0) {
@@ -1640,232 +1721,23 @@ export async function exportProjectToMp4(
       ctx.restore();
 
       if (hasSubtitles) {
-        const isDarkPanel = subTheme === "dark";
-        const isWarmPanel = subTheme === "warm";
-        ctx.fillStyle = isDarkPanel ? "#21284c" : isWarmPanel ? "#e7dcc8" : "#d2dcf0";
-        ctx.fillRect(0, topVideoH, width, 1);
-
         const ht = Math.min(sourceTotalDuration, t + 0.06);
-        const targetScroll = getScrollYForTime(ht);
-        currentScrollY += (targetScroll - currentScrollY) * 0.14;
+        const targetScroll = getTargetSubtitleScrollY(cards, ht);
+        const delta = targetScroll - currentScrollY;
+        currentScrollY = Math.abs(delta) < 0.5 ? targetScroll : currentScrollY + delta * 0.16;
 
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(0, topVideoH + 1, width, listH - 1);
-        ctx.clip();
-        ctx.translate(0, topVideoH - currentScrollY);
-
-        const activeCardIdx = getActiveCardIndex(ht);
-        const phoneticPx = Math.round(28 * subFontScale);
-        const glossPx = Math.round(13 * subFontScale);
-        const thaiPx = Math.round(20 * subFontScale);
-        const thaiLineH = Math.round(28 * subFontScale);
-        const idxPx = Math.round(15 * subFontScale);
-        const burmesePx = Math.round(22 * subFontScale);
-        const burmeseLineH = Math.round(34 * subFontScale);
-        const pillFill =
-          subHl === "emerald"
-            ? isDarkPanel
-              ? "#127d5c"
-              : "#0d7456"
-            : subHl === "indigo"
-              ? isDarkPanel
-                ? "#2952d6"
-                : "#1c3db8"
-              : subHl === "rose"
-                ? isDarkPanel
-                  ? "#a12f88"
-                  : "#8b2574"
-                : isDarkPanel
-                  ? "#cc801a"
-                  : "#b0580c";
-        const pillTextFill =
-          subHl === "amber" && isDarkPanel ? "#0f172a" : "#ffffff";
-
-        for (let ci = 0; ci < cards.length; ci++) {
-          const card = cards[ci];
-          const screenTop = card.topY - currentScrollY;
-          if (screenTop + card.height < -60 || screenTop > listH + 60) continue;
-
-          const isActive = ci === activeCardIdx;
-
-          ctx.fillStyle = isActive
-            ? isDarkPanel
-              ? "#12183a"
-              : isWarmPanel
-                ? "#fffdf8"
-                : "#ffffff"
-            : isDarkPanel
-              ? "rgba(13, 18, 41, 0.72)"
-              : isWarmPanel
-                ? "rgba(244, 237, 224, 0.72)"
-                : "rgba(255, 255, 255, 0.75)";
-          drawRoundedRect(ctx, 22, card.topY, width - 44, card.height, 18);
-          ctx.fill();
-          ctx.strokeStyle = isActive
-            ? isDarkPanel
-              ? "rgba(78, 126, 247, 0.5)"
-              : isWarmPanel
-                ? "#dfae52"
-                : "#8da2ea"
-            : isDarkPanel
-              ? "#1e264a"
-              : isWarmPanel
-                ? "#e5dac6"
-                : "#e2e8f5";
-          ctx.lineWidth = isActive ? 1.75 : 1;
-          ctx.stroke();
-
-          ctx.fillStyle = isActive
-            ? isDarkPanel
-              ? "#5b85f7"
-              : isWarmPanel
-                ? "#b86310"
-                : "#1c3db8"
-            : isDarkPanel
-              ? "#1e264a"
-              : isWarmPanel
-                ? "#dfd3be"
-                : "#e2e8f5";
-          drawRoundedRect(ctx, 32, card.topY + 18, 5, Math.max(24, card.height - 36), 3);
-          ctx.fill();
-
-          for (let wi = 0; wi < card.wordLayouts.length; wi++) {
-            const wl = card.wordLayouts[wi];
-            const isLastWord = wi === card.wordLayouts.length - 1;
-            const isSpoken =
-              isActive &&
-              ht >= wl.startTime &&
-              (isLastWord ? ht <= wl.endTime : ht < wl.endTime);
-            const wasSpoken = isActive && (isLastWord ? ht > wl.endTime : ht >= wl.endTime);
-
-            if (isSpoken) {
-              const pillH = Math.round(38 * subFontScale);
-              ctx.fillStyle = pillFill;
-              drawRoundedRect(
-                ctx,
-                wl.x - 4,
-                wl.y - Math.round(26 * subFontScale),
-                wl.w + 2,
-                pillH,
-                9
-              );
-              ctx.fill();
-            }
-
-            ctx.font = `600 ${phoneticPx}px 'DM Sans', 'Noto Sans Myanmar', 'Noto Sans Thai', sans-serif`;
-            if (isSpoken) {
-              ctx.fillStyle = pillTextFill;
-            } else if (isActive) {
-              ctx.fillStyle = isDarkPanel
-                ? wasSpoken
-                  ? "#8cb5f5"
-                  : "#cbd5e1"
-                : isWarmPanel
-                  ? wasSpoken
-                    ? "#944808"
-                    : "#292524"
-                  : wasSpoken
-                    ? "#1938a8"
-                    : "#334155";
-            } else {
-              ctx.fillStyle = isWarmPanel ? "#78716c" : "#64748b";
-            }
-            ctx.fillText(wl.phonetic, wl.x + 5, wl.y);
-
-            if (wl.gloss) {
-              ctx.font = `500 ${glossPx}px 'Noto Sans Myanmar', sans-serif`;
-              ctx.fillStyle = isSpoken
-                ? subHl === "emerald"
-                  ? isDarkPanel
-                    ? "#43b892"
-                    : "#0b664b"
-                  : subHl === "indigo"
-                    ? isDarkPanel
-                      ? "#80a6ff"
-                      : "#1836a3"
-                    : subHl === "rose"
-                      ? isDarkPanel
-                        ? "#e386cf"
-                        : "#7d1e68"
-                      : isDarkPanel
-                        ? "#e5a64e"
-                        : "#9c4b08"
-                : isActive
-                  ? isDarkPanel
-                    ? "#6c97f8"
-                    : "#1c3db8"
-                  : isDarkPanel
-                    ? "#515e87"
-                    : isWarmPanel
-                      ? "#a8a29e"
-                      : "#94a3b8";
-              ctx.fillText(wl.gloss, wl.x + 5, wl.y + Math.round(22 * subFontScale));
-            }
-          }
-
-          if (card.thaiLines.length > 0) {
-            ctx.font = `500 ${thaiPx}px 'Noto Sans Thai', 'DM Sans', sans-serif`;
-            ctx.fillStyle = isActive
-              ? isDarkPanel
-                ? "#e2e8f0"
-                : isWarmPanel
-                  ? "#44403c"
-                  : "#334155"
-              : isWarmPanel
-                ? "#78716c"
-                : "#64748b";
-            card.thaiLines.forEach((line, li) => {
-              ctx.fillText(line, 58, card.thaiStartY + li * thaiLineH);
-            });
-          }
-
-          if (showBurmeseLine) {
-            if (card.wordLayouts.length > 0 || card.thaiLines.length > 0) {
-              const dividerY = card.burmeseStartY - 30;
-              ctx.fillStyle = isActive
-                ? isDarkPanel
-                  ? "rgba(78, 126, 247, 0.28)"
-                  : isWarmPanel
-                    ? "#ebd197"
-                    : "#d3dff8"
-                : isDarkPanel
-                  ? "#1e264a"
-                  : isWarmPanel
-                    ? "#e7dcc8"
-                    : "#f1f5f9";
-              ctx.fillRect(54, dividerY, width - 96, 1);
-            }
-
-            ctx.font = `600 ${idxPx}px 'JetBrains Mono', monospace`;
-            ctx.fillStyle = isActive
-              ? isDarkPanel
-                ? "#5b85f7"
-                : isWarmPanel
-                  ? "#a3550b"
-                  : "#1c3db8"
-              : isDarkPanel
-                ? "#515e87"
-                : isWarmPanel
-                  ? "#a8a29e"
-                  : "#94a3b8";
-            ctx.fillText(String(ci + 1).padStart(2, "0"), 54, card.burmeseStartY - 1);
-
-            ctx.font = `500 ${burmesePx}px 'Noto Sans Myanmar', 'DM Sans', sans-serif`;
-            ctx.fillStyle = isActive
-              ? isDarkPanel
-                ? "#99b8ff"
-                : "#122b87"
-              : isWarmPanel
-                ? "#57534e"
-                : "#64748b";
-            card.burmeseLines.forEach((line, li) => {
-              ctx.fillText(line, 86, card.burmeseStartY + li * burmeseLineH);
-            });
-          }
-        }
-
-        ctx.restore();
+        renderSubtitleViewport(ctx, {
+          cards,
+          width,
+          panelTopY: topVideoH,
+          panelHeight: listH,
+          subTheme,
+          subHl,
+          subFontScale,
+          showBurmeseLine,
+          highlightTime: ht,
+          scrollY: currentScrollY,
+        });
       }
     };
 

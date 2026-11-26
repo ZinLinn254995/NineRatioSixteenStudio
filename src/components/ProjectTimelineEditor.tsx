@@ -313,7 +313,7 @@ export function ProjectTimelineEditor({
 
   // Reset undo & drag state only when switching to a genuinely different source project
   const projectIdentity = activeTimelineProject
-    ? `${activeTimelineProject.sourceType}:${activeTimelineProject.videoId || ""}:${activeTimelineProject.localUrl || ""}:${activeTimelineProject.title}`
+    ? `${activeTimelineProject.localUrl || ""}:${activeTimelineProject.title}`
     : "none";
 
   useEffect(() => {
@@ -398,19 +398,15 @@ export function ProjectTimelineEditor({
     return () => ro.disconnect();
   }, [projectIdentity, isCollapsed]);
 
-  // Capture filmstrip frames for local videos; fallback thumbnail for YouTube
+  // Capture filmstrip frames for local videos
   useEffect(() => {
     if (!activeTimelineProject) {
       setThumbnails([]);
       return;
     }
 
-    if (activeTimelineProject.sourceType !== "local" || !activeTimelineProject.localUrl) {
-      const fallback =
-        activeTimelineProject.keyframeUrls[0] ||
-        (activeTimelineProject.videoId
-          ? `https://i.ytimg.com/vi/${activeTimelineProject.videoId}/hqdefault.jpg`
-          : "");
+    if (!activeTimelineProject.localUrl) {
+      const fallback = activeTimelineProject.keyframeUrls[0] || "";
       setThumbnails(fallback ? [fallback] : []);
       return;
     }
@@ -495,14 +491,14 @@ export function ProjectTimelineEditor({
       cancelled = true;
       releaseHiddenVid();
     };
-  }, [project?.sourceType, project?.localUrl, project?.videoId, isCollapsed]);
+  }, [project?.localUrl, isCollapsed]);
 
-  // Smoothly throttle rapid drag seeks on Stage9x16 so YouTube/local video players stay fluid
+  // Smoothly throttle rapid drag seeks on Stage9x16 so local video playback stays fluid
   const dispatchSeek = useCallback(
     (targetCut: number, immediate = false) => {
       const maxCut = totalCutDurationRef.current;
       const clamped = Math.max(0, Math.min(maxCut, targetCut));
-      const minIntervalMs = projectRef.current?.sourceType === "youtube" ? 110 : 28;
+      const minIntervalMs = 28;
       const now = performance.now();
 
       if (immediate || now - lastSeekDispatchAtRef.current >= minIntervalMs) {
@@ -547,7 +543,7 @@ export function ProjectTimelineEditor({
   }, []);
 
   const dispatchPreviewSourceSeek = useCallback((sourceSec: number, immediate = false) => {
-    if (projectRef.current?.sourceType !== "local" || !onPreviewSourceSeekRef.current) return;
+    if (!projectRef.current?.localUrl || !onPreviewSourceSeekRef.current) return;
     isPreviewOverrideActiveRef.current = true;
     const minIntervalMs = 28;
     const now = performance.now();

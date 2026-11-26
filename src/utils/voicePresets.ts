@@ -21,10 +21,7 @@ export const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
   vocalIsolationStrength: 65,
 };
 
-const YOUTUBE_SUPPORTED_RATES = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
-
 export function getEffectivePlaybackSpeed(
-  sourceType: "youtube" | "local",
   rawSpeed: number,
   extraSpeed = 1
 ): number {
@@ -37,18 +34,7 @@ export function getEffectivePlaybackSpeed(
       ? extraSpeed
       : 1;
   const combined = safeRaw * safeExtra;
-  const clamped = Math.max(0.25, Math.min(2.5, combined));
-  if (sourceType === "local") return clamped;
-  let nearest = 1;
-  let bestDiff = Infinity;
-  for (const r of YOUTUBE_SUPPORTED_RATES) {
-    const diff = Math.abs(r - clamped);
-    if (diff < bestDiff) {
-      bestDiff = diff;
-      nearest = r;
-    }
-  }
-  return nearest;
+  return Math.max(0.25, Math.min(2.5, combined));
 }
 
 export const VOICE_PRESETS: VoicePresetOption[] = [

@@ -66,12 +66,20 @@ export interface SubtitleItem {
   isManuallyEdited?: boolean;
 }
 
-export interface ActiveMediaSource {
-  sourceType: "youtube" | "local";
-  videoId?: string;
+export interface LocalStudioMedia {
+  sourceType: "local";
   localUrl?: string;
   localFile?: File;
   uploadId?: string;
+  title: string;
+  channel: string;
+  durationSec: number;
+  thumbnail?: string;
+}
+
+export interface YouTubeSourcePreview {
+  sourceType: "youtube";
+  videoId: string;
   title: string;
   channel: string;
   durationSec: number;
@@ -85,8 +93,6 @@ export interface SpeechRegion {
 
 export interface VideoProject {
   isDraft?: boolean;
-  sourceType: "youtube" | "local";
-  videoId?: string;
   localUrl?: string;
   localFile?: File;
   uploadId?: string;

@@ -2,7 +2,7 @@ import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, us
 const useIsomorphicLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
 import { Pause, Play, Upload, Volume2, VolumeX } from "lucide-react";
 import type { SubtitleItem, VideoEditSettings, VideoProject, VoiceSettings } from "../types";
-import { YouTubeScenePlayer, type YouTubeScenePlayerHandle } from "./YouTubeScenePlayer";
+import { ScenePlayer, type ScenePlayerHandle } from "./ScenePlayer";
 import { getEffectivePlaybackSpeed } from "../utils/voicePresets";
 import { findActiveSubtitle, getScrollAnchorSubtitle } from "../utils/projectTimeline";
 import { hasGeneratedProject, hasProjectMedia } from "../utils/projectState";
@@ -125,7 +125,7 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
   },
   ref
 ) {
-  const playerRef = useRef<YouTubeScenePlayerHandle | null>(null);
+  const playerRef = useRef<ScenePlayerHandle | null>(null);
   const subPanelRef = useRef<HTMLDivElement | null>(null);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const [isUploadDragOver, setIsUploadDragOver] = useState(false);
@@ -229,7 +229,7 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
     ref,
     () => ({
       previewSourceTime: (sourceSec: number | null, opts?: { skipResync?: boolean }) => {
-        if (activeProject?.sourceType !== "local") {
+        if (!activeProject?.localUrl) {
           if (subPanelRef.current) subPanelRef.current.style.visibility = "";
           return;
         }
@@ -239,21 +239,17 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
         playerRef.current?.previewSourceTime(sourceSec, opts);
       },
     }),
-    [activeProject?.sourceType]
+    [activeProject?.localUrl]
   );
 
   useEffect(() => {
     if (subPanelRef.current) {
       subPanelRef.current.style.visibility = "";
     }
-  }, [activeProject?.sourceType, activeProject?.localUrl]);
+  }, [activeProject?.localUrl]);
 
   useEffect(() => {
-    if (
-      !activeProject ||
-      activeProject.sourceType !== "local" ||
-      !activeProject.localUrl
-    ) {
+    if (!activeProject || !activeProject.localUrl) {
       return;
     }
     const frameEl = stageFrameRef.current;
@@ -281,7 +277,7 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
     return () => {
       frameEl.removeEventListener("loadedmetadata", onLoadedMetadataCapture, true);
     };
-  }, [activeProject?.sourceType, activeProject?.localUrl]);
+  }, [activeProject?.localUrl]);
   const safeCutTime = typeof cutTime === "number" && Number.isFinite(cutTime) ? Math.max(0, cutTime) : 0;
   const totalDuration =
     activeProject &&
@@ -291,22 +287,14 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
       ? activeProject.targetDurationSec
       : 90;
   const rawEffectiveSpeed = activeProject
-    ? getEffectivePlaybackSpeed(
-        activeProject.sourceType,
-        editSettings.playbackSpeed,
-        voiceSettings.speed
-      )
+    ? getEffectivePlaybackSpeed(editSettings.playbackSpeed, voiceSettings.speed)
     : 1;
   const effectiveSpeed =
     typeof rawEffectiveSpeed === "number" && Number.isFinite(rawEffectiveSpeed) && rawEffectiveSpeed > 0
       ? rawEffectiveSpeed
       : 1;
   const displayTotalDuration = totalDuration / effectiveSpeed;
-  const leadSec = activeProject
-    ? activeProject.sourceType === "youtube"
-      ? 0.22
-      : 0.12
-    : 0;
+  const leadSec = activeProject ? 0.12 : 0;
   const subtitles =
     hasGeneratedProject(project) && Array.isArray(project.subtitles) ? project.subtitles : [];
 
@@ -685,14 +673,17 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
     };
   }, []);
 
-  // Match exportVideo.ts 720x1280 split geometry verbatim
+  // Match exportVideo.ts & server.ts 720x1280 split geometry verbatim (even-pixel clamped)
   const hasSubtitles = Boolean(hasGeneratedProject(project) && project.subtitles.length > 0);
   const activeVideoHeightPct = dragVideoHeightPct ?? (editSettings.videoHeightPct || 35);
   const clampedHeightPct = Math.max(26, Math.min(52, activeVideoHeightPct));
-  const exportTopVideoH = hasSubtitles ? Math.round((1280 * clampedHeightPct) / 100) : 1280;
+  const rawTopVideoH = hasSubtitles ? Math.round((1280 * clampedHeightPct) / 100) : 1280;
+  const exportTopVideoH = hasSubtitles
+    ? Math.max(240, Math.min(1280 - 240, Math.round(rawTopVideoH / 2) * 2))
+    : 1280;
   const exportListH = Math.max(1, 1280 - exportTopVideoH);
   const topVideoHeightPct = (exportTopVideoH / 1280) * 100;
-  const snapGuideTopPct = (Math.round((1280 * 35) / 100) / 1280) * 100;
+  const snapGuideTopPct = ((Math.round(Math.round((1280 * 35) / 100) / 2) * 2) / 1280) * 100;
 
   const scheduleSplitPreview = (clientY: number) => {
     const frameEl = stageFrameRef.current;
@@ -930,10 +921,8 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
               }`}
             >
               <AppErrorBoundary fallbackLabel="Video preview error" compact>
-                <YouTubeScenePlayer
+                <ScenePlayer
                   ref={playerRef}
-                  sourceType={activeProject.sourceType}
-                  videoId={activeProject.videoId}
                   localUrl={activeProject.localUrl}
                   scenes={activeProject.scenes}
                   cutTime={subscribeCutTime ? 0 : safeCutTime}
@@ -943,7 +932,6 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
                   muted={muted}
                   voiceSettings={voiceSettings}
                   editSettings={editSettings}
-                  fallbackThumbnail={activeProject.keyframeUrls[0]}
                   onTimeUpdate={onTimeUpdate}
                   onPlayingChange={onPlayingChange}
                   onEnded={onEnded}

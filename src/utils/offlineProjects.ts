@@ -1,5 +1,5 @@
 import type {
-  ActiveMediaSource,
+  LocalStudioMedia,
   SavedProjectRecord,
   SceneSelection,
   SpeakingScene,
@@ -356,6 +356,12 @@ export async function captureLocalVideoThumbnail(localUrl: string): Promise<stri
   });
 }
 
+export function isLegacyYouTubeProject(
+  record: Pick<SavedProjectRecord, "sourceType">
+): boolean {
+  return record.sourceType === "youtube";
+}
+
 export async function listSavedProjects(): Promise<SavedProjectRecord[]> {
   const db = await openOfflineDb();
   try {
@@ -366,8 +372,14 @@ export async function listSavedProjects(): Promise<SavedProjectRecord[]> {
     return items
       .map((item) => {
         const scenes = Array.isArray(item.scenes) ? item.scenes : [];
+        const sourceType: SavedProjectRecord["sourceType"] =
+          item.sourceType === "youtube" ? "youtube" : "local";
+        const isLegacy = sourceType === "youtube";
         return {
           ...item,
+          sourceType,
+          videoId: isLegacy && typeof item.videoId === "string" ? item.videoId : undefined,
+          hasLocalVideoBlob: isLegacy ? false : Boolean(item.hasLocalVideoBlob),
           scenes,
           selectedScenes: Array.isArray(item.selectedScenes) ? item.selectedScenes : [],
           subtitles: Array.isArray(item.subtitles)
@@ -437,7 +449,7 @@ export interface SaveOfflineProjectInput {
   existingId?: string | null;
   title?: string;
   project: VideoProject;
-  activeMedia: ActiveMediaSource | null;
+  activeMedia: LocalStudioMedia | null;
   selectedScenes: SceneSelection[];
   voiceSettings: VoiceSettings;
   editSettings: VideoEditSettings;
@@ -448,7 +460,7 @@ export async function saveOfflineProject(
 ): Promise<{ record: SavedProjectRecord; blobSaved: boolean }> {
   const { existingId, project, activeMedia, selectedScenes, voiceSettings, editSettings } = input;
   const now = Date.now();
-  const id =
+  let id =
     existingId || `proj-${now}-${Math.random().toString(36).slice(2, 8)}`;
 
   const db = await openOfflineDb();
@@ -460,7 +472,11 @@ export async function saveOfflineProject(
       existingRecord = await reqToPromise<SavedProjectRecord | undefined>(
         tx.objectStore(STORE_PROJECTS).get(id)
       );
-      if (project.sourceType === "local") {
+      if (existingRecord && isLegacyYouTubeProject(existingRecord)) {
+        // Never overwrite a legacy YouTube record in place; allocate a fresh local project ID instead.
+        id = `proj-${now}-${Math.random().toString(36).slice(2, 8)}`;
+        existingRecord = undefined;
+      } else {
         existingBlobEntry = await reqToPromise<MediaBlobEntry | undefined>(
           tx.objectStore(STORE_BLOBS).get(id)
         );
@@ -473,15 +489,13 @@ export async function saveOfflineProject(
       ? inferVideoMimeType(localFile.name, localFile.type)
       : existingRecord?.localFileType;
 
-    const existingBlobValid =
-      project.sourceType === "local" && existingBlobEntry?.blob
-        ? await verifyStoredBlob(existingBlobEntry.blob)
-        : false;
+    const existingBlobValid = existingBlobEntry?.blob
+      ? await verifyStoredBlob(existingBlobEntry.blob)
+      : false;
 
-    const fileFingerprint =
-      project.sourceType === "local" && localFile
-        ? await computeBlobFingerprint(localFile)
-        : undefined;
+    const fileFingerprint = localFile
+      ? await computeBlobFingerprint(localFile)
+      : undefined;
 
     const fileChangedFromExisting = Boolean(
       localFile &&
@@ -497,10 +511,7 @@ export async function saveOfflineProject(
       project.keyframeUrls[0] ||
       (fileChangedFromExisting ? undefined : existingRecord?.thumbnail);
 
-    if (!thumbnail && project.sourceType === "youtube" && project.videoId) {
-      thumbnail = `https://i.ytimg.com/vi/${project.videoId}/hqdefault.jpg`;
-    }
-    if (!thumbnail && project.sourceType === "local") {
+    if (!thumbnail) {
       if (localFile) {
         const tempThumbUrl = URL.createObjectURL(localFile);
         try {
@@ -525,9 +536,8 @@ export async function saveOfflineProject(
     const baseRecord: SavedProjectRecord = {
       id,
       title: (input.title ?? project.title).trim() || "Untitled Project",
-      sourceType: project.sourceType,
-      videoId: project.videoId,
-      channel: project.channel || (project.sourceType === "local" ? "Local Video" : "YouTube"),
+      sourceType: "local",
+      channel: project.channel || "Local Video",
       thumbnail,
       sourceDurationSec: project.sourceDurationSec,
       targetDurationSec: project.targetDurationSec,
@@ -549,7 +559,7 @@ export async function saveOfflineProject(
       keyframeUrls: [...project.keyframeUrls],
       voiceSettings: sanitizeVoiceSettings(voiceSettings),
       editSettings: sanitizeEditSettings(editSettings),
-      hasLocalVideoBlob: Boolean((project.sourceType === "local" && localFile) || existingBlobValid),
+      hasLocalVideoBlob: Boolean(localFile || existingBlobValid),
       localFileName: localFile?.name || existingRecord?.localFileName,
       localFileType: resolvedMimeType,
       localFileSize: localFile?.size ?? existingRecord?.localFileSize,
@@ -560,7 +570,7 @@ export async function saveOfflineProject(
     let blobSaved = true;
 
     // Save materialized byte-backed Blob if missing, unreadable, or content/fingerprint changed
-    if (project.sourceType === "local" && localFile) {
+    if (localFile) {
       const shouldWriteBlob = !existingBlobValid || fileChangedFromExisting;
 
       if (shouldWriteBlob) {
@@ -628,7 +638,7 @@ export async function renameSavedProject(
     const tx = db.transaction(STORE_PROJECTS, "readwrite");
     const store = tx.objectStore(STORE_PROJECTS);
     const existing = await reqToPromise<SavedProjectRecord | undefined>(store.get(id));
-    if (!existing) {
+    if (!existing || isLegacyYouTubeProject(existing)) {
       await txDone(tx);
       return null;
     }
@@ -656,7 +666,9 @@ export async function attachLocalVideoToSavedProject(
       readTx.objectStore(STORE_PROJECTS).get(id)
     );
     await txDone(readTx);
-    if (!existing) return { record: null, blobSaved: false };
+    if (!existing || isLegacyYouTubeProject(existing)) {
+      return { record: null, blobSaved: false };
+    }
 
     const resolvedMime = inferVideoMimeType(file.name, file.type);
     const fingerprint = await computeBlobFingerprint(file);
@@ -910,23 +922,19 @@ export async function importProjectFromJsonText(
   const parsedSourceDur = Number(raw.sourceDurationSec);
   const parsedTargetDur = Number(raw.targetDurationSec);
 
+  const isLegacyYouTube = raw.sourceType === "youtube";
   const record: SavedProjectRecord = {
     id,
     title: raw.title.trim() || "Imported Project",
-    sourceType: raw.sourceType,
-    videoId: typeof raw.videoId === "string" ? raw.videoId : undefined,
+    sourceType: isLegacyYouTube ? "youtube" : "local",
+    videoId: isLegacyYouTube && typeof raw.videoId === "string" ? raw.videoId : undefined,
     channel:
       typeof raw.channel === "string" && raw.channel.trim()
         ? raw.channel
-        : raw.sourceType === "local"
-          ? "Local Video"
-          : "YouTube",
-    thumbnail:
-      typeof raw.thumbnail === "string"
-        ? raw.thumbnail
-        : raw.sourceType === "youtube" && typeof raw.videoId === "string"
-          ? `https://i.ytimg.com/vi/${raw.videoId}/hqdefault.jpg`
-          : undefined,
+        : isLegacyYouTube
+          ? "YouTube"
+          : "Local Video",
+    thumbnail: typeof raw.thumbnail === "string" ? raw.thumbnail : undefined,
     sourceDurationSec:
       Number.isFinite(parsedSourceDur) && parsedSourceDur > 0
         ? parsedSourceDur

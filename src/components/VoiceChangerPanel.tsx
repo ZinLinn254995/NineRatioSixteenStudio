@@ -3,22 +3,18 @@ import type { VoiceSettings } from "../types";
 import {
   DEFAULT_VOICE_SETTINGS,
   VOICE_PRESETS,
-  getEffectivePlaybackSpeed,
 } from "../utils/voicePresets";
 import { resumeAllVoiceContexts } from "../utils/webAudioVoice";
 
 interface VoiceChangerPanelProps {
-  sourceType: "youtube" | "local";
   settings: VoiceSettings;
   onChange: (next: VoiceSettings) => void;
 }
 
 export function VoiceChangerPanel({
-  sourceType,
   settings,
   onChange,
 }: VoiceChangerPanelProps) {
-  const isYoutube = sourceType === "youtube";
 
   const updateField = <K extends keyof VoiceSettings>(
     key: K,
@@ -128,16 +124,14 @@ export function VoiceChangerPanel({
               <div className="flex items-center justify-between text-xs">
                 <span className="text-[#4d597d] dark:text-[#919ec4]">Voice Speed</span>
                 <span className="font-mono-tabular text-[#0c1026] dark:text-[#f3f5fc]">
-                  {isYoutube
-                    ? `${getEffectivePlaybackSpeed("youtube", safeSpeed)}x`
-                    : `${safeSpeed.toFixed(2)}x`}
+                  {`${safeSpeed.toFixed(2)}x`}
                 </span>
               </div>
               <input
                 type="range"
                 min={0.75}
                 max={1.4}
-                step={isYoutube ? 0.25 : 0.01}
+                step={0.01}
                 value={Math.max(0.75, Math.min(1.4, safeSpeed))}
                 onChange={(e) => {
                   const next = parseFloat(e.target.value);
@@ -153,7 +147,7 @@ export function VoiceChangerPanel({
         })()}
 
         {/* Pitch, Tone, Echo, Robot */}
-        <div className={`grid grid-cols-2 gap-x-4 gap-y-2.5 ${isYoutube ? "opacity-45" : ""}`}>
+        <div className="grid grid-cols-2 gap-x-4 gap-y-2.5">
           <div className="space-y-1">
             <div className="flex items-center justify-between text-xs">
               <span className="text-[#4d597d] dark:text-[#919ec4]">Pitch</span>
@@ -166,11 +160,10 @@ export function VoiceChangerPanel({
               min={-12}
               max={12}
               step={0.5}
-              disabled={isYoutube}
               value={settings.pitchSemitones}
               onChange={(e) => updateField("pitchSemitones", parseFloat(e.target.value))}
               aria-label="Voice pitch semitones"
-              className="w-full h-1.5 rounded-full appearance-none bg-[#d2dcf0] dark:bg-[#21284c] cursor-pointer disabled:cursor-not-allowed"
+              className="w-full h-1.5 rounded-full appearance-none bg-[#d2dcf0] dark:bg-[#21284c] cursor-pointer"
             />
           </div>
 
@@ -186,11 +179,10 @@ export function VoiceChangerPanel({
               min={-10}
               max={10}
               step={1}
-              disabled={isYoutube}
               value={settings.tone}
               onChange={(e) => updateField("tone", parseInt(e.target.value, 10))}
               aria-label="Voice tone"
-              className="w-full h-1.5 rounded-full appearance-none bg-[#d2dcf0] dark:bg-[#21284c] cursor-pointer disabled:cursor-not-allowed"
+              className="w-full h-1.5 rounded-full appearance-none bg-[#d2dcf0] dark:bg-[#21284c] cursor-pointer"
             />
           </div>
 
@@ -206,11 +198,10 @@ export function VoiceChangerPanel({
               min={0}
               max={100}
               step={1}
-              disabled={isYoutube}
               value={settings.echo}
               onChange={(e) => updateField("echo", parseInt(e.target.value, 10))}
               aria-label="Voice echo"
-              className="w-full h-1.5 rounded-full appearance-none bg-[#d2dcf0] dark:bg-[#21284c] cursor-pointer disabled:cursor-not-allowed"
+              className="w-full h-1.5 rounded-full appearance-none bg-[#d2dcf0] dark:bg-[#21284c] cursor-pointer"
             />
           </div>
 
@@ -226,18 +217,17 @@ export function VoiceChangerPanel({
               min={0}
               max={100}
               step={1}
-              disabled={isYoutube}
               value={settings.robot}
               onChange={(e) => updateField("robot", parseInt(e.target.value, 10))}
               aria-label="Robot modulation"
-              className="w-full h-1.5 rounded-full appearance-none bg-[#d2dcf0] dark:bg-[#21284c] cursor-pointer disabled:cursor-not-allowed"
+              className="w-full h-1.5 rounded-full appearance-none bg-[#d2dcf0] dark:bg-[#21284c] cursor-pointer"
             />
           </div>
         </div>
       </div>
 
       {/* Audio Protection & Separation Controls */}
-      <div className={`pt-3 divide-y divide-[#d2dcf0] dark:divide-[#21284c] ${isYoutube ? "opacity-55" : ""}`}>
+      <div className="pt-3 divide-y divide-[#d2dcf0] dark:divide-[#21284c]">
         {/* 1. Vocal Isolation & Background Suppression */}
         <div className="space-y-2 pb-2.5">
           <div className="flex items-center justify-between gap-3">
@@ -247,9 +237,7 @@ export function VoiceChangerPanel({
                 <span>Vocal Isolation</span>
               </div>
               <p className="text-[11px] text-[#4d597d] dark:text-[#919ec4] mt-0.5 leading-snug">
-                {isYoutube
-                  ? "Local video only (preview & exported MP4 audio)."
-                  : "Isolate center vocals and reduce stereo music & noise."}
+                Isolate center vocals and reduce stereo music & noise.
               </p>
             </div>
 
@@ -258,11 +246,10 @@ export function VoiceChangerPanel({
               role="switch"
               aria-checked={settings.vocalIsolation}
               aria-label="Toggle Vocal Isolation"
-              disabled={isYoutube}
               onClick={() =>
                 updateField("vocalIsolation", !settings.vocalIsolation, false)
               }
-              className={`h-6 px-2.5 rounded-sm text-[11px] font-semibold border transition-colors cursor-pointer disabled:cursor-not-allowed shrink-0 ${
+              className={`h-6 px-2.5 rounded-sm text-[11px] font-semibold border transition-colors cursor-pointer shrink-0 ${
                 settings.vocalIsolation
                   ? "bg-teal-700 text-white border-teal-700 dark:bg-teal-400 dark:text-[#060918] dark:border-teal-400"
                   : "bg-[#e7ecf8] dark:bg-[#141933] text-[#4d597d] dark:text-[#919ec4] border-[#d2dcf0] dark:border-[#21284c] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
@@ -272,7 +259,7 @@ export function VoiceChangerPanel({
             </button>
           </div>
 
-          {settings.vocalIsolation && !isYoutube && (
+          {settings.vocalIsolation && (
             <div className="space-y-1 pt-1">
               <div className="flex items-center justify-between text-xs">
                 <span className="text-[#4d597d] dark:text-[#919ec4]">Strength</span>
@@ -314,11 +301,10 @@ export function VoiceChangerPanel({
               role="switch"
               aria-checked={settings.spectralPhaseShift}
               aria-label="Toggle Spectral Phase Shifting"
-              disabled={isYoutube}
               onClick={() =>
                 updateField("spectralPhaseShift", !settings.spectralPhaseShift, false)
               }
-              className={`h-6 px-2.5 rounded-sm text-[11px] font-semibold border transition-colors cursor-pointer disabled:cursor-not-allowed shrink-0 ${
+              className={`h-6 px-2.5 rounded-sm text-[11px] font-semibold border transition-colors cursor-pointer shrink-0 ${
                 settings.spectralPhaseShift
                   ? "bg-teal-700 text-white border-teal-700 dark:bg-teal-400 dark:text-[#060918] dark:border-teal-400"
                   : "bg-[#e7ecf8] dark:bg-[#141933] text-[#4d597d] dark:text-[#919ec4] border-[#d2dcf0] dark:border-[#21284c] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
@@ -328,7 +314,7 @@ export function VoiceChangerPanel({
             </button>
           </div>
 
-          {settings.spectralPhaseShift && !isYoutube && (
+          {settings.spectralPhaseShift && (
             <div className="space-y-1 pt-1">
               <div className="flex items-center justify-between text-xs">
                 <span className="text-[#4d597d] dark:text-[#919ec4]">Phase Dispersion</span>
@@ -370,11 +356,10 @@ export function VoiceChangerPanel({
               role="switch"
               aria-checked={settings.adversarialNoise}
               aria-label="Toggle Audio Adversarial Perturbations"
-              disabled={isYoutube}
               onClick={() =>
                 updateField("adversarialNoise", !settings.adversarialNoise, false)
               }
-              className={`h-6 px-2.5 rounded-sm text-[11px] font-semibold border transition-colors cursor-pointer disabled:cursor-not-allowed shrink-0 ${
+              className={`h-6 px-2.5 rounded-sm text-[11px] font-semibold border transition-colors cursor-pointer shrink-0 ${
                 settings.adversarialNoise
                   ? "bg-teal-700 text-white border-teal-700 dark:bg-teal-400 dark:text-[#060918] dark:border-teal-400"
                   : "bg-[#e7ecf8] dark:bg-[#141933] text-[#4d597d] dark:text-[#919ec4] border-[#d2dcf0] dark:border-[#21284c] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
@@ -384,7 +369,7 @@ export function VoiceChangerPanel({
             </button>
           </div>
 
-          {settings.adversarialNoise && !isYoutube && (
+          {settings.adversarialNoise && (
             <div className="space-y-1 pt-1">
               <div className="flex items-center justify-between text-xs">
                 <span className="text-[#4d597d] dark:text-[#919ec4]">Strength (ε)</span>

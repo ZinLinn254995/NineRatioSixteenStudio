@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { AlertCircle, Check, Download, RotateCcw, Share2, X } from "lucide-react";
+import { AlertCircle, Check, Download, RefreshCw, RotateCcw, Share2, X } from "lucide-react";
 import type { ExportedVideoResult, ExportProgress } from "../utils/exportVideo";
 
 interface ExportSheetProps {
@@ -7,6 +7,7 @@ interface ExportSheetProps {
   progress: ExportProgress | null;
   result: ExportedVideoResult | null;
   hasSaved: boolean;
+  isStale?: boolean;
   error: string | null;
   canShare: boolean;
   onMinimize: () => void;
@@ -60,6 +61,7 @@ export function ExportSheet({
   progress,
   result,
   hasSaved,
+  isStale = false,
   error,
   canShare,
   onMinimize,
@@ -114,9 +116,11 @@ export function ExportSheet({
               {isExporting
                 ? "Exporting Video"
                 : result
-                  ? hasSaved
-                    ? "Saved to Device"
-                    : "Export Ready"
+                  ? isStale
+                    ? "Previous Export"
+                    : hasSaved
+                      ? "Saved to Device"
+                      : "Export Ready"
                   : "Export Failed"}
             </h2>
             {result && !isExporting && (
@@ -225,6 +229,13 @@ export function ExportSheet({
 
           {!isExporting && result && (
             <>
+              {isStale && (
+                <div className="flex items-center gap-2.5 px-3 py-2 rounded-lg border border-amber-200 dark:border-amber-800/70 bg-amber-50/80 dark:bg-amber-950/35 text-xs text-amber-900 dark:text-amber-200">
+                  <AlertCircle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
+                  <span>You edited the project after this export. Re-export to include your latest changes.</span>
+                </div>
+              )}
+
               {/* Built-in 9:16 MP4 verification player */}
               <div className="rounded-lg bg-[#04050e] border border-[#d2dcf0] dark:border-[#21284c] overflow-hidden flex items-center justify-center">
                 <video
@@ -236,9 +247,28 @@ export function ExportSheet({
                 />
               </div>
 
-              {/* Explicit single-save controls (prevents accidental duplicate downloads) */}
+              {/* Explicit single-save & clear Re-export controls */}
               <div className="space-y-2.5">
-                {!hasSaved ? (
+                {isStale ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={onRetry}
+                      className="w-full h-11 px-4 rounded-lg bg-teal-700 hover:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 text-white dark:text-[#060918] text-sm font-semibold flex items-center justify-center gap-2 active:scale-[0.99] transition-all cursor-pointer shadow-xs"
+                    >
+                      <RefreshCw className="w-4 h-4" />
+                      <span>Re-export Updated MP4</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onSave(result)}
+                      className="w-full h-10 px-4 rounded-lg border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-sm font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                    >
+                      <Download className="w-4 h-4" />
+                      <span>Save Previous MP4</span>
+                    </button>
+                  </>
+                ) : !hasSaved ? (
                   <button
                     type="button"
                     onClick={() => onSave(result)}
@@ -269,23 +299,41 @@ export function ExportSheet({
                   </div>
                 )}
 
-                <div className={`grid gap-2.5 ${canShare ? "grid-cols-2" : "grid-cols-1"}`}>
+                <div
+                  className={`grid gap-2.5 ${
+                    !isStale && canShare
+                      ? "grid-cols-3"
+                      : !isStale || canShare
+                        ? "grid-cols-2"
+                        : "grid-cols-1"
+                  }`}
+                >
+                  {!isStale && (
+                    <button
+                      type="button"
+                      onClick={onRetry}
+                      className="h-10 px-3 rounded-lg border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-sm font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                    >
+                      <RefreshCw className="w-4 h-4 shrink-0" />
+                      <span>Re-export</span>
+                    </button>
+                  )}
                   {canShare && (
                     <button
                       type="button"
                       onClick={() => onShare(result)}
-                      className="h-10 px-4 rounded-lg border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-sm font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                      className="h-10 px-3 rounded-lg border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-sm font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
                     >
-                      <Share2 className="w-4 h-4" />
+                      <Share2 className="w-4 h-4 shrink-0" />
                       <span>Share</span>
                     </button>
                   )}
                   <button
                     type="button"
                     onClick={hasSaved ? onDiscardResult : onMinimize}
-                    className="h-10 px-4 rounded-lg border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-sm font-medium text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] flex items-center justify-center transition-colors cursor-pointer"
+                    className="h-10 px-3 rounded-lg border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-sm font-medium text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] flex items-center justify-center transition-colors cursor-pointer"
                   >
-                    {hasSaved ? "Done" : "Keep for Later"}
+                    {hasSaved ? "Done" : "Close"}
                   </button>
                 </div>
               </div>

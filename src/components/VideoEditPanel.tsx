@@ -32,7 +32,6 @@ export type EditSectionId = "timeline" | StudioEditSectionId;
 interface VideoEditPanelProps {
   settings: VideoEditSettings;
   voiceSettings: VoiceSettings;
-  sourceType?: "youtube" | "local";
   sourceDurationSec?: number;
   project: VideoProject | null;
   cutTime: number;
@@ -126,7 +125,6 @@ function formatSpeedDuration(sec: number): string {
 export function VideoEditPanel({
   settings,
   voiceSettings,
-  sourceType = "local",
   sourceDurationSec,
   project,
   cutTime,
@@ -181,9 +179,7 @@ export function VideoEditPanel({
       : 0;
 
   const { visualDirty, audioDirty, isModified } = getVideoEditDirtyMap(settings, voiceSettings);
-  const isYoutube = sourceType === "youtube";
   const rawEffectiveSpeed = getEffectivePlaybackSpeed(
-    sourceType,
     safePlaybackSpeed,
     voiceSettings.speed
   );
@@ -297,7 +293,7 @@ export function VideoEditPanel({
               </div>
               <div className="flex items-center gap-1.5 text-xs font-mono-tabular">
                 <span className="text-[#0c1026] dark:text-[#f3f5fc] font-semibold">
-                  {isYoutube ? `${effectiveSpeed}x` : `${safePlaybackSpeed.toFixed(2)}x`}
+                  {`${safePlaybackSpeed.toFixed(2)}x`}
                 </span>
                 {scaledDurationSec !== null && safeSourceDurationSec > 0 && (
                   <span className="text-[#4d597d] dark:text-[#919ec4]">
@@ -335,7 +331,7 @@ export function VideoEditPanel({
               type="range"
               min={0.5}
               max={2}
-              step={isYoutube ? 0.25 : 0.05}
+              step={0.05}
               value={Math.max(0.5, Math.min(2, safePlaybackSpeed))}
               onChange={(e) => {
                 const next = parseFloat(e.target.value);
@@ -781,7 +777,6 @@ export function VideoEditPanel({
       {/* Section: Voice Changer & Audio Shield */}
       {section === "audio" && (
         <VoiceChangerPanel
-          sourceType={sourceType}
           settings={voiceSettings}
           onChange={onChangeVoiceSettings}
         />

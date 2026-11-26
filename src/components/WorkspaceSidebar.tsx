@@ -41,7 +41,7 @@ import {
   X,
 } from "lucide-react";
 import type {
-  ActiveMediaSource,
+  LocalStudioMedia,
   SavedProjectRecord,
   SceneSelection,
   SpeakingScene,
@@ -52,6 +52,7 @@ import type {
   VideoProject,
   VoiceSettings,
   YouTubeLicenseFilter,
+  YouTubeSourcePreview,
   YouTubeVideo,
 } from "../types";
 import { PreGenerateBar } from "./PreGenerateBar";
@@ -103,8 +104,8 @@ interface WorkspaceSidebarProps {
   thaiOnly: boolean;
   hasMoreVideos: boolean;
   isLoadingMore: boolean;
-  localMedia: ActiveMediaSource | null;
-  youtubeMedia: ActiveMediaSource | null;
+  localMedia: LocalStudioMedia | null;
+  sourcePreview: YouTubeSourcePreview | null;
   selectedScenes: SceneSelection[];
   voiceSettings: VoiceSettings;
   editSettings: VideoEditSettings;
@@ -284,7 +285,7 @@ export function WorkspaceSidebar({
   hasMoreVideos,
   isLoadingMore,
   localMedia,
-  youtubeMedia,
+  sourcePreview,
   selectedScenes,
   voiceSettings,
   editSettings,
@@ -904,11 +905,7 @@ export function WorkspaceSidebar({
       ? Math.max(0, project.targetDurationSec)
       : 0;
   const rawHeaderSpeed = hasGeneratedProject(project)
-    ? getEffectivePlaybackSpeed(
-        project.sourceType,
-        editSettings.playbackSpeed,
-        voiceSettings.speed
-      )
+    ? getEffectivePlaybackSpeed(editSettings.playbackSpeed, voiceSettings.speed)
     : 1;
   const studioHeaderDuration = hasGeneratedProject(project)
     ? Math.round(rawTargetDuration / (rawHeaderSpeed > 0 ? rawHeaderSpeed : 1))
@@ -1098,7 +1095,7 @@ export function WorkspaceSidebar({
                 {/* Left / Top: Active 16:9 YouTube Preview Theater */}
                 <div className="lg:col-span-7 lg:sticky lg:top-0">
                   <YouTubePreviewPanel
-                    media={youtubeMedia}
+                    media={sourcePreview}
                     videos={videos}
                     hasMoreVideos={hasMoreVideos}
                     isLoadingMore={isLoadingMore}
@@ -1574,7 +1571,6 @@ export function WorkspaceSidebar({
 
             {studioSection === "captions" && hasGeneratedProject(project) && (() => {
               const effectiveSpd = getEffectivePlaybackSpeed(
-                project.sourceType,
                 editSettings.playbackSpeed,
                 voiceSettings.speed
               );
@@ -3793,12 +3789,6 @@ export function WorkspaceSidebar({
                 <VideoEditPanel
                   settings={editSettings}
                   voiceSettings={voiceSettings}
-                  sourceType={
-                    project?.sourceType ??
-                    localMedia?.sourceType ??
-                    youtubeMedia?.sourceType ??
-                    "local"
-                  }
                   sourceDurationSec={
                     hasGeneratedProject(project)
                       ? project.targetDurationSec
@@ -3807,7 +3797,7 @@ export function WorkspaceSidebar({
                             (acc, sc) => acc + Math.max(0, sc.endSec - sc.startSec),
                             0
                           )
-                        : localMedia?.durationSec ?? youtubeMedia?.durationSec
+                        : localMedia?.durationSec
                   }
                   project={project}
                   cutTime={cutTime}
@@ -3840,7 +3830,6 @@ export function WorkspaceSidebar({
             subtitles={project.subtitles}
             exportOpts={{
               speed: getEffectivePlaybackSpeed(
-                project.sourceType,
                 editSettings.playbackSpeed,
                 voiceSettings.speed
               ),

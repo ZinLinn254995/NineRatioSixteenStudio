@@ -9,10 +9,11 @@ import {
   FolderOpen,
   Loader2,
   Moon,
+  RefreshCw,
   Sun,
 } from "lucide-react";
 import type {
-  ActiveMediaSource,
+  LocalStudioMedia,
   SavedProjectRecord,
   SceneSelection,
   SpeechRegion,
@@ -25,10 +26,11 @@ import type {
   VideoProject,
   VoiceSettings,
   YouTubeLicenseFilter,
+  YouTubeSourcePreview,
   YouTubeVideo,
 } from "./types";
 import { DEFAULT_STAGE_PREVIEW_SCALE, Stage9x16, type Stage9x16Handle } from "./components/Stage9x16";
-import { mapCutTimeToSource } from "./components/YouTubeScenePlayer";
+import { mapCutTimeToSource } from "./components/ScenePlayer";
 import {
   WorkspaceSidebar,
   type StudioSectionId,
@@ -72,6 +74,7 @@ import {
   getSavedProjectBlob,
   importProjectFromJsonText,
   inferVideoMimeType,
+  isLegacyYouTubeProject,
   listSavedProjects,
   materializeReadableBlob,
   renameSavedProject,
@@ -116,8 +119,8 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>("youtube");
   const [studioSection, setStudioSection] = useState<StudioSectionId>("clips");
   const [timelineCollapsed, setTimelineCollapsed] = useState<boolean>(false);
-  const [localMedia, setLocalMedia] = useState<ActiveMediaSource | null>(null);
-  const [youtubeMedia, setYoutubeMedia] = useState<ActiveMediaSource | null>(null);
+  const [localMedia, setLocalMedia] = useState<LocalStudioMedia | null>(null);
+  const [sourcePreview, setSourcePreview] = useState<YouTubeSourcePreview | null>(null);
   const [voiceSettings, setVoiceSettings] = useState<VoiceSettings>({
     ...DEFAULT_VOICE_SETTINGS,
   });
@@ -169,6 +172,7 @@ export default function App() {
   const [muted, setMuted] = useState(false);
   const [exportProgress, setExportProgress] = useState<ExportProgress | null>(null);
   const [readyDownload, setReadyDownload] = useState<ExportedVideoResult | null>(null);
+  const [exportedSignature, setExportedSignature] = useState<string | null>(null);
   const [hasSavedExport, setHasSavedExport] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const [exportSheetOpen, setExportSheetOpen] = useState(false);
@@ -614,7 +618,7 @@ export default function App() {
             const first = incoming[0];
             setYtPreviewSec(0);
             setYtSeekRequest(null);
-            setYoutubeMedia({
+            setSourcePreview({
               sourceType: "youtube",
               videoId: first.videoId,
               title: first.title,
@@ -646,11 +650,11 @@ export default function App() {
     runSearch("", "all", false);
   }, [runSearch]);
 
-  // Pre-load the first recommended YouTube video into YouTube Preview by default
+  // Pre-load the first recommended YouTube video into Source preview by default
   useEffect(() => {
-    if (!youtubeMedia && videos.length > 0) {
+    if (!sourcePreview && videos.length > 0) {
       const first = videos[0];
-      setYoutubeMedia({
+      setSourcePreview({
         sourceType: "youtube",
         videoId: first.videoId,
         title: first.title,
@@ -659,7 +663,7 @@ export default function App() {
         thumbnail: first.thumbnail,
       });
     }
-  }, [youtubeMedia, videos]);
+  }, [sourcePreview, videos]);
 
   const handleChangeLicenseFilter = useCallback(
     (nextLicense: YouTubeLicenseFilter) => {
@@ -707,18 +711,11 @@ export default function App() {
     };
   }, []);
 
-  // Clicking a YouTube video loads it in the unified YouTube tab without disturbing Watch & Scenes local edits
+  // Clicking a YouTube video updates only Source tab preview without touching Studio state
   const handleSelectVideo = (video: YouTubeVideo) => {
     setYtPreviewSec(0);
     setYtSeekRequest(null);
-    setProcessError(null);
-    setSaveNotice(null);
-    setProject((prev) => {
-      if (prev?.sourceType === "local") return prev;
-      setBaselineFromProject(null);
-      return null;
-    });
-    setYoutubeMedia({
+    setSourcePreview({
       sourceType: "youtube",
       videoId: video.videoId,
       title: video.title,
@@ -731,7 +728,7 @@ export default function App() {
 
   const buildDraftLocalProject = useCallback(
     (
-      media: ActiveMediaSource,
+      media: LocalStudioMedia,
       scenesInput: SceneSelection[],
       overrides?: {
         title?: string;
@@ -756,7 +753,6 @@ export default function App() {
       );
       return {
         isDraft: true,
-        sourceType: "local",
         localUrl: media.localUrl,
         localFile: media.localFile,
         uploadId: media.uploadId,
@@ -837,7 +833,7 @@ export default function App() {
       return;
     }
 
-    const uploadedMedia: ActiveMediaSource = {
+    const uploadedMedia: LocalStudioMedia = {
       sourceType: "local",
       localUrl,
       localFile: file,
@@ -869,7 +865,6 @@ export default function App() {
     const curProj = projectRef.current;
     const canAutoSyncDraftScene = Boolean(
       curProj &&
-        curProj.sourceType === "local" &&
         curProj.isDraft &&
         undoStackRef.current.length === 0 &&
         redoStackRef.current.length === 0 &&
@@ -892,7 +887,7 @@ export default function App() {
         };
       }
       setProject((prev) => {
-        if (!prev || prev.sourceType !== "local" || !prev.isDraft || prev.scenes.length !== 1) {
+        if (!prev || !prev.isDraft || prev.scenes.length !== 1) {
           return prev;
         }
         return {
@@ -911,9 +906,7 @@ export default function App() {
       return;
     }
 
-    setProject((prev) =>
-      prev?.sourceType === "local" ? { ...prev, sourceDurationSec: dur } : prev
-    );
+    setProject((prev) => (prev ? { ...prev, sourceDurationSec: dur } : prev));
   }, []);
 
   const handleClearLocalVideo = () => {
@@ -930,7 +923,7 @@ export default function App() {
     setActiveSavedId(null);
     setLocalMedia(null);
     setProject((prev) => {
-      if (prev?.sourceType === "local") {
+      if (prev) {
         setBaselineFromProject(null);
         return null;
       }
@@ -957,7 +950,7 @@ export default function App() {
       allSelectedScenes: SceneSelection[],
       targetIdx: number,
       returnedData: VideoProject,
-      targetMedia: ActiveMediaSource
+      targetMedia: LocalStudioMedia
     ): VideoProject => {
       const prevScenes = prevProj ? ensureSceneIds(prevProj.scenes) : [];
       const prevOffsets: number[] = [];
@@ -1086,28 +1079,8 @@ export default function App() {
 
       const { isDraft: _dropDraft, ...baseProj } = prevProj || returnedData;
 
-      if (targetMedia.sourceType === "local") {
-        return {
-          ...baseProj,
-          sourceType: "local",
-          title: prevProj?.title || targetMedia.title,
-          channel: prevProj?.channel || targetMedia.channel,
-          sourceDurationSec: targetMedia.durationSec,
-          targetDurationSec: totalDurationSec,
-          scenes: mergedScenes,
-          subtitles: mergedSubtitles,
-          speechRegions,
-          keyframeUrls: prevProj?.keyframeUrls?.length ? prevProj.keyframeUrls : returnedData.keyframeUrls,
-          localUrl: targetMedia.localUrl,
-          localFile: targetMedia.localFile,
-          uploadId: targetMedia.uploadId,
-        };
-      }
-
       return {
         ...baseProj,
-        sourceType: "youtube",
-        videoId: targetMedia.videoId,
         title: prevProj?.title || targetMedia.title,
         channel: prevProj?.channel || targetMedia.channel,
         sourceDurationSec: targetMedia.durationSec,
@@ -1116,6 +1089,9 @@ export default function App() {
         subtitles: mergedSubtitles,
         speechRegions,
         keyframeUrls: prevProj?.keyframeUrls?.length ? prevProj.keyframeUrls : returnedData.keyframeUrls,
+        localUrl: targetMedia.localUrl,
+        localFile: targetMedia.localFile,
+        uploadId: targetMedia.uploadId,
       };
     },
     []
@@ -1168,10 +1144,10 @@ export default function App() {
     []
   );
 
-  // Triggered explicitly by the user after watching and selecting their scenes
+  // Triggered explicitly by the user after uploading a local video and selecting clips
   const handleGenerateSubtitles = async () => {
-    const targetMedia = localMedia ?? youtubeMedia;
-    if (!targetMedia || selectedScenes.length === 0) return;
+    const targetMedia = localMedia;
+    if (!targetMedia || !targetMedia.localFile || selectedScenes.length === 0) return;
 
     lastGenActionRef.current = { type: "all" };
     const runId = ++activeRunIdRef.current;
@@ -1187,10 +1163,7 @@ export default function App() {
     setProcessError(null);
     setGenerationProgress({
       stage: "extracting",
-      label:
-        targetMedia.sourceType === "local" && !targetMedia.uploadId
-          ? "Extracting clip audio..."
-          : "Preparing clips...",
+      label: !targetMedia.uploadId ? "Extracting clip audio..." : "Preparing clips...",
       percent: 4,
       totalClips: selectedScenes.length,
     });
@@ -1201,7 +1174,7 @@ export default function App() {
         endSec,
       }));
 
-      if (targetMedia.sourceType === "local" && targetMedia.localFile) {
+      {
         let uploadId = targetMedia.uploadId;
         let resp: Response | null = null;
 
@@ -1340,42 +1313,9 @@ export default function App() {
         const normalizedServerProj = attachSceneIdsFromServerProject(data, selectedScenes);
         const nextProj: VideoProject = {
           ...normalizedServerProj,
-          sourceType: "local",
           localUrl: targetMedia.localUrl,
           localFile: targetMedia.localFile,
         };
-        setProject(nextProj);
-        setBaselineFromProject(nextProj);
-        setActiveTab("studio");
-        setStudioSection("captions");
-      } else if (targetMedia.sourceType === "youtube" && targetMedia.videoId) {
-        const resp = await fetch("/api/process-video", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Accept: "application/x-ndjson",
-          },
-          body: JSON.stringify({
-            videoId: targetMedia.videoId,
-            title: targetMedia.title,
-            channel: targetMedia.channel,
-            durationSec: targetMedia.durationSec,
-            selectedScenes: scenePayload,
-            translationTone: videoEdit.translationTone,
-            stream: true,
-          }),
-          signal: controller.signal,
-        });
-        const data = await readStreamingProcessResponse<VideoProject & { error?: string }>(
-          resp,
-          (ev) => {
-            if (activeRunIdRef.current !== runId) return;
-            setGenerationProgress(ev);
-          }
-        );
-        if (activeRunIdRef.current !== runId) return;
-
-        const nextProj: VideoProject = attachSceneIdsFromServerProject(data);
         setProject(nextProj);
         setBaselineFromProject(nextProj);
         setActiveTab("studio");
@@ -1403,8 +1343,8 @@ export default function App() {
   };
 
   const handleGenerateSingleClip = async (sceneId: string) => {
-    const targetMedia = localMedia ?? youtubeMedia;
-    if (!targetMedia || selectedScenes.length === 0) return;
+    const targetMedia = localMedia;
+    if (!targetMedia || !targetMedia.localFile || selectedScenes.length === 0) return;
 
     const targetIdx = selectedScenes.findIndex((s) => s.id === sceneId);
     if (targetIdx === -1) return;
@@ -1434,7 +1374,7 @@ export default function App() {
       let resolvedMedia = targetMedia;
       let data: VideoProject & { error?: string };
 
-      if (targetMedia.sourceType === "local" && targetMedia.localFile) {
+      {
         let uploadId = targetMedia.uploadId;
         let resp: Response | null = null;
 
@@ -1579,36 +1519,6 @@ export default function App() {
             totalClips: selectedScenes.length,
           });
         });
-      } else if (targetMedia.sourceType === "youtube" && targetMedia.videoId) {
-        const resp = await fetch("/api/process-video", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Accept: "application/x-ndjson",
-          },
-          body: JSON.stringify({
-            videoId: targetMedia.videoId,
-            title: targetMedia.title,
-            channel: targetMedia.channel,
-            durationSec: targetMedia.durationSec,
-            selectedScenes: singleScenePayload,
-            translationTone: videoEdit.translationTone,
-            stream: true,
-          }),
-          signal: controller.signal,
-        });
-        data = await readStreamingProcessResponse<VideoProject & { error?: string }>(resp, (ev) => {
-          if (activeRunIdRef.current !== runId) return;
-          setRegeneratingClipPercent(ev.percent);
-          setGenerationProgress({
-            ...ev,
-            label: `Clip ${targetIdx + 1}: ${ev.label}`,
-            clipIndex: targetIdx + 1,
-            totalClips: selectedScenes.length,
-          });
-        });
-      } else {
-        return;
       }
 
       if (activeRunIdRef.current !== runId) return;
@@ -2491,7 +2401,7 @@ export default function App() {
       const localFile = project.localFile || localMedia?.localFile;
       let clipAudioBase64: string | undefined;
       let clipMimeType: string | undefined;
-      if (project.sourceType === "local" && !resolvedUploadId && localFile) {
+      if (!resolvedUploadId && localFile) {
         const lineStart = Math.max(0, (targetSub.sourceStartSec ?? targetSub.startTime) - 0.18);
         const lineEnd = Math.max(
           lineStart + 0.5,
@@ -2512,8 +2422,6 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         signal: controller.signal,
         body: JSON.stringify({
-          sourceType: project.sourceType,
-          videoId: project.videoId,
           uploadId: resolvedUploadId,
           clipAudioBase64,
           clipMimeType,
@@ -2945,7 +2853,7 @@ export default function App() {
         | Array<{ trimLeadSec?: number; durationSec: number; audioBase64: string; mimeType?: string }>
         | undefined;
 
-      if (project.sourceType === "local" && !uploadId && localFile) {
+      if (!uploadId && localFile) {
         const extracted = await extractMp4AudioClips(
           localFile,
           project.scenes.map((sc) => ({ startSec: sc.startSec, endSec: sc.endSec }))
@@ -2972,8 +2880,6 @@ export default function App() {
 
       const payloadBody = (activeUploadId?: string) =>
         JSON.stringify({
-          sourceType: project.sourceType,
-          videoId: project.videoId,
           uploadId: activeUploadId,
           clipsAudio: clipsAudioPayload,
           scenes: project.scenes.map((sc) => ({
@@ -2999,7 +2905,7 @@ export default function App() {
         signal: controller.signal,
       });
 
-      if (resp.status === 404 && project.sourceType === "local" && localFile) {
+      if (resp.status === 404 && localFile) {
         const extracted = await extractMp4AudioClips(
           localFile,
           project.scenes.map((sc) => ({ startSec: sc.startSec, endSec: sc.endSec }))
@@ -3194,7 +3100,7 @@ export default function App() {
         return true;
       };
 
-      if (curProj.sourceType === "local" && !uploadId && localFile) {
+      if (!uploadId && localFile) {
         await extractLocalRangeAudio();
         if (controller.signal.aborted) return { addedCount: 0 };
       }
@@ -3204,9 +3110,7 @@ export default function App() {
           startSec,
           endSec,
           translationTone: videoEdit.translationTone,
-          sourceType: curProj.sourceType,
           uploadId: activeUploadId,
-          videoId: curProj.videoId,
           clipAudioBase64,
           mimeType,
           trimLeadSec,
@@ -3241,7 +3145,7 @@ export default function App() {
         body: buildPayload(uploadId),
       });
 
-      if (resp.status === 404 && curProj.sourceType === "local" && localFile) {
+      if (resp.status === 404 && localFile) {
         uploadId = undefined;
         setLocalMedia((prev) => (prev ? { ...prev, uploadId: undefined } : prev));
         setProject((prev) => (prev ? { ...prev, uploadId: undefined } : prev));
@@ -3432,18 +3336,49 @@ export default function App() {
     setExportSheetOpen(false);
   }, []);
 
+  const currentExportSignature = useMemo(() => {
+    if (!hasGeneratedProject(project)) return "";
+    const effectiveTheme =
+      videoEdit.subtitleTheme === "auto" ? (darkMode ? "dark" : "light") : videoEdit.subtitleTheme;
+    return JSON.stringify({
+      uploadId: project.uploadId ?? "",
+      localUrl: project.localUrl ?? "",
+      title: project.title,
+      scenes: project.scenes,
+      subtitles: project.subtitles,
+      videoEdit,
+      voiceSettings,
+      effectiveTheme,
+    });
+  }, [project, videoEdit, voiceSettings, darkMode]);
+
+  const isExportStale = Boolean(
+    readyDownload && exportedSignature && currentExportSignature && exportedSignature !== currentExportSignature
+  );
+
+  useEffect(() => {
+    if (!hasGeneratedProject(project) && !exportProgress) {
+      setReadyDownload(null);
+      setExportedSignature(null);
+      setHasSavedExport(false);
+    }
+  }, [project, exportProgress]);
+
   const handleDiscardExportResult = useCallback(() => {
     setExportSheetOpen(false);
     setExportError(null);
     setHasSavedExport(false);
+    setExportedSignature(null);
     setReadyDownload(null);
   }, []);
 
   const startBackgroundExport = async (openSheet = false) => {
     if (!hasGeneratedProject(project) || project.scenes.length === 0 || exportProgress) return;
+    const exportSig = currentExportSignature;
     setProcessError(null);
     setExportError(null);
     setHasSavedExport(false);
+    setExportedSignature(null);
     setReadyDownload(null);
     if (openSheet) {
       setExportSheetOpen(true);
@@ -3469,6 +3404,7 @@ export default function App() {
 
       // Hold verified in-memory MP4 blob + blobUrl; user explicitly taps Save MP4 once (zero duplicate downloads)
       setHasSavedExport(false);
+      setExportedSignature(exportSig);
       setReadyDownload(result);
     } catch (err) {
       if (ctrl.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) {
@@ -3486,7 +3422,11 @@ export default function App() {
   };
 
   const handleExportHeaderClick = () => {
-    if (exportProgress || readyDownload || exportError) {
+    if (exportProgress || exportError) {
+      setExportSheetOpen(true);
+      return;
+    }
+    if (readyDownload && !isExportStale) {
       setExportSheetOpen(true);
       return;
     }
@@ -3506,17 +3446,13 @@ export default function App() {
       setSaveNotice(null);
 
       try {
-        const mediaForSave =
-          hasGeneratedProject(project) && project.sourceType === "youtube"
-            ? youtubeMedia
-            : (localMedia ?? youtubeMedia);
+        const mediaForSave = localMedia;
+        const existingLocalProject = hasGeneratedProject(project) ? project : null;
 
         const snapshotProject: VideoProject | null =
-          (hasGeneratedProject(project) ? project : null) ??
+          existingLocalProject ??
           (mediaForSave
             ? {
-                sourceType: mediaForSave.sourceType,
-                videoId: mediaForSave.videoId,
                 localUrl: mediaForSave.localUrl,
                 localFile: mediaForSave.localFile,
                 uploadId: mediaForSave.uploadId,
@@ -3559,7 +3495,7 @@ export default function App() {
         if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
         savedTimerRef.current = setTimeout(() => setJustSaved(false), 2000);
 
-        if (!blobSaved && snapshotProject.sourceType === "local") {
+        if (!blobSaved) {
           setSaveNotice(
             "Saved subtitles and settings offline, but the local video file exceeded browser storage space."
           );
@@ -3577,7 +3513,6 @@ export default function App() {
       isSavingProject,
       project,
       localMedia,
-      youtubeMedia,
       selectedScenes,
       activeSavedId,
       voiceSettings,
@@ -3778,6 +3713,13 @@ export default function App() {
   }, [showShortcutToast]);
 
   const handleOpenSavedProject = async (record: SavedProjectRecord) => {
+    if (isLegacyYouTubeProject(record)) {
+      setSaveNotice(
+        "Legacy YouTube projects are read-only and cannot open in Studio. Export JSON for backup or upload a local video file to edit."
+      );
+      return;
+    }
+
     activeRunIdRef.current++;
     setIsPlaying(false);
     setCutTime(0);
@@ -3788,39 +3730,36 @@ export default function App() {
     let localFile: File | undefined;
     let localUrl: string | undefined;
 
-    if (record.sourceType === "local") {
-      try {
-        const blobEntry = await getSavedProjectBlob(record.id);
-        if (blobEntry) {
-          localFile = new File(
-            [blobEntry.blob],
-            blobEntry.fileName,
-            blobEntry.fileType ? { type: blobEntry.fileType } : undefined
-          );
-          localUrl = registerBlobUrl(localFile);
-        } else {
-          setSavedProjects((prev) =>
-            prev.map((item) =>
-              item.id === record.id && item.hasLocalVideoBlob
-                ? { ...item, hasLocalVideoBlob: false }
-                : item
-            )
-          );
-          setSaveNotice(
-            "Subtitles and settings restored. Link the original local video file in the Projects tab to preview or export video."
-          );
-        }
-      } catch {
-        setSaveNotice("Could not load cached local video file from browser storage.");
+    try {
+      const blobEntry = await getSavedProjectBlob(record.id);
+      if (blobEntry) {
+        localFile = new File(
+          [blobEntry.blob],
+          blobEntry.fileName,
+          blobEntry.fileType ? { type: blobEntry.fileType } : undefined
+        );
+        localUrl = registerBlobUrl(localFile);
+      } else {
+        setSavedProjects((prev) =>
+          prev.map((item) =>
+            item.id === record.id && item.hasLocalVideoBlob
+              ? { ...item, hasLocalVideoBlob: false }
+              : item
+          )
+        );
+        setSaveNotice(
+          "Subtitles and settings restored. Link the original local video file in the Projects tab to preview or export video."
+        );
       }
+    } catch {
+      setSaveNotice("Could not load cached local video file from browser storage.");
     }
 
     setActiveSavedId(record.id);
     setVoiceSettings(sanitizeVoiceSettings(record.voiceSettings));
     setVideoEdit(sanitizeEditSettings(record.editSettings));
-    const openedMedia: ActiveMediaSource = {
-      sourceType: record.sourceType,
-      videoId: record.videoId,
+    const openedMedia: LocalStudioMedia = {
+      sourceType: "local",
       localUrl,
       localFile,
       title: record.title,
@@ -3828,14 +3767,9 @@ export default function App() {
       durationSec: record.sourceDurationSec,
       thumbnail: record.thumbnail,
     };
-    if (record.sourceType === "local") {
-      setLocalMedia(openedMedia);
-    } else {
-      setLocalMedia(null);
-      setYoutubeMedia(openedMedia);
-    }
-    const isDraftLocalRecord =
-      record.sourceType === "local" && record.subtitles.length === 0;
+    setLocalMedia(openedMedia);
+
+    const isDraftLocalRecord = record.subtitles.length === 0;
     const openedProj: VideoProject = isDraftLocalRecord
       ? buildDraftLocalProject(
           openedMedia,
@@ -3858,8 +3792,6 @@ export default function App() {
             (Array.isArray(record.scenes) ? record.scenes : []).map((s) => ({ ...s }))
           );
           return {
-            sourceType: record.sourceType,
-            videoId: record.videoId,
             localUrl,
             localFile,
             title: record.title,
@@ -3895,13 +3827,6 @@ export default function App() {
     } else if (record.subtitles.length > 0 || record.scenes.length > 0) {
       setActiveTab("studio");
       setStudioSection("captions");
-    } else if (record.sourceType === "local" && localUrl) {
-      setActiveTab("studio");
-      setStudioSection("clips");
-    } else if (record.sourceType === "youtube") {
-      setYtPreviewSec(0);
-      setYtSeekRequest(null);
-      setActiveTab("youtube");
     } else {
       setActiveTab("studio");
       setStudioSection("clips");
@@ -3917,10 +3842,8 @@ export default function App() {
       );
       if (activeSavedId === id) {
         setProject((prev) => (prev ? { ...prev, title: updated.title } : prev));
-        if (updated.sourceType === "local") {
+        if (!isLegacyYouTubeProject(updated)) {
           setLocalMedia((prev) => (prev ? { ...prev, title: updated.title } : prev));
-        } else {
-          setYoutubeMedia((prev) => (prev ? { ...prev, title: updated.title } : prev));
         }
       }
     } catch (err) {
@@ -3964,6 +3887,12 @@ export default function App() {
       const text = await file.text();
       const record = await importProjectFromJsonText(text);
       setSavedProjects((prev) => [record, ...prev]);
+      if (isLegacyYouTubeProject(record)) {
+        setSaveNotice(
+          "Imported legacy YouTube project as read-only. Legacy YouTube records cannot open in Studio; you can export JSON or delete them."
+        );
+        return;
+      }
       await handleOpenSavedProject(record);
     } catch (err) {
       setProcessError(err instanceof Error ? err.message : "Failed to import project file.");
@@ -4018,7 +3947,7 @@ export default function App() {
         ? "Studio"
         : "Projects";
 
-  const activeMediaTitle = project?.title || localMedia?.title || youtubeMedia?.title;
+  const activeMediaTitle = project?.title || localMedia?.title;
 
   const clipSubtitleCounts = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -4250,68 +4179,88 @@ export default function App() {
               {darkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
             </button>
 
-            <button
-              type="button"
-              onClick={handleExportHeaderClick}
-              disabled={
-                !exportProgress &&
-                !readyDownload &&
-                !exportError &&
-                (!hasGeneratedProject(project) || project.scenes.length === 0 || isProcessing)
-              }
-              title={
-                exportProgress
-                  ? "View export progress or cancel"
-                  : readyDownload
-                    ? "Open exported MP4"
-                    : exportError
-                      ? "View export error"
-                      : "Export 9:16 MP4"
-              }
-              aria-label={
-                exportProgress
-                  ? `Exporting ${exportProgress.percent} percent, open details`
-                  : readyDownload
-                    ? "Export ready, open to save MP4"
-                    : exportError
-                      ? "Export failed, open details"
-                      : "Export 9:16 MP4"
-              }
-              className={`relative overflow-hidden h-8 px-3.5 sm:px-4 rounded-md text-xs font-semibold flex items-center justify-center gap-1.5 sm:gap-2 whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-700/50 dark:focus-visible:ring-teal-400/50 ${
-                readyDownload && !exportProgress
-                  ? "bg-emerald-600 hover:bg-emerald-700 text-white"
-                  : exportError && !exportProgress
-                    ? "border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/50 text-red-700 dark:text-red-300 hover:bg-red-100 dark:hover:bg-red-900/60"
-                    : "bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918]"
-              }`}
-            >
-              {exportProgress ? (
-                <>
-                  <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
-                  <span className="font-mono-tabular">{exportProgress.percent}%</span>
-                  <span
-                    aria-hidden="true"
-                    className="absolute bottom-0 left-0 h-[2px] bg-white/80 dark:bg-[#060918]/70 transition-[width] duration-300"
-                    style={{ width: `${Math.max(6, exportProgress.percent)}%` }}
-                  />
-                </>
-              ) : readyDownload ? (
-                <>
-                  <Check className="w-3.5 h-3.5 shrink-0" />
-                  <span>{hasSavedExport ? "Saved" : "MP4 Ready"}</span>
-                </>
-              ) : exportError ? (
-                <>
-                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                  <span>Export Failed</span>
-                </>
-              ) : (
-                <>
-                  <ArrowUpFromLine className="w-3.5 h-3.5 shrink-0" />
-                  <span>Export MP4</span>
-                </>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={handleExportHeaderClick}
+                disabled={
+                  !exportProgress &&
+                  !(readyDownload && !isExportStale) &&
+                  !exportError &&
+                  (!hasGeneratedProject(project) || project.scenes.length === 0 || isProcessing)
+                }
+                title={
+                  exportProgress
+                    ? "View export progress or cancel"
+                    : readyDownload && !isExportStale
+                      ? "Open exported MP4"
+                      : exportError
+                        ? "View export error"
+                        : isExportStale
+                          ? "Export updated 9:16 MP4"
+                          : "Export 9:16 MP4"
+                }
+                aria-label={
+                  exportProgress
+                    ? `Exporting ${exportProgress.percent} percent, open details`
+                    : readyDownload && !isExportStale
+                      ? "Export ready, open to save or re-export MP4"
+                      : exportError
+                        ? "Export failed, open details"
+                        : isExportStale
+                          ? "Export updated 9:16 MP4"
+                          : "Export 9:16 MP4"
+                }
+                className={`relative overflow-hidden h-8 px-3.5 sm:px-4 rounded-md text-xs font-semibold flex items-center justify-center gap-1.5 sm:gap-2 whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-700/50 dark:focus-visible:ring-teal-400/50 ${
+                  readyDownload && !isExportStale && !exportProgress
+                    ? "bg-emerald-600 hover:bg-emerald-700 text-white"
+                    : exportError && !exportProgress
+                      ? "border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/50 text-red-700 dark:text-red-300 hover:bg-red-100 dark:hover:bg-red-900/60"
+                      : "bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918]"
+                }`}
+              >
+                {exportProgress ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                    <span className="font-mono-tabular">{exportProgress.percent}%</span>
+                    <span
+                      aria-hidden="true"
+                      className="absolute bottom-0 left-0 h-[2px] bg-white/80 dark:bg-[#060918]/70 transition-[width] duration-300"
+                      style={{ width: `${Math.max(6, exportProgress.percent)}%` }}
+                    />
+                  </>
+                ) : readyDownload && !isExportStale ? (
+                  <>
+                    <Check className="w-3.5 h-3.5 shrink-0" />
+                    <span>{hasSavedExport ? "Saved" : "MP4 Ready"}</span>
+                  </>
+                ) : exportError ? (
+                  <>
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                    <span>Export Failed</span>
+                  </>
+                ) : (
+                  <>
+                    <ArrowUpFromLine className="w-3.5 h-3.5 shrink-0" />
+                    <span>Export MP4</span>
+                  </>
+                )}
+              </button>
+
+              {readyDownload && !isExportStale && !exportProgress && hasGeneratedProject(project) && project.scenes.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => void startBackgroundExport(true)}
+                  disabled={isProcessing}
+                  title="Re-export 9:16 MP4"
+                  aria-label="Re-export 9:16 MP4"
+                  className="h-8 px-2 sm:px-2.5 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer"
+                >
+                  <RefreshCw className="w-3.5 h-3.5 shrink-0" />
+                  <span className="hidden sm:inline">Re-export</span>
+                </button>
               )}
-            </button>
+            </div>
           </div>
         </header>
 
@@ -4361,14 +4310,14 @@ export default function App() {
             <WorkspaceSidebar
               activeTab={activeTab}
               videos={videos}
-              selectedVideoId={youtubeMedia?.videoId}
+              selectedVideoId={sourcePreview?.videoId}
               activeQuery={activeQuery}
               licenseFilter={licenseFilter}
               thaiOnly={thaiOnly}
               hasMoreVideos={Boolean(nextContinuation)}
               isLoadingMore={isLoadingMore}
               localMedia={localMedia}
-              youtubeMedia={youtubeMedia}
+              sourcePreview={sourcePreview}
               selectedScenes={selectedScenes}
               voiceSettings={voiceSettings}
               editSettings={videoEdit}
@@ -4396,7 +4345,7 @@ export default function App() {
               onResetToRecommended={handleResetToRecommended}
               onRefreshRecommended={handleRefreshRecommended}
               onDetectedYouTubeDuration={(dur) =>
-                setYoutubeMedia((prev) => (prev ? { ...prev, durationSec: dur } : prev))
+                setSourcePreview((prev) => (prev ? { ...prev, durationSec: dur } : prev))
               }
               onGenerateSubtitles={handleGenerateSubtitles}
               onGenerateSingleClip={handleGenerateSingleClip}
@@ -4501,7 +4450,7 @@ export default function App() {
                   <div className="flex items-center gap-2 shrink-0 pt-0.5">
                     {lastGenActionRef.current &&
                       selectedScenes.length > 0 &&
-                      Boolean(localMedia ?? youtubeMedia) &&
+                      Boolean(localMedia) &&
                       !isProcessing && (
                         <button
                           type="button"
@@ -4651,6 +4600,7 @@ export default function App() {
         progress={exportProgress}
         result={readyDownload}
         hasSaved={hasSavedExport}
+        isStale={isExportStale}
         error={exportError}
         canShare={readyDownload ? canShareMp4File(readyDownload) : false}
         onMinimize={handleMinimizeExportSheet}

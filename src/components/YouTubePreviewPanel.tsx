@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, ChevronLeft, ChevronRight, Copy, Film, Loader2 } from "lucide-react";
-import type { ActiveMediaSource, YouTubeVideo } from "../types";
+import type { YouTubeSourcePreview, YouTubeVideo } from "../types";
 import { loadYouTubeIframeAPI } from "../utils/youtubeApi";
 
 interface YTPreviewPlayer {
@@ -41,7 +41,7 @@ export function createYouTubePlayerInstanceGuard(): YouTubePlayerInstanceGuard {
 }
 
 interface YouTubePreviewPanelProps {
-  media: ActiveMediaSource | null;
+  media: YouTubeSourcePreview | null;
   videos: YouTubeVideo[];
   hasMoreVideos: boolean;
   isLoadingMore: boolean;
