@@ -1,5 +1,6 @@
 import "dotenv/config";
 import express from "express";
+import http from "http";
 import fs from "fs";
 import path from "path";
 import os from "os";
@@ -6007,10 +6008,17 @@ async function startServer() {
     sweepExpiredUploadSessions().catch(() => {});
   }, UPLOAD_SWEEP_INTERVAL_MS).unref();
 
+  const server = http.createServer(app);
+
   if (process.env.NODE_ENV !== "production") {
+    const disableHmr = process.env.DISABLE_HMR === "true";
     const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: !disableHmr,
+        ws: { server },
+      },
       appType: "spa",
     });
     app.use(vite.middlewares);
@@ -6021,7 +6029,7 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  server.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
 }

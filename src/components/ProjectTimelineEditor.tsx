@@ -10,9 +10,11 @@ import {
   Link2,
   Loader2,
   Merge,
+  Minus,
   Pause,
   Pencil,
   Play,
+  Plus,
   Redo2,
   RefreshCw,
   RotateCcw,
@@ -189,15 +191,26 @@ function formatTimePrecise(sec: number): string {
   return `${mins}:${String(wholeSecs).padStart(2, "0")}.${tenths}`;
 }
 
+const MIN_TIMELINE_ZOOM = 0.15;
+const MAX_TIMELINE_ZOOM = 160;
+
 function formatRulerTick(sec: number): string {
   const s = Math.max(0, Math.round(sec));
-  const mins = Math.floor(s / 60);
+  const hrs = Math.floor(s / 3600);
+  const mins = Math.floor((s % 3600) / 60);
   const rem = s % 60;
+  if (hrs > 0) {
+    return `${hrs}:${String(mins).padStart(2, "0")}:${String(rem).padStart(2, "0")}`;
+  }
   return `${mins}:${String(rem).padStart(2, "0")}`;
 }
 
-function clampZoom(z: number): number {
-  return Math.max(10, Math.min(160, Math.round(z * 10) / 10));
+function clampZoom(z: number, minZoom = MIN_TIMELINE_ZOOM): number {
+  const floor = Math.max(MIN_TIMELINE_ZOOM, minZoom);
+  const clamped = Math.max(floor, Math.min(MAX_TIMELINE_ZOOM, z));
+  return clamped < 4
+    ? Math.round(clamped * 100) / 100
+    : Math.round(clamped * 10) / 10;
 }
 
 function computeTimelineSpanPx(
@@ -424,6 +437,18 @@ export function ProjectTimelineEditor({
   projectRef.current = project;
   const totalCutDurationRef = useRef(totalCutDuration);
   totalCutDurationRef.current = totalCutDuration;
+  const minPxPerSec = useMemo(() => {
+    const safeDur = Math.max(1, totalCutDuration);
+    const ultraCompact = (Math.max(240, viewportWidth) * 0.35) / safeDur;
+    return Math.max(MIN_TIMELINE_ZOOM, Math.min(1.5, Math.round(ultraCompact * 100) / 100));
+  }, [totalCutDuration, viewportWidth]);
+  const fitPxPerSec = useMemo(() => {
+    const safeDur = Math.max(1, totalCutDuration);
+    const target = (Math.max(200, viewportWidth - 48) * 0.88) / safeDur;
+    return clampZoom(target, minPxPerSec);
+  }, [totalCutDuration, viewportWidth, minPxPerSec]);
+  const minPxPerSecRef = useRef(minPxPerSec);
+  minPxPerSecRef.current = minPxPerSec;
   const cutTimeRef = useRef(cutTime);
   cutTimeRef.current = cutTime;
   const isPlayingRef = useRef(isPlaying);
@@ -1469,8 +1494,15 @@ export function ProjectTimelineEditor({
   const tickStepSec = useMemo(() => {
     if (pxPerSec >= 75) return 1;
     if (pxPerSec >= 34) return 2;
-    if (pxPerSec >= 18) return 5;
-    return 10;
+    if (pxPerSec >= 15) return 5;
+    if (pxPerSec >= 7.5) return 10;
+    if (pxPerSec >= 4.5) return 15;
+    if (pxPerSec >= 2.2) return 30;
+    if (pxPerSec >= 1.1) return 60;
+    if (pxPerSec >= 0.55) return 120;
+    if (pxPerSec >= 0.25) return 300;
+    if (pxPerSec >= 0.14) return 600;
+    return 900;
   }, [pxPerSec]);
 
   const rulerTicks = useMemo(() => {
@@ -1696,7 +1728,8 @@ export function ProjectTimelineEditor({
       const pts = Array.from(activePointersRef.current.values());
       const dist = Math.max(10, Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y));
       const nextZoom = clampZoom(
-        pinchStartRef.current.pxPerSec * (dist / pinchStartRef.current.dist)
+        pinchStartRef.current.pxPerSec * (dist / pinchStartRef.current.dist),
+        minPxPerSecRef.current
       );
       setPxPerSec(nextZoom);
       return;
@@ -2193,7 +2226,7 @@ export function ProjectTimelineEditor({
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
         const factor = Math.exp(-e.deltaY * 0.008);
-        setPxPerSec((z) => clampZoom(z * factor));
+        setPxPerSec((z) => clampZoom(z * factor, minPxPerSecRef.current));
         return;
       }
       const isHorizontalScroll =
@@ -2637,7 +2670,7 @@ export function ProjectTimelineEditor({
                 style={{ left: `${s * pxPerSec}px` }}
                 className="absolute top-0 bottom-0 flex flex-col justify-end pointer-events-none"
               >
-                <span className="text-[10px] font-mono-tabular text-[#4d597d] dark:text-[#919ec4] pl-1 leading-none pb-1">
+                <span className="text-[10px] font-mono-tabular text-[#4d597d] dark:text-[#919ec4] pl-1 leading-none pb-1 whitespace-nowrap">
                   {formatRulerTick(s)}
                 </span>
                 <div className="w-px h-1.5 bg-[#bcc9e6] dark:bg-[#2f3866]" />
@@ -2645,6 +2678,53 @@ export function ProjectTimelineEditor({
             ))}
           </div>
         </div>
+
+        {/* Compact Timeline Zoom Controls pinned to Top-Right of Ruler */}
+        {!clipReorder && segments.length > 0 && (
+          <div
+            onPointerDown={(e) => e.stopPropagation()}
+            className="absolute top-0 right-0 h-6 z-20 flex items-center gap-0.5 pl-1.5 pr-1 bg-white/95 dark:bg-[#0d1022]/95 border-l border-b border-[#d2dcf0] dark:border-[#21284c]"
+          >
+            <button
+              type="button"
+              disabled={pxPerSec <= minPxPerSec + 0.001}
+              onClick={(e) => {
+                e.currentTarget.blur();
+                setPxPerSec((z) => clampZoom(z / 1.5, minPxPerSecRef.current));
+              }}
+              title="Zoom out timeline"
+              aria-label="Zoom out timeline"
+              className="h-5 w-5 rounded flex items-center justify-center text-[#4d597d] dark:text-[#919ec4] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors"
+            >
+              <Minus className="w-3 h-3" />
+            </button>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.currentTarget.blur();
+                setPxPerSec(fitPxPerSec);
+              }}
+              title="Fit full timeline in view"
+              aria-label="Fit full timeline in view"
+              className="h-5 px-1.5 rounded text-[10px] font-semibold tracking-tight text-[#4d597d] dark:text-[#919ec4] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] cursor-pointer transition-colors"
+            >
+              Fit
+            </button>
+            <button
+              type="button"
+              disabled={pxPerSec >= MAX_TIMELINE_ZOOM - 0.05}
+              onClick={(e) => {
+                e.currentTarget.blur();
+                setPxPerSec((z) => clampZoom(z * 1.5, minPxPerSecRef.current));
+              }}
+              title="Zoom in timeline"
+              aria-label="Zoom in timeline"
+              className="h-5 w-5 rounded flex items-center justify-center text-[#4d597d] dark:text-[#919ec4] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors"
+            >
+              <Plus className="w-3 h-3" />
+            </button>
+          </div>
+        )}
 
         {/* Vertically Scrollable Timeline Tracks Area with Free Up & Down Travel */}
         <div
@@ -2799,11 +2879,13 @@ export function ProjectTimelineEditor({
                     </div>
 
                     {/* Subtle Label Inside Clip */}
-                    <div className="pointer-events-none relative pt-1 px-2 flex items-center justify-between text-[10px] font-mono-tabular font-semibold text-white">
-                      <span className="px-1.5 py-0.5 rounded bg-black/75 border border-white/10 backdrop-blur-xs truncate">
-                        #{idx + 1} · {roundTenth(displayDur)}s
-                      </span>
-                    </div>
+                    {widthPx >= 24 && (
+                      <div className="pointer-events-none relative pt-1 px-1.5 flex items-center justify-between text-[10px] font-mono-tabular font-semibold text-white">
+                        <span className="px-1 py-0.5 rounded bg-black/75 border border-white/10 backdrop-blur-xs truncate">
+                          {widthPx >= 56 ? `#${idx + 1} · ${roundTenth(displayDur)}s` : `#${idx + 1}`}
+                        </span>
+                      </div>
+                    )}
                   </div>
 
                   {/* External Oversized Trim Handles & Seamless Bracket Selection Frame */}
@@ -2955,7 +3037,7 @@ export function ProjectTimelineEditor({
             {showFullSubTrack && onTranscribeRange &&
               unmatchedSpeechGaps.map((gap, gapIdx) => {
                 const leftPx = gap.startSec * pxPerSec;
-                const widthPx = Math.max(20, gap.durationSec * pxPerSec);
+                const widthPx = Math.max(6, gap.durationSec * pxPerSec);
                 const isGapBusy =
                   Boolean(transcribingRange) &&
                   Math.abs(transcribingRange!.startSec - gap.startSec) < 0.25 &&
@@ -2972,17 +3054,20 @@ export function ProjectTimelineEditor({
                     }}
                     style={{ left: `${leftPx}px`, width: `${widthPx}px` }}
                     title={`Unmatched speech (${formatTimePrecise(gap.startSec)} – ${formatTimePrecise(gap.endSec)}). Click to AI fill.`}
-                    className={`absolute top-0 h-10 rounded-md border border-dashed flex items-center justify-center gap-1 px-1.5 overflow-hidden transition-colors cursor-pointer z-[5] disabled:opacity-60 ${
+                    className={`absolute top-0 h-10 rounded-md border border-dashed flex items-center justify-center gap-1 ${
+                      widthPx >= 20 ? "px-1.5" : "px-0"
+                    } overflow-hidden transition-colors cursor-pointer z-[5] disabled:opacity-60 ${
                       isGapBusy
                         ? "border-teal-600 bg-teal-500/20 text-teal-800 dark:border-teal-400 dark:bg-teal-500/25 dark:text-teal-200"
                         : "border-amber-600/75 bg-amber-500/15 hover:bg-amber-500/28 text-amber-900 dark:border-amber-400/70 dark:bg-amber-500/15 dark:hover:bg-amber-500/25 dark:text-amber-200"
                     }`}
                   >
-                    {isGapBusy ? (
-                      <Loader2 className="w-3 h-3 animate-spin shrink-0" />
-                    ) : (
-                      <Sparkles className="w-3 h-3 shrink-0" />
-                    )}
+                    {widthPx >= 18 &&
+                      (isGapBusy ? (
+                        <Loader2 className="w-3 h-3 animate-spin shrink-0" />
+                      ) : (
+                        <Sparkles className="w-3 h-3 shrink-0" />
+                      ))}
                     {widthPx >= 52 && (
                       <span className="text-[10px] font-semibold truncate">
                         {isGapBusy ? "Filling…" : "AI Fill"}
@@ -3040,7 +3125,9 @@ export function ProjectTimelineEditor({
                   }`}
                 >
                   <div
-                    className={`w-full h-full px-2 flex items-center overflow-hidden ${
+                    className={`w-full h-full ${
+                      widthPx >= 36 ? "px-2" : widthPx >= 14 ? "px-1" : "px-0"
+                    } flex items-center overflow-hidden ${
                       isSelected
                         ? "rounded-none bg-[#1c3db8] dark:bg-[#264cd6] text-white"
                         : isAtPlayhead
@@ -3048,20 +3135,24 @@ export function ProjectTimelineEditor({
                           : "rounded-md bg-white/95 dark:bg-[#141933]/95 text-[#0c1026] dark:text-[#f3f5fc] ring-1 ring-inset ring-[#bcc9e6] dark:ring-[#2f3866] hover:ring-[#264cd6]/60"
                     }`}
                   >
-                    <div className="pointer-events-none flex items-center gap-1.5 min-w-0 w-full">
-                      <span
-                        className={`text-[10px] font-mono-tabular font-bold shrink-0 ${
-                          isSelected
-                            ? "text-[#d5e2fc]"
-                            : "text-[#1c3db8] dark:text-[#7ca3fb]"
-                        }`}
-                      >
-                        S{subIdx + 1}
-                      </span>
-                      <span className="text-[11px] font-medium truncate">
-                        {sub.burmese || sub.thaiPhonetic}
-                      </span>
-                    </div>
+                    {widthPx >= 14 && (
+                      <div className="pointer-events-none flex items-center gap-1.5 min-w-0 w-full">
+                        <span
+                          className={`text-[10px] font-mono-tabular font-bold shrink-0 ${
+                            isSelected
+                              ? "text-[#d5e2fc]"
+                              : "text-[#1c3db8] dark:text-[#7ca3fb]"
+                          }`}
+                        >
+                          S{subIdx + 1}
+                        </span>
+                        {widthPx >= 36 && (
+                          <span className="text-[11px] font-medium truncate">
+                            {sub.burmese || sub.thaiPhonetic}
+                          </span>
+                        )}
+                      </div>
+                    )}
                   </div>
 
                   {isSelected && onUpdateSubtitleTiming && (

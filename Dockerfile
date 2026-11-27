@@ -11,7 +11,7 @@ RUN id -u 1000 >/dev/null 2>&1 || useradd -m -u 1000 user
 WORKDIR /app
 
 COPY package.json package-lock.json* ./
-RUN npm install --no-audit --no-fund
+RUN npm install --legacy-peer-deps --no-audit --no-fund
 
 COPY . .
 RUN npm run build && chown -R 1000:1000 /app
