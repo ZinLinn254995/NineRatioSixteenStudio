@@ -78,6 +78,7 @@ export interface ScenePlayerHandle {
   play: () => void;
   pause: () => void;
   togglePlay: () => void;
+  setScrubbing: (active: boolean) => void;
   seekCutTime: (cutSec: number, opts?: { force?: boolean }) => void;
   previewSourceTime: (sourceSec: number | null, opts?: { skipResync?: boolean }) => void;
 }
@@ -129,8 +130,12 @@ export const ScenePlayer = memo(
     const sourcePreviewOverrideRef = useRef<number | null>(null);
     const pendingPreviewSeekRef = useRef<number | null>(null);
     const previewSeekRafRef = useRef<number | null>(null);
+    const isScrubbingRef = useRef<boolean>(false);
+    const scrubFlushRafRef = useRef<number | null>(null);
+    const scrubFlushTimerRef = useRef<number | null>(null);
 
     const localStageRef = useRef<HTMLDivElement | null>(null);
+    const [isScrubbing, setIsScrubbing] = useState(false);
     const [autoMutedFallback, setAutoMutedFallback] = useState(false);
     const [localPlayError, setLocalPlayError] = useState<string | null>(null);
     const [localVideoDims, setLocalVideoDims] = useState<{ w: number; h: number } | null>(null);
@@ -203,6 +208,17 @@ export const ScenePlayer = memo(
       }
     }, []);
 
+    const cancelScrubFlush = useCallback(() => {
+      if (scrubFlushRafRef.current !== null) {
+        cancelAnimationFrame(scrubFlushRafRef.current);
+        scrubFlushRafRef.current = null;
+      }
+      if (scrubFlushTimerRef.current !== null) {
+        window.clearTimeout(scrubFlushTimerRef.current);
+        scrubFlushTimerRef.current = null;
+      }
+    }, []);
+
     const flushLocalPreviewSeek = useCallback((vid: HTMLVideoElement) => {
       const target = pendingPreviewSeekRef.current;
       if (target === null || sourcePreviewOverrideRef.current === null) return;
@@ -230,15 +246,20 @@ export const ScenePlayer = memo(
       reloadAttemptedRef.current = false;
       sourcePreviewOverrideRef.current = null;
       pendingPreviewSeekRef.current = null;
+      isScrubbingRef.current = false;
+      setIsScrubbing(false);
       cancelPreviewSeekRaf();
+      cancelScrubFlush();
       setAutoMutedFallback(false);
       setLocalPlayError(null);
       return () => {
         sourcePreviewOverrideRef.current = null;
         pendingPreviewSeekRef.current = null;
+        isScrubbingRef.current = false;
         cancelPreviewSeekRaf();
+        cancelScrubFlush();
       };
-    }, [localUrl, cancelPreviewSeekRaf]);
+    }, [localUrl, cancelPreviewSeekRaf, cancelScrubFlush]);
 
     useEffect(() => {
       autoMutedFallbackRef.current = false;
@@ -249,7 +270,10 @@ export const ScenePlayer = memo(
     const startLocalPlayback = useCallback(() => {
       sourcePreviewOverrideRef.current = null;
       pendingPreviewSeekRef.current = null;
+      isScrubbingRef.current = false;
+      setIsScrubbing(false);
       cancelPreviewSeekRaf();
+      cancelScrubFlush();
       const vid = localVideoRef.current;
       if (!vid) return;
 
@@ -413,7 +437,7 @@ export const ScenePlayer = memo(
         pendingLocalPlayRef.current = false;
         onPlayingChangeRef.current(!vid.paused);
       }
-    }, [cancelPreviewSeekRaf, readCurrentCutTime]);
+    }, [cancelPreviewSeekRaf, cancelScrubFlush, readCurrentCutTime]);
 
     const pauseLocalPlayback = useCallback(() => {
       isPlayingRef.current = false;
@@ -460,12 +484,13 @@ export const ScenePlayer = memo(
         const now = performance.now();
         // While hardware decoder is busy with an active seek, queue only the latest target
         // so the in-progress frame finishes decoding & painting live on screen, then immediately
-        // jumps to the newest target inside onSeeked.
+        // jumps to the newest target after paint.
         if (vid.seeking && !opts?.force && now - lastLocalSeekIssuedAtRef.current < 260) {
           pendingLocalSeekRef.current = clamped;
           return;
         }
 
+        cancelScrubFlush();
         pendingLocalSeekRef.current = null;
         lastLocalSeekIssuedAtRef.current = now;
         seekSettleUntilRef.current = now + 650;
@@ -475,7 +500,7 @@ export const ScenePlayer = memo(
           // ignore invalid media seek state
         }
       },
-      []
+      [cancelScrubFlush]
     );
 
     useImperativeHandle(
@@ -493,6 +518,22 @@ export const ScenePlayer = memo(
             startLocalPlayback();
           } else {
             pauseLocalPlayback();
+          }
+        },
+        setScrubbing: (active: boolean) => {
+          isScrubbingRef.current = active;
+          setIsScrubbing(active);
+          if (active) {
+            const vid = localVideoRef.current;
+            if (vid && !vid.paused) {
+              try {
+                vid.pause();
+              } catch {
+                // ignore
+              }
+            }
+          } else {
+            cancelScrubFlush();
           }
         },
         seekCutTime: (cutSec: number, opts?: { force?: boolean }) => {
@@ -555,14 +596,20 @@ export const ScenePlayer = memo(
         pauseLocalPlayback,
         seekLocalToCutTime,
         cancelPreviewSeekRaf,
+        cancelScrubFlush,
         flushLocalPreviewSeek,
         readCurrentCutTime,
       ]
     );
 
-    // Reset initial position when source or scenes change (without interrupting active playback)
+    // Reset initial position when source or scenes change (without interrupting active playback or scrubbing)
     useEffect(() => {
-      if (isPlayingRef.current || playAttemptPendingRef.current || pendingLocalPlayRef.current) {
+      if (
+        isPlayingRef.current ||
+        isScrubbingRef.current ||
+        playAttemptPendingRef.current ||
+        pendingLocalPlayRef.current
+      ) {
         return;
       }
       if (sourcePreviewOverrideRef.current !== null) return;
@@ -657,6 +704,7 @@ export const ScenePlayer = memo(
           vid &&
           curScenes.length > 0 &&
           sourcePreviewOverrideRef.current === null &&
+          !isScrubbingRef.current &&
           !vid.paused &&
           !vid.seeking &&
           vid.readyState >= 1
@@ -865,7 +913,29 @@ export const ScenePlayer = memo(
               lastLocalSeekIssuedAtRef.current = 0;
               seekSettleUntilRef.current = 0;
               if (sourcePreviewOverrideRef.current !== null) {
-                flushLocalPreviewSeek(e.currentTarget);
+                cancelScrubFlush();
+                scrubFlushRafRef.current = requestAnimationFrame(() => {
+                  scrubFlushRafRef.current = null;
+                  scrubFlushTimerRef.current = window.setTimeout(() => {
+                    scrubFlushTimerRef.current = null;
+                    const v = localVideoRef.current;
+                    if (v) flushLocalPreviewSeek(v);
+                  }, 0);
+                });
+                return;
+              }
+              // When scrubbing, wait until the browser paints the newly decoded frame
+              // before triggering the next queued seek so frames visibly animate live.
+              if (pendingLocalSeekRef.current !== null && (isScrubbingRef.current || !isPlayingRef.current)) {
+                cancelScrubFlush();
+                scrubFlushRafRef.current = requestAnimationFrame(() => {
+                  scrubFlushRafRef.current = null;
+                  scrubFlushTimerRef.current = window.setTimeout(() => {
+                    scrubFlushTimerRef.current = null;
+                    const v = localVideoRef.current;
+                    if (v) applyPendingLocalSeekAndPlay(v);
+                  }, 0);
+                });
                 return;
               }
               applyPendingLocalSeekAndPlay(e.currentTarget);
@@ -982,7 +1052,7 @@ export const ScenePlayer = memo(
             }}
           />
         )}
-        {!isPlaying && (
+        {!isPlaying && !isScrubbing && (
           <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/15 group-hover:bg-black/25">
             <div className="w-11 h-11 rounded-full bg-black/70 text-white flex items-center justify-center backdrop-blur-xs shadow-sm">
               <Play className="w-4 h-4 ml-0.5" />

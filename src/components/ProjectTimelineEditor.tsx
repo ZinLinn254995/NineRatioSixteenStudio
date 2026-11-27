@@ -48,6 +48,7 @@ interface ProjectTimelineEditorProps {
   onTogglePlay: () => void;
   onPause: () => void;
   onSeek: (sec: number, opts?: { live?: boolean }) => void;
+  onScrubbingChange?: (active: boolean) => void;
   onPlayFromTime: (sec: number) => void;
   onUpdateScenes: (nextScenes: SpeakingScene[]) => void;
   onUpdateSubtitleTiming?: (id: string, startTime: number, endTime: number) => void;
@@ -243,6 +244,7 @@ export function ProjectTimelineEditor({
   onTogglePlay,
   onPause,
   onSeek,
+  onScrubbingChange,
   onPlayFromTime,
   onUpdateScenes,
   onUpdateSubtitleTiming,
@@ -459,6 +461,8 @@ export function ProjectTimelineEditor({
   isPlayingRef.current = isPlaying;
   const onPauseRef = useRef(onPause);
   onPauseRef.current = onPause;
+  const onScrubbingChangeRef = useRef(onScrubbingChange);
+  onScrubbingChangeRef.current = onScrubbingChange;
   const onPlayFromTimeRef = useRef(onPlayFromTime);
   onPlayFromTimeRef.current = onPlayFromTime;
 
@@ -1062,6 +1066,7 @@ export function ProjectTimelineEditor({
       if (wheelClearTimerRef.current !== null) {
         window.clearTimeout(wheelClearTimerRef.current);
       }
+      onScrubbingChangeRef.current?.(false);
       clearPreviewSourceSeekState();
     };
   }, [clearPreviewSourceSeekState]);
@@ -1824,12 +1829,12 @@ export function ProjectTimelineEditor({
           return;
         } else {
           activeDrag.axis = "x";
-          const wasPlayingNow = activeDrag.wasPlayingBeforeScrub || isPlayingRef.current;
-          activeDrag.wasPlayingBeforeScrub = wasPlayingNow;
+          // Enter live scroll-controlled preview mode FIRST so the pause dim overlay never flashes
+          onScrubbingChangeRef.current?.(true);
           if (isPlayingRef.current) {
             onPauseRef.current();
           }
-          // Anchor drag start to exact paused playhead position so horizontal scrubbing starts without a jump
+          // Anchor drag start to exact current playhead position so horizontal scrubbing starts without a jump
           activeDrag.startCutTime = liveScrubCutRef.current ?? cutTimeRef.current;
           activeDrag.scrubAnchorClientX = e.clientX;
         }
@@ -2082,10 +2087,6 @@ export function ProjectTimelineEditor({
         const finalScrubCut = liveScrubCutRef.current;
         liveScrubCutRef.current = null;
         setLiveScrubCutTime(null);
-        const shouldResumePlayback =
-          activeDrag.axis === "x" &&
-          activeDrag.wasPlayingBeforeScrub &&
-          subTapSeekTarget === null;
 
         if (seekThrottleTimerRef.current !== null) {
           window.clearTimeout(seekThrottleTimerRef.current);
@@ -2098,17 +2099,12 @@ export function ProjectTimelineEditor({
           dispatchSeek(subTapSeekTarget, true);
         } else if (activeDrag.axis === "x") {
           const targetCut = finalScrubCut ?? pendingQueued ?? cutTimeRef.current;
-          if (
-            shouldResumePlayback &&
-            targetCut < Math.max(0, totalCutDurationRef.current - 0.05)
-          ) {
-            onPlayFromTimeRef.current(targetCut);
-          } else {
-            dispatchSeek(targetCut, true);
-          }
+          // Stay cleanly at the exact scrolled frame without auto-playing forward
+          dispatchSeek(targetCut, true);
         } else if (pendingQueued !== null) {
           dispatchSeek(pendingQueued, true);
         }
+        onScrubbingChangeRef.current?.(false);
       } else if (
         activeDrag.type === "sub-move" ||
         activeDrag.type === "sub-trim-start" ||
@@ -2222,15 +2218,9 @@ export function ProjectTimelineEditor({
         }
         queuedSeekSecRef.current = null;
         if (activeDrag.axis === "x" && finalScrubCut !== null) {
-          if (
-            activeDrag.wasPlayingBeforeScrub &&
-            finalScrubCut < Math.max(0, totalCutDurationRef.current - 0.05)
-          ) {
-            onPlayFromTimeRef.current(finalScrubCut);
-          } else {
-            dispatchSeek(finalScrubCut, true);
-          }
+          dispatchSeek(finalScrubCut, true);
         }
+        onScrubbingChangeRef.current?.(false);
       } else if (
         activeDrag?.type === "sub-move" ||
         activeDrag?.type === "sub-trim-start" ||
@@ -2294,7 +2284,7 @@ export function ProjectTimelineEditor({
         onPause: pause,
       } = wheelStateRef.current;
       if (wheelClearTimerRef.current === null) {
-        wheelWasPlayingRef.current = isPlayingRef.current;
+        onScrubbingChangeRef.current?.(true);
       }
       if (isPlayingRef.current) pause();
 
@@ -2315,17 +2305,13 @@ export function ProjectTimelineEditor({
       wheelClearTimerRef.current = window.setTimeout(() => {
         wheelClearTimerRef.current = null;
         const finalWheelCut = liveScrubCutRef.current;
-        const shouldResume = wheelWasPlayingRef.current;
         wheelWasPlayingRef.current = false;
         liveScrubCutRef.current = null;
         setLiveScrubCutTime(null);
         if (finalWheelCut !== null) {
-          if (shouldResume && finalWheelCut < Math.max(0, totalCutDurationRef.current - 0.05)) {
-            onPlayFromTimeRef.current(finalWheelCut);
-          } else {
-            seek(finalWheelCut, true);
-          }
+          seek(finalWheelCut, true);
         }
+        onScrubbingChangeRef.current?.(false);
       }, 240);
     };
     const onTouchMove = (e: TouchEvent) => {

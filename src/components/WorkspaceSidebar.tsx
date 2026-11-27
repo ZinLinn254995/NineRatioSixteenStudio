@@ -154,6 +154,7 @@ interface WorkspaceSidebarProps {
   onUploadLocalVideo: (file: File) => void;
   onClearLocalVideo: () => void;
   onSeek: (sec: number, opts?: { live?: boolean }) => void;
+  onScrubbingChange?: (active: boolean) => void;
   onTogglePlay: () => void;
   onPause: () => void;
   onPlayFromTime: (sec: number) => void;
@@ -349,6 +350,7 @@ export function WorkspaceSidebar({
   onUploadLocalVideo,
   onClearLocalVideo,
   onSeek,
+  onScrubbingChange,
   onTogglePlay,
   onPause,
   onPlayFromTime,
@@ -1779,6 +1781,7 @@ export function WorkspaceSidebar({
                         onTogglePlay={onTogglePlay}
                         onPause={onPause}
                         onSeek={onSeek}
+                        onScrubbingChange={onScrubbingChange}
                         onPlayFromTime={onPlayFromTime}
                         onUpdateScenes={onUpdateProjectScenes}
                         onUpdateSubtitleTiming={onUpdateSubtitleTiming}
@@ -2338,6 +2341,7 @@ export function WorkspaceSidebar({
                         onTogglePlay={onTogglePlay}
                         onPause={onPause}
                         onSeek={onSeek}
+                        onScrubbingChange={onScrubbingChange}
                         onPlayFromTime={onPlayFromTime}
                         onUpdateScenes={onUpdateProjectScenes}
                         onUpdateSubtitleTiming={onUpdateSubtitleTiming}
@@ -4257,6 +4261,7 @@ export function WorkspaceSidebar({
                 onTogglePlay={onTogglePlay}
                 onPause={onPause}
                 onSeek={onSeek}
+                onScrubbingChange={onScrubbingChange}
                 onPlayFromTime={onPlayFromTime}
                 onUpdateScenes={onUpdateProjectScenes}
                 onUpdateSubtitleTiming={onUpdateSubtitleTiming}

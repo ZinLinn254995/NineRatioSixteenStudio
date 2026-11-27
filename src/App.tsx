@@ -1731,6 +1731,10 @@ export default function App() {
     []
   );
 
+  const handleScrubbingChange = useCallback((active: boolean) => {
+    stageRef.current?.setScrubbing(active);
+  }, []);
+
   const handlePlayingChange = useCallback((playing: boolean) => {
     setIsPlaying(playing);
     if (!playing) {
@@ -4521,6 +4525,7 @@ export default function App() {
               onUploadLocalVideo={handleUploadLocalVideo}
               onClearLocalVideo={handleClearLocalVideo}
               onSeek={handleSeek}
+              onScrubbingChange={handleScrubbingChange}
               onTogglePlay={handleTogglePlay}
               onPause={handlePause}
               onPlayFromTime={handlePlayFromTime}
@@ -4716,6 +4721,7 @@ export default function App() {
                       onTogglePlay={handleTogglePlay}
                       onPause={handlePause}
                       onSeek={handleSeek}
+                      onScrubbingChange={handleScrubbingChange}
                       onPlayFromTime={handlePlayFromTime}
                       onUpdateScenes={handleUpdateProjectScenes}
                       onUpdateSubtitleTiming={handleUpdateSubtitleTiming}

@@ -109,6 +109,7 @@ function formatSec(sec: number): string {
 export interface Stage9x16Handle {
   play: () => void;
   pause: () => void;
+  setScrubbing: (active: boolean) => void;
   seekCutTime: (cutSec: number, opts?: { force?: boolean }) => void;
   previewSourceTime: (sourceSec: number | null, opts?: { skipResync?: boolean }) => void;
 }
@@ -258,6 +259,9 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
       },
       pause: () => {
         playerRef.current?.pause();
+      },
+      setScrubbing: (active: boolean) => {
+        playerRef.current?.setScrubbing(active);
       },
       seekCutTime: (cutSec: number, opts?: { force?: boolean }) => {
         playerRef.current?.seekCutTime(cutSec, opts);
