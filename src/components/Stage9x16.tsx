@@ -1,11 +1,21 @@
 import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from "react";
 const useIsomorphicLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
-import { Pause, Play, Upload, Volume2, VolumeX } from "lucide-react";
-import type { SubtitleItem, VideoEditSettings, VideoProject, VoiceSettings } from "../types";
+import { ChevronDown, Pause, Play, Ratio, Upload, Volume2, VolumeX } from "lucide-react";
+import type {
+  SubtitleItem,
+  VideoAspectRatio,
+  VideoEditSettings,
+  VideoProject,
+  VoiceSettings,
+} from "../types";
 import { ScenePlayer, type ScenePlayerHandle } from "./ScenePlayer";
 import { getEffectivePlaybackSpeed } from "../utils/voicePresets";
 import { findActiveSubtitle, getScrollAnchorSubtitle } from "../utils/projectTimeline";
 import { hasGeneratedProject, hasProjectMedia } from "../utils/projectState";
+import {
+  VIDEO_ASPECT_RATIO_OPTIONS,
+  resolveStageCanvasGeometry,
+} from "../utils/videoFilters";
 import {
   clampAndSnapVideoHeightPct,
   isStageCleanClick,
@@ -80,8 +90,10 @@ interface Stage9x16Props {
   previewScale?: number;
   onChangePreviewScale?: (scale: number) => void;
   onChangeVideoHeightPct?: (pct: number) => void;
+  onChangeAspectRatio?: (ratio: VideoAspectRatio) => void;
   onUploadVideo?: (file: File) => void;
   onDetectedDuration?: (dur: number) => void;
+  hideCaptions?: boolean;
 }
 
 function formatSec(sec: number): string {
@@ -120,15 +132,23 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
     previewScale = DEFAULT_STAGE_PREVIEW_SCALE,
     onChangePreviewScale,
     onChangeVideoHeightPct,
+    onChangeAspectRatio,
     onUploadVideo,
     onDetectedDuration,
+    hideCaptions = false,
   },
   ref
 ) {
   const playerRef = useRef<ScenePlayerHandle | null>(null);
   const subPanelRef = useRef<HTMLDivElement | null>(null);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
+  const ratioMenuRef = useRef<HTMLDivElement | null>(null);
   const [isUploadDragOver, setIsUploadDragOver] = useState(false);
+  const [showRatioMenu, setShowRatioMenu] = useState(false);
+  const [detectedVideoDims, setDetectedVideoDims] = useState<{
+    width: number;
+    height: number;
+  } | null>(null);
   const onDetectedDurationRef = useRef(onDetectedDuration);
   onDetectedDurationRef.current = onDetectedDuration;
   const stageOuterRef = useRef<HTMLDivElement | null>(null);
@@ -249,6 +269,8 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
   }, [activeProject?.localUrl]);
 
   useEffect(() => {
+    setDetectedVideoDims(null);
+    setShowRatioMenu(false);
     if (!activeProject || !activeProject.localUrl) {
       return;
     }
@@ -261,6 +283,13 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
       if (Number.isFinite(d) && d > 0) {
         onDetectedDurationRef.current?.(Math.max(0.5, Math.round(d * 10) / 10));
       }
+      if (vidEl.videoWidth > 0 && vidEl.videoHeight > 0) {
+        setDetectedVideoDims((prev) =>
+          prev && prev.width === vidEl.videoWidth && prev.height === vidEl.videoHeight
+            ? prev
+            : { width: vidEl.videoWidth, height: vidEl.videoHeight }
+        );
+      }
     };
 
     const existingVideo = frameEl.querySelector("video");
@@ -268,16 +297,36 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
       reportFromVideo(existingVideo);
     }
 
-    const onLoadedMetadataCapture = (ev: Event) => {
+    const onMediaReadyCapture = (ev: Event) => {
       if (ev.target instanceof HTMLVideoElement) {
         reportFromVideo(ev.target);
       }
     };
-    frameEl.addEventListener("loadedmetadata", onLoadedMetadataCapture, true);
+    frameEl.addEventListener("loadedmetadata", onMediaReadyCapture, true);
+    frameEl.addEventListener("loadeddata", onMediaReadyCapture, true);
     return () => {
-      frameEl.removeEventListener("loadedmetadata", onLoadedMetadataCapture, true);
+      frameEl.removeEventListener("loadedmetadata", onMediaReadyCapture, true);
+      frameEl.removeEventListener("loadeddata", onMediaReadyCapture, true);
     };
   }, [activeProject?.localUrl]);
+
+  useEffect(() => {
+    if (!showRatioMenu) return;
+    const onOutsidePointer = (ev: PointerEvent) => {
+      if (ratioMenuRef.current && !ratioMenuRef.current.contains(ev.target as Node)) {
+        setShowRatioMenu(false);
+      }
+    };
+    const onKeyDown = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape") setShowRatioMenu(false);
+    };
+    window.addEventListener("pointerdown", onOutsidePointer);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", onOutsidePointer);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [showRatioMenu]);
   const safeCutTime = typeof cutTime === "number" && Number.isFinite(cutTime) ? Math.max(0, cutTime) : 0;
   const totalDuration =
     activeProject &&
@@ -443,6 +492,9 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
       ? Math.max(0, rawInitialCutTime)
       : 0;
 
+  const stageGeometry = resolveStageCanvasGeometry(editSettings.aspectRatio, detectedVideoDims);
+  const effectiveAspect = stageGeometry.aspect;
+
   const safePreviewScale =
     typeof previewScale === "number" && Number.isFinite(previewScale)
       ? previewScale
@@ -457,31 +509,44 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
   let maxHeightPx: number;
 
   if (isCompactLayout) {
-    const widthCappedMaxH = Math.floor((availableFrameOuterWidth * 16) / 9);
-    const maxSafeMobileH = Math.max(
-      240,
-      Math.min(Math.round(viewportMetrics.height * 0.6), widthCappedMaxH)
+    const widthCappedMaxH = Math.floor(availableFrameOuterWidth / effectiveAspect);
+    const viewportCappedMaxH = Math.min(
+      Math.round(viewportMetrics.height * 0.64),
+      Math.max(220, viewportMetrics.height - 320)
     );
+    const maxSafeMobileH = Math.max(96, Math.min(viewportCappedMaxH, widthCappedMaxH));
     maxHeightPx = maxSafeMobileH;
-    minHeightPx = Math.max(128, Math.min(maxHeightPx - 80, Math.round(maxHeightPx * 0.28)));
-    defaultHeightPx = Math.max(
-      minHeightPx + 36,
-      Math.min(maxHeightPx - 36, Math.round(maxHeightPx * 0.56))
+    minHeightPx = Math.max(
+      80,
+      Math.min(maxHeightPx, Math.round(maxHeightPx * (effectiveAspect >= 1.15 ? 0.48 : 0.28)))
     );
+    defaultHeightPx =
+      effectiveAspect >= 1.15
+        ? Math.max(minHeightPx, Math.min(maxHeightPx, Math.round(maxHeightPx * 0.92)))
+        : Math.max(
+            minHeightPx + Math.min(36, Math.max(0, maxHeightPx - minHeightPx)),
+            Math.min(maxHeightPx - Math.min(36, Math.max(0, maxHeightPx - minHeightPx)), Math.round(maxHeightPx * 0.58))
+          );
   } else {
     const controlsReservePx = hasTransportBar ? 104 : 38;
     const boundedHeightCeiling =
       fitContainerHeight && containerHeight > 180
-        ? Math.max(220, containerHeight - controlsReservePx)
-        : Math.max(360, viewportMetrics.height - 180);
+        ? Math.max(160, containerHeight - controlsReservePx)
+        : Math.max(300, viewportMetrics.height - 180);
     const widthCappedMaxH =
-      outerWidth > 0 ? Math.floor((availableFrameOuterWidth * 16) / 9) : 920;
-    maxHeightPx = Math.max(240, Math.min(920, boundedHeightCeiling, widthCappedMaxH));
-    minHeightPx = Math.max(160, Math.min(maxHeightPx - 60, Math.round(maxHeightPx * 0.42)));
-    defaultHeightPx = Math.max(
-      minHeightPx + 30,
-      Math.min(maxHeightPx - 24, Math.round(maxHeightPx * 0.72))
+      outerWidth > 0 ? Math.floor(availableFrameOuterWidth / effectiveAspect) : 920;
+    maxHeightPx = Math.max(120, Math.min(920, boundedHeightCeiling, widthCappedMaxH));
+    minHeightPx = Math.max(
+      96,
+      Math.min(maxHeightPx, Math.round(maxHeightPx * (effectiveAspect >= 1.15 ? 0.5 : 0.42)))
     );
+    defaultHeightPx =
+      effectiveAspect >= 1.15
+        ? Math.max(minHeightPx, Math.min(maxHeightPx, Math.round(maxHeightPx * 0.92)))
+        : Math.max(
+            minHeightPx,
+            Math.min(maxHeightPx - Math.min(24, Math.max(0, maxHeightPx - minHeightPx)), Math.round(maxHeightPx * 0.74))
+          );
   }
 
   const frameHeightPx = scaleToBoundsValue(
@@ -490,10 +555,14 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
     defaultHeightPx,
     maxHeightPx
   );
-  const targetStageWidthPx = Math.round((frameHeightPx * 9) / 16);
+  const targetStageWidthPx = Math.round(frameHeightPx * effectiveAspect);
   const renderedStageWidthPx =
     outerWidth > 0 ? Math.min(targetStageWidthPx, availableFrameOuterWidth) : targetStageWidthPx;
-  const stageScale = renderedStageWidthPx / 720;
+  const renderedStageHeightPx = Math.max(
+    80,
+    Math.round(renderedStageWidthPx / effectiveAspect)
+  );
+  const stageScale = renderedStageWidthPx / stageGeometry.logicalWidth;
 
   resizeMetricsRef.current = {
     minHeightPx,
@@ -673,17 +742,24 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
     };
   }, []);
 
-  // Match exportVideo.ts & server.ts 720x1280 split geometry verbatim (even-pixel clamped)
-  const hasSubtitles = Boolean(hasGeneratedProject(project) && project.subtitles.length > 0);
+  // Match exportVideo.ts split geometry for portrait ratios; use lower-third overlay for landscape/square
+  const hasSubtitles =
+    !hideCaptions && Boolean(hasGeneratedProject(project) && project.subtitles.length > 0);
+  const useSplitSubtitleLayout = hasSubtitles && stageGeometry.isPortraitSplitFriendly;
+  const useOverlaySubtitleLayout = hasSubtitles && !stageGeometry.isPortraitSplitFriendly;
+  const logicalStageH = stageGeometry.logicalHeight;
   const activeVideoHeightPct = dragVideoHeightPct ?? (editSettings.videoHeightPct || 35);
   const clampedHeightPct = Math.max(26, Math.min(52, activeVideoHeightPct));
-  const rawTopVideoH = hasSubtitles ? Math.round((1280 * clampedHeightPct) / 100) : 1280;
-  const exportTopVideoH = hasSubtitles
-    ? Math.max(240, Math.min(1280 - 240, Math.round(rawTopVideoH / 2) * 2))
-    : 1280;
-  const exportListH = Math.max(1, 1280 - exportTopVideoH);
-  const topVideoHeightPct = (exportTopVideoH / 1280) * 100;
-  const snapGuideTopPct = ((Math.round(Math.round((1280 * 35) / 100) / 2) * 2) / 1280) * 100;
+  const rawTopVideoH = useSplitSubtitleLayout
+    ? Math.round((logicalStageH * clampedHeightPct) / 100)
+    : logicalStageH;
+  const exportTopVideoH = useSplitSubtitleLayout
+    ? Math.max(200, Math.min(logicalStageH - 220, Math.round(rawTopVideoH / 2) * 2))
+    : logicalStageH;
+  const exportListH = Math.max(1, logicalStageH - exportTopVideoH);
+  const topVideoHeightPct = (exportTopVideoH / logicalStageH) * 100;
+  const snapGuideTopPct =
+    ((Math.round(Math.round((logicalStageH * 35) / 100) / 2) * 2) / logicalStageH) * 100;
 
   const scheduleSplitPreview = (clientY: number) => {
     const frameEl = stageFrameRef.current;
@@ -723,7 +799,7 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
   };
 
   const handleSplitPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!hasSubtitles || !onChangeVideoHeightPct) return;
+    if (!useSplitSubtitleLayout || !onChangeVideoHeightPct) return;
     if (e.button !== 0 && e.pointerType === "mouse") return;
     e.preventDefault();
     e.stopPropagation();
@@ -775,7 +851,7 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
   };
 
   const handleSplitKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    if (!hasSubtitles || !onChangeVideoHeightPct) return;
+    if (!useSplitSubtitleLayout || !onChangeVideoHeightPct) return;
     const basePct = Math.round(clampedHeightPct);
     if (e.key === "ArrowUp") {
       e.preventDefault();
@@ -802,18 +878,15 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
         compactMobile ? "gap-2 lg:gap-2.5" : "gap-2.5"
       }`}
     >
-      {/* Strictly 9:16 Vertical Video Frame matching exportVideo.ts 720x1280 layout */}
+      {/* Adaptive Video Frame matching Original video aspect ratio or selected preset */}
       <div
         ref={stageFrameRef}
-        style={
-          isCompactLayout
-            ? { width: `${renderedStageWidthPx}px`, height: `${frameHeightPx}px` }
-            : { width: `${renderedStageWidthPx}px` }
-        }
-        className={`relative max-w-full ${
-          isCompactLayout ? "" : "aspect-[9/16]"
-        } rounded-lg overflow-hidden bg-white dark:bg-[#0d1022] flex flex-col shadow-md ${
-          isResizing || isCompactLayout ? "transition-none" : "transition-[width] duration-150"
+        style={{
+          width: `${renderedStageWidthPx}px`,
+          height: `${renderedStageHeightPx}px`,
+        }}
+        className={`relative max-w-full rounded-lg overflow-hidden bg-white dark:bg-[#0d1022] flex flex-col shadow-md ${
+          isResizing || isCompactLayout ? "transition-none" : "transition-[width,height] duration-150"
         }`}
       >
         <div
@@ -913,11 +986,11 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
           </div>
         ) : (
           <>
-            {/* Top Video Window (Strictly locked to exportVideo.ts heightPct% without min-height distortion) */}
+            {/* Top Video Window (Split mode for portrait ratios, full-frame for landscape/square or no subtitles) */}
             <div
-              style={hasSubtitles ? { height: `${topVideoHeightPct}%` } : undefined}
+              style={useSplitSubtitleLayout ? { height: `${topVideoHeightPct}%` } : undefined}
               className={`w-full bg-neutral-950 overflow-hidden ${
-                hasSubtitles ? "shrink-0" : "flex-1 h-full"
+                useSplitSubtitleLayout ? "shrink-0" : "flex-1 h-full"
               }`}
             >
               <AppErrorBoundary fallbackLabel="Video preview error" compact>
@@ -939,8 +1012,121 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
               </AppErrorBoundary>
             </div>
 
-            {/* Visual 35% Snap Guide & Draggable Video/Caption Split Handle */}
-            {hasSubtitles && onChangeVideoHeightPct && (
+            {/* Lower-Third Cinematic Subtitle Overlay for Landscape / Square Canvas Ratios */}
+            {useOverlaySubtitleLayout && activeSub && (() => {
+              const fontMultiplier =
+                editSettings.subtitleFontScale === "sm"
+                  ? 0.88
+                  : editSettings.subtitleFontScale === "lg"
+                    ? 1.15
+                    : 1;
+              const theme = editSettings.subtitleTheme || "auto";
+              const hl = editSettings.subtitleHighlightColor || "indigo";
+              const showGloss = editSettings.showWordGloss !== false;
+              const showBurmese = editSettings.showBurmeseLine !== false;
+              const localElapsed = Math.max(0, highlightTime - activeSub.startTime);
+
+              const activeWordBadgeClass =
+                hl === "amber"
+                  ? "bg-amber-400 text-[#1c1917]"
+                  : hl === "emerald"
+                    ? "bg-emerald-400 text-[#052e16]"
+                    : hl === "rose"
+                      ? "bg-rose-500 text-white"
+                      : "bg-teal-400 text-[#060918]";
+
+              const isLightBox = theme === "light" || theme === "warm";
+              const boxClass =
+                theme === "light"
+                  ? "bg-white/92 text-[#0c1026] border border-[#d2dcf0]/90"
+                  : theme === "warm"
+                    ? "bg-[#fbf7ef]/94 text-[#1c1917] border border-[#e7dcc8]/90"
+                    : "bg-[#070914]/82 text-white border border-white/15";
+
+              const scaleFactor = Math.max(0.65, Math.min(1.15, renderedStageWidthPx / 480));
+              const phoneticPx = Math.round(14 * fontMultiplier * scaleFactor);
+              const glossPx = Math.round(9.5 * fontMultiplier * scaleFactor);
+              const thaiPx = Math.round(11 * fontMultiplier * scaleFactor);
+              const burmesePx = Math.round(12 * fontMultiplier * scaleFactor);
+
+              return (
+                <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 px-3 pb-2.5 pt-8 bg-gradient-to-t from-black/75 via-black/30 to-transparent flex justify-center">
+                  <button
+                    type="button"
+                    onClick={() => onSelectSubtitle?.(activeSub.id, activeSub.startTime)}
+                    className={`pointer-events-auto max-w-[94%] rounded-lg px-3 py-1.5 shadow-lg backdrop-blur-xs text-center cursor-pointer transition-colors ${boxClass}`}
+                  >
+                    <div className="flex flex-wrap items-start justify-center gap-x-1.5 gap-y-1">
+                      {activeSub.words.map((word, wi) => {
+                        const isLastWord = wi === activeSub.words.length - 1;
+                        const isWordSpoken =
+                          localElapsed >= word.startOffsetSec &&
+                          (isLastWord
+                            ? localElapsed <= word.endOffsetSec
+                            : localElapsed < word.endOffsetSec);
+                        return (
+                          <span
+                            key={`${activeSub.id}-ov-${wi}`}
+                            className="inline-flex flex-col items-center"
+                          >
+                            <span
+                              style={{ fontSize: `${phoneticPx}px`, lineHeight: 1.2 }}
+                              className={`font-semibold px-1 py-0.5 rounded ${
+                                isWordSpoken
+                                  ? activeWordBadgeClass
+                                  : isLightBox
+                                    ? "text-[#0c1026]"
+                                    : "text-white"
+                              }`}
+                            >
+                              {word.phonetic}
+                            </span>
+                            {showGloss && word.burmeseGloss && (
+                              <span
+                                style={{ fontSize: `${glossPx}px`, lineHeight: 1.2 }}
+                                className={`font-myanmar mt-0.5 ${
+                                  isLightBox ? "text-[#4d597d]" : "text-white/75"
+                                }`}
+                              >
+                                {word.burmeseGloss}
+                              </span>
+                            )}
+                          </span>
+                        );
+                      })}
+                    </div>
+
+                    {editSettings.showThaiScript && activeSub.thaiScript && (
+                      <p
+                        style={{
+                          fontSize: `${thaiPx}px`,
+                          fontFamily: "'Noto Sans Thai', 'DM Sans', sans-serif",
+                        }}
+                        className={`mt-1 leading-snug ${
+                          isLightBox ? "text-[#4d597d]" : "text-white/80"
+                        }`}
+                      >
+                        {activeSub.thaiScript}
+                      </p>
+                    )}
+
+                    {showBurmese && activeSub.burmese && (
+                      <p
+                        style={{ fontSize: `${burmesePx}px` }}
+                        className={`font-myanmar mt-1 leading-snug font-medium ${
+                          isLightBox ? "text-[#1e293b]" : "text-white/95"
+                        }`}
+                      >
+                        {activeSub.burmese}
+                      </p>
+                    )}
+                  </button>
+                </div>
+              );
+            })()}
+
+            {/* Visual 35% Snap Guide & Draggable Video/Caption Split Handle (Portrait Split Mode) */}
+            {useSplitSubtitleLayout && onChangeVideoHeightPct && (
               <>
                 {isDraggingSplit && (
                   <div
@@ -995,8 +1181,8 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
               </>
             )}
 
-            {/* Bottom Scrolling List Item View — fixed 720px coordinate system matching exportVideo.ts, scaled uniformly with preview */}
-            {hasSubtitles && (() => {
+            {/* Bottom Scrolling List Item View — portrait split-screen subtitle layout */}
+            {useSplitSubtitleLayout && (() => {
               const fontMultiplier =
                 editSettings.subtitleFontScale === "sm"
                   ? 0.86
@@ -1197,7 +1383,7 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
                   <div
                     ref={listContainerRef}
                     style={{
-                      width: "720px",
+                      width: `${stageGeometry.logicalWidth}px`,
                       height: `${exportListH}px`,
                       transform: `scale(${stageScale}) translateZ(0)`,
                       transformOrigin: "top left",
@@ -1417,55 +1603,157 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
         )}
       </div>
 
-      {/* Standalone Preview Resize Drag Bar (strictly separate from playback buttons) */}
-      {onChangePreviewScale && (
+      {/* Standalone Preview Resize Drag Bar + Compact Aspect Ratio Switcher */}
+      {(onChangePreviewScale || (activeProject && onChangeAspectRatio)) && (
         <div
-          role="slider"
-          tabIndex={0}
-          aria-label="Resize 9:16 video preview (drag up to shrink, down to enlarge, double-click for 100%)"
-          aria-orientation="vertical"
-          aria-valuemin={0}
-          aria-valuemax={200}
-          aria-valuenow={Math.round(clampedScale * 100)}
-          title="Drag up to shrink · Drag down to enlarge (up to 200%) · Double-click for 100%"
-          onPointerDown={handleDragPointerDown}
-          onTouchStart={handleDragTouchStart}
-          onDoubleClick={handleDragDoubleClick}
-          onKeyDown={handleDragKeyDown}
-          className={`relative group w-full h-6 flex items-center justify-center cursor-ns-resize touch-none select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-700 dark:focus-visible:ring-teal-400 ${
+          role={onChangePreviewScale ? "slider" : undefined}
+          tabIndex={onChangePreviewScale ? 0 : undefined}
+          aria-label={
+            onChangePreviewScale
+              ? "Resize video preview (drag up to shrink, down to enlarge, double-click for 100%)"
+              : undefined
+          }
+          aria-orientation={onChangePreviewScale ? "vertical" : undefined}
+          aria-valuemin={onChangePreviewScale ? 0 : undefined}
+          aria-valuemax={onChangePreviewScale ? 200 : undefined}
+          aria-valuenow={onChangePreviewScale ? Math.round(clampedScale * 100) : undefined}
+          title={
+            onChangePreviewScale
+              ? "Drag up to shrink · Drag down to enlarge (up to 200%) · Double-click for 100%"
+              : undefined
+          }
+          onPointerDown={onChangePreviewScale ? handleDragPointerDown : undefined}
+          onTouchStart={onChangePreviewScale ? handleDragTouchStart : undefined}
+          onDoubleClick={onChangePreviewScale ? handleDragDoubleClick : undefined}
+          onKeyDown={onChangePreviewScale ? handleDragKeyDown : undefined}
+          className={`relative group w-full h-6 flex items-center justify-center ${
+            onChangePreviewScale ? "cursor-ns-resize touch-none" : ""
+          } select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-700 dark:focus-visible:ring-teal-400 ${
             compactMobile && !hasTransportBar
               ? "border-b border-[#d2dcf0] dark:border-[#21284c]"
               : ""
           }`}
         >
-          <span
-            className={`h-1 rounded-full transition-all ${
-              isResizing
-                ? "w-16 bg-teal-700 dark:bg-teal-400"
-                : "w-10 bg-[#b8c2d0] dark:bg-[#2f3866] group-hover:w-14 group-hover:bg-teal-700/80 dark:group-hover:bg-teal-400/80"
-            }`}
-          />
-          <button
-            type="button"
-            onPointerDown={(e) => e.stopPropagation()}
-            onTouchStart={(e) => e.stopPropagation()}
-            onClick={(e) => {
-              e.stopPropagation();
-              onChangePreviewScale(DEFAULT_STAGE_PREVIEW_SCALE);
-            }}
-            title="Reset preview size to 100%"
-            className={`absolute right-3 text-[10px] font-mono-tabular transition-colors cursor-pointer ${
-              Math.abs(clampedScale - DEFAULT_STAGE_PREVIEW_SCALE) >= 0.02
-                ? "text-teal-700 dark:text-teal-400 font-semibold hover:underline"
-                : "text-[#64748b] dark:text-[#7c89b0]"
-            }`}
-          >
-            {Math.round(clampedScale * 100)}%
-          </button>
-          {isResizing && (
-            <span className="pointer-events-none absolute -top-6 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded bg-teal-700 text-white dark:bg-teal-400 dark:text-[#060918] text-[10px] font-mono-tabular font-semibold whitespace-nowrap shadow-sm">
-              {scaleLabel} · {Math.round(clampedScale * 100)}%
-            </span>
+          {/* Left: Compact Aspect Ratio Switcher */}
+          {activeProject && onChangeAspectRatio && (
+            <div
+              ref={ratioMenuRef}
+              onPointerDown={(e) => e.stopPropagation()}
+              onTouchStart={(e) => e.stopPropagation()}
+              onClick={(e) => e.stopPropagation()}
+              className="absolute left-3 z-30 flex items-center"
+            >
+              <button
+                type="button"
+                onClick={() => setShowRatioMenu((v) => !v)}
+                aria-expanded={showRatioMenu}
+                aria-haspopup="menu"
+                title="Change video aspect ratio"
+                className={`h-5 px-1.5 rounded-sm border text-[10px] font-mono-tabular font-medium inline-flex items-center gap-1 cursor-pointer transition-colors ${
+                  showRatioMenu || (editSettings.aspectRatio && editSettings.aspectRatio !== "original")
+                    ? "border-teal-600/60 dark:border-teal-400/60 bg-teal-50/90 dark:bg-teal-950/60 text-teal-800 dark:text-teal-300"
+                    : "border-[#d2dcf0]/80 dark:border-[#21284c] bg-white/80 dark:bg-[#0d1022]/85 text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
+                }`}
+              >
+                <Ratio className="w-2.5 h-2.5 shrink-0" />
+                <span>{stageGeometry.activeLabel}</span>
+                <ChevronDown className="w-2.5 h-2.5 shrink-0 opacity-75" />
+              </button>
+
+              {showRatioMenu && (
+                <div
+                  role="menu"
+                  aria-label="Aspect ratio presets"
+                  className="absolute bottom-full left-0 mb-1.5 p-1 rounded-lg border border-[#d2dcf0] dark:border-[#21284c] bg-white/98 dark:bg-[#0d1022]/98 shadow-lg backdrop-blur-sm flex flex-wrap items-center gap-1 w-max max-w-[calc(100vw-24px)] sm:max-w-[360px] z-40"
+                >
+                  {VIDEO_ASPECT_RATIO_OPTIONS.map((opt) => {
+                    const active = (editSettings.aspectRatio || "original") === opt.id;
+                    const optGeom = resolveStageCanvasGeometry(opt.id, detectedVideoDims);
+                    const iconStyle =
+                      opt.id === "9:16"
+                        ? "w-2 h-3.5"
+                        : opt.id === "16:9"
+                          ? "w-3.5 h-2"
+                          : opt.id === "1:1"
+                            ? "w-2.5 h-2.5"
+                            : opt.id === "4:5"
+                              ? "w-2.5 h-3"
+                              : optGeom.aspect > 1.1
+                                ? "w-3.5 h-2"
+                                : optGeom.aspect < 0.9
+                                  ? "w-2 h-3.5"
+                                  : "w-2.5 h-2.5";
+
+                    return (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked={active}
+                        onClick={() => {
+                          onChangeAspectRatio(opt.id);
+                          setShowRatioMenu(false);
+                        }}
+                        className={`h-7 px-2 rounded-md text-[11px] font-medium inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors ${
+                          active
+                            ? "bg-teal-700 text-white dark:bg-teal-400 dark:text-[#060918] font-semibold"
+                            : "text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#f3f5fc] dark:hover:bg-[#141933]"
+                        }`}
+                      >
+                        <span
+                          aria-hidden="true"
+                          className={`rounded-[2px] border border-current shrink-0 ${iconStyle}`}
+                        />
+                        <span>
+                          {opt.id === "original" && stageGeometry.detectedRatioLabel
+                            ? `Original · ${stageGeometry.detectedRatioLabel}`
+                            : opt.label}
+                        </span>
+                        {hasSubtitles && (
+                          <span className="text-[9px] opacity-70">
+                            {optGeom.isPortraitSplitFriendly ? "Split" : "Overlay"}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {onChangePreviewScale && (
+            <>
+              <span
+                className={`h-1 rounded-full transition-all ${
+                  isResizing
+                    ? "w-16 bg-teal-700 dark:bg-teal-400"
+                    : "w-10 bg-[#b8c2d0] dark:bg-[#2f3866] group-hover:w-14 group-hover:bg-teal-700/80 dark:group-hover:bg-teal-400/80"
+                }`}
+              />
+              <button
+                type="button"
+                onPointerDown={(e) => e.stopPropagation()}
+                onTouchStart={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onChangePreviewScale(DEFAULT_STAGE_PREVIEW_SCALE);
+                }}
+                title="Reset preview size to 100%"
+                className={`absolute right-3 text-[10px] font-mono-tabular transition-colors cursor-pointer ${
+                  Math.abs(clampedScale - DEFAULT_STAGE_PREVIEW_SCALE) >= 0.02
+                    ? "text-teal-700 dark:text-teal-400 font-semibold hover:underline"
+                    : "text-[#64748b] dark:text-[#7c89b0]"
+                }`}
+              >
+                {Math.round(clampedScale * 100)}%
+              </button>
+              {isResizing && (
+                <span className="pointer-events-none absolute -top-6 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded bg-teal-700 text-white dark:bg-teal-400 dark:text-[#060918] text-[10px] font-mono-tabular font-semibold whitespace-nowrap shadow-sm">
+                  {scaleLabel} · {Math.round(clampedScale * 100)}%
+                </span>
+              )}
+            </>
           )}
         </div>
       )}

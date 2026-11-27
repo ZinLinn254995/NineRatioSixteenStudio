@@ -218,6 +218,14 @@ export function sanitizeEditSettings(raw: unknown): VideoEditSettings {
   return {
     filterPreset: typeof rec.filterPreset === "string" ? rec.filterPreset : DEFAULT_VIDEO_EDIT.filterPreset,
     playbackSpeed: clampFinite(rec.playbackSpeed, 0.25, 2.5, DEFAULT_VIDEO_EDIT.playbackSpeed),
+    aspectRatio:
+      rec.aspectRatio === "original" ||
+      rec.aspectRatio === "9:16" ||
+      rec.aspectRatio === "16:9" ||
+      rec.aspectRatio === "1:1" ||
+      rec.aspectRatio === "4:5"
+        ? rec.aspectRatio
+        : DEFAULT_VIDEO_EDIT.aspectRatio,
     zoom: clampFinite(rec.zoom, 0.5, 3, DEFAULT_VIDEO_EDIT.zoom),
     panX: clampFinite(rec.panX, -50, 50, DEFAULT_VIDEO_EDIT.panX),
     panY: clampFinite(rec.panY, -50, 50, DEFAULT_VIDEO_EDIT.panY),
@@ -899,6 +907,14 @@ export async function importProjectFromJsonText(
         ? s.sceneId
         : validatedScenes[sceneIndex]?.id;
 
+    const rawAiSrcStart = Number(s.aiSourceStartSec);
+    const rawAiSrcEnd = Number(s.aiSourceEndSec);
+    const hasAiOrigin =
+      Number.isFinite(rawAiSrcStart) &&
+      rawAiSrcStart >= 0 &&
+      Number.isFinite(rawAiSrcEnd) &&
+      rawAiSrcEnd > rawAiSrcStart;
+
     return {
       id: typeof s.id === "string" && s.id.trim() ? s.id : `sub-${idx + 1}`,
       sceneIndex,
@@ -907,6 +923,12 @@ export async function importProjectFromJsonText(
       endTime: Number(endTime.toFixed(2)),
       sourceStartSec: Number(sourceStartSec.toFixed(2)),
       sourceEndSec: Number(sourceEndSec.toFixed(2)),
+      ...(hasAiOrigin
+        ? {
+            aiSourceStartSec: Number(rawAiSrcStart.toFixed(2)),
+            aiSourceEndSec: Number(rawAiSrcEnd.toFixed(2)),
+          }
+        : {}),
       originalSpokenText: typeof s.originalSpokenText === "string" ? s.originalSpokenText : "",
       thaiPhonetic: typeof s.thaiPhonetic === "string" ? s.thaiPhonetic : "",
       thaiScript: typeof s.thaiScript === "string" ? s.thaiScript : "",

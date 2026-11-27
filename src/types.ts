@@ -58,6 +58,8 @@ export interface SubtitleItem {
   endTime: number;
   sourceStartSec: number;
   sourceEndSec: number;
+  aiSourceStartSec?: number;
+  aiSourceEndSec?: number;
   originalSpokenText: string;
   thaiPhonetic: string;
   thaiScript: string;
@@ -145,10 +147,12 @@ export type TranslationTone = "casual" | "formal" | "dramatic" | "literal";
 export type SubtitleFontScale = "sm" | "md" | "lg";
 export type SubtitleTheme = "auto" | "light" | "dark" | "warm";
 export type SubtitleHighlightColor = "amber" | "emerald" | "indigo" | "rose";
+export type VideoAspectRatio = "original" | "9:16" | "16:9" | "1:1" | "4:5";
 
 export interface VideoEditSettings {
   filterPreset: VideoFilterPresetId | "custom";
   playbackSpeed: number;
+  aspectRatio: VideoAspectRatio;
   zoom: number;
   panX: number;
   panY: number;

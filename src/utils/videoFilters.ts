@@ -1,8 +1,108 @@
-import type { VideoEditSettings, VideoFilterPresetId } from "../types";
+import type { VideoAspectRatio, VideoEditSettings, VideoFilterPresetId } from "../types";
+
+export interface VideoAspectRatioOption {
+  id: VideoAspectRatio;
+  label: string;
+  shortLabel: string;
+  ratio: number | null;
+}
+
+export const VIDEO_ASPECT_RATIO_OPTIONS: VideoAspectRatioOption[] = [
+  { id: "original", label: "Original", shortLabel: "Original", ratio: null },
+  { id: "9:16", label: "9:16", shortLabel: "9:16", ratio: 9 / 16 },
+  { id: "16:9", label: "16:9", shortLabel: "16:9", ratio: 16 / 9 },
+  { id: "1:1", label: "1:1", shortLabel: "1:1", ratio: 1 },
+  { id: "4:5", label: "4:5", shortLabel: "4:5", ratio: 4 / 5 },
+];
+
+export interface ResolvedStageGeometry {
+  aspect: number;
+  detectedRatioLabel: string | null;
+  activeLabel: string;
+  isPortraitSplitFriendly: boolean;
+  logicalWidth: number;
+  logicalHeight: number;
+}
+
+function formatDetectedRatioLabel(w: number, h: number): string {
+  if (!(w > 0 && h > 0)) return "Original";
+  const r = w / h;
+  const known: { label: string; val: number }[] = [
+    { label: "9:16", val: 9 / 16 },
+    { label: "16:9", val: 16 / 9 },
+    { label: "1:1", val: 1 },
+    { label: "4:5", val: 4 / 5 },
+    { label: "3:4", val: 3 / 4 },
+    { label: "4:3", val: 4 / 3 },
+    { label: "21:9", val: 21 / 9 },
+  ];
+  for (const k of known) {
+    if (Math.abs(r - k.val) / k.val < 0.045) {
+      return k.label;
+    }
+  }
+  return `${Math.round(w)}×${Math.round(h)}`;
+}
+
+export function resolveStageCanvasGeometry(
+  aspectRatio: VideoAspectRatio | undefined,
+  sourceDims?: { width: number; height: number } | null
+): ResolvedStageGeometry {
+  const mode: VideoAspectRatio = aspectRatio || "original";
+  const hasDims = Boolean(sourceDims && sourceDims.width > 0 && sourceDims.height > 0);
+  const detectedRatioLabel = hasDims
+    ? formatDetectedRatioLabel(sourceDims!.width, sourceDims!.height)
+    : null;
+
+  let aspect: number;
+  let activeLabel: string;
+
+  if (mode === "9:16") {
+    aspect = 9 / 16;
+    activeLabel = "9:16";
+  } else if (mode === "16:9") {
+    aspect = 16 / 9;
+    activeLabel = "16:9";
+  } else if (mode === "1:1") {
+    aspect = 1;
+    activeLabel = "1:1";
+  } else if (mode === "4:5") {
+    aspect = 4 / 5;
+    activeLabel = "4:5";
+  } else {
+    const raw = hasDims ? sourceDims!.width / sourceDims!.height : 9 / 16;
+    aspect = Math.max(0.45, Math.min(2.35, raw));
+    activeLabel = detectedRatioLabel ? `Original · ${detectedRatioLabel}` : "Original";
+  }
+
+  const isPortraitSplitFriendly = aspect <= 0.85;
+  let logicalWidth: number;
+  let logicalHeight: number;
+  if (isPortraitSplitFriendly) {
+    logicalWidth = 720;
+    logicalHeight = Math.max(760, Math.min(1440, Math.round(720 / aspect / 2) * 2));
+  } else if (aspect >= 1) {
+    logicalHeight = 720;
+    logicalWidth = Math.max(720, Math.min(1280, Math.round((720 * aspect) / 2) * 2));
+  } else {
+    logicalWidth = 720;
+    logicalHeight = Math.max(720, Math.min(900, Math.round(720 / aspect / 2) * 2));
+  }
+
+  return {
+    aspect,
+    detectedRatioLabel,
+    activeLabel,
+    isPortraitSplitFriendly,
+    logicalWidth,
+    logicalHeight,
+  };
+}
 
 export const DEFAULT_VIDEO_EDIT: VideoEditSettings = {
   filterPreset: "normal",
   playbackSpeed: 1,
+  aspectRatio: "original",
   zoom: 1,
   panX: 0,
   panY: 0,

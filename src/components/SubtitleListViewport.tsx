@@ -38,6 +38,8 @@ export const SubtitleListViewport = forwardRef<
   const containerRef = useRef<HTMLDivElement | null>(null);
   const itemElementsRef = useRef<Record<string, HTMLElement | null>>({});
   const programmaticScrollUntilRef = useRef<number>(0);
+  const isSyncScrollingRef = useRef<boolean>(false);
+  const syncScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastScrollTopRef = useRef<number>(0);
   const lastFollowedSubIdRef = useRef<string | null>(null);
 
@@ -45,6 +47,33 @@ export const SubtitleListViewport = forwardRef<
   autoFollowStateRef.current = autoFollowState;
   const onChangeAutoFollowStateRef = useRef(onChangeAutoFollowState);
   onChangeAutoFollowStateRef.current = onChangeAutoFollowState;
+
+  const clearSyncScrollGuard = useCallback(() => {
+    isSyncScrollingRef.current = false;
+    programmaticScrollUntilRef.current = 0;
+    if (syncScrollTimerRef.current !== null) {
+      clearTimeout(syncScrollTimerRef.current);
+      syncScrollTimerRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const onScrollEnd = () => {
+      if (isSyncScrollingRef.current) {
+        clearSyncScrollGuard();
+      }
+    };
+    container.addEventListener("scrollend", onScrollEnd);
+    return () => {
+      container.removeEventListener("scrollend", onScrollEnd);
+      if (syncScrollTimerRef.current !== null) {
+        clearTimeout(syncScrollTimerRef.current);
+        syncScrollTimerRef.current = null;
+      }
+    };
+  }, [clearSyncScrollGuard]);
 
   const scrollToSubtitle = useCallback(
     (id: string, behavior: ScrollBehavior = "smooth") => {
@@ -70,7 +99,15 @@ export const SubtitleListViewport = forwardRef<
       }
 
       if (nextScrollTop !== null && Math.abs(nextScrollTop - container.scrollTop) > 1) {
-        programmaticScrollUntilRef.current = Date.now() + 700;
+        isSyncScrollingRef.current = true;
+        programmaticScrollUntilRef.current = Date.now() + 900;
+        if (syncScrollTimerRef.current !== null) {
+          clearTimeout(syncScrollTimerRef.current);
+        }
+        syncScrollTimerRef.current = setTimeout(() => {
+          isSyncScrollingRef.current = false;
+          syncScrollTimerRef.current = null;
+        }, 900);
         lastScrollTopRef.current = nextScrollTop;
         try {
           container.scrollTo({
@@ -121,11 +158,11 @@ export const SubtitleListViewport = forwardRef<
   }, [playingSubtitleId, autoFollowState, scrollToSubtitle]);
 
   const markManualScroll = useCallback(() => {
-    programmaticScrollUntilRef.current = 0;
+    clearSyncScrollGuard();
     if (autoFollowStateRef.current === "following") {
       onChangeAutoFollowStateRef.current("paused_by_scroll");
     }
-  }, []);
+  }, [clearSyncScrollGuard]);
 
   const handleContainerScroll = useCallback(() => {
     const container = containerRef.current;
@@ -134,7 +171,7 @@ export const SubtitleListViewport = forwardRef<
     const moved = Math.abs(currentTop - lastScrollTopRef.current) > 2;
     lastScrollTopRef.current = currentTop;
 
-    if (Date.now() <= programmaticScrollUntilRef.current) {
+    if (isSyncScrollingRef.current || Date.now() <= programmaticScrollUntilRef.current) {
       return;
     }
     if (moved && autoFollowStateRef.current === "following") {

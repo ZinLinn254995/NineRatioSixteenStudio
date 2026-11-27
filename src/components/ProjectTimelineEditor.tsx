@@ -4,7 +4,7 @@ import {
   ChevronDown,
   ChevronUp,
   Film,
-  List,
+  GripHorizontal,
   Loader2,
   Pause,
   Play,
@@ -18,7 +18,13 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import type { SpeechRegion, SpeakingScene, SubtitleItem, VideoProject } from "../types";
+import type {
+  SpeechRegion,
+  SpeakingScene,
+  SubtitleGenerationProgress,
+  SubtitleItem,
+  VideoProject,
+} from "../types";
 import { ensureSceneIds, roundTenth } from "../utils/projectTimeline";
 import { hasGeneratedProject, hasProjectMedia } from "../utils/projectState";
 import {
@@ -61,8 +67,20 @@ interface ProjectTimelineEditorProps {
   regeneratingClipId?: string | null;
   regeneratingClipPercent?: number | null;
   onGenerateSingleClip?: (sceneId: string) => void;
+  onGenerateSubtitles?: () => void;
+  generationProgress?: SubtitleGenerationProgress | null;
   isBusy?: boolean;
   onPreviewSourceSeek?: (sourceSec: number | null, opts?: { skipResync?: boolean }) => void;
+  selectedSubtitleId?: string | null;
+  onSelectSubtitle?: (id: string | null, opts?: { scrollList?: boolean }) => void;
+  hideUndoRedo?: boolean;
+  compactMobileExpanded?: boolean;
+  hideHeader?: boolean;
+  hideTransport?: boolean;
+  hideCaptions?: boolean;
+  showSubtitleTrack?: boolean;
+  fillHeight?: boolean;
+  compactDock?: boolean;
 }
 
 interface ClipSegment {
@@ -74,6 +92,11 @@ interface ClipSegment {
   clipDur: number;
   cutStart: number;
   cutEnd: number;
+}
+
+interface TimelineThumbFrame {
+  sourceSec: number;
+  url: string;
 }
 
 type DragMode =
@@ -125,7 +148,30 @@ type DragMode =
       startClientX: number;
       origStartTime: number;
       origEndTime: number;
+    }
+  | {
+      type: "clip-reorder";
+      sceneId: string;
+      fromIndex: number;
+      toIndex: number;
+      pointerId: number;
+      startClientX: number;
+      currentClientX: number;
     };
+
+interface ClipReorderState {
+  sceneId: string;
+  fromIndex: number;
+  toIndex: number;
+  pointerLocalX: number;
+}
+
+const CLIP_LONG_PRESS_MS = 320;
+const REORDER_TILE_W = 68;
+const REORDER_TILE_H = 52;
+const REORDER_TILE_GAP = 10;
+const REORDER_TILE_STRIDE = REORDER_TILE_W + REORDER_TILE_GAP;
+const REORDER_STRIP_PAD = 16;
 
 function formatTimePrecise(sec: number): string {
   const clamped = Math.max(0, sec);
@@ -144,7 +190,26 @@ function formatRulerTick(sec: number): string {
 }
 
 function clampZoom(z: number): number {
-  return Math.max(10, Math.min(160, z));
+  return Math.max(10, Math.min(160, Math.round(z * 10) / 10));
+}
+
+function computeTimelineSpanPx(
+  startSec: number,
+  endSec: number,
+  pxPerSec: number,
+  maxEndSec?: number
+): { leftPx: number; widthPx: number } {
+  const safeStart = Number.isFinite(startSec) ? Math.max(0, startSec) : 0;
+  const rawEnd = Number.isFinite(endSec) ? endSec : safeStart;
+  const cappedEnd =
+    typeof maxEndSec === "number" && Number.isFinite(maxEndSec)
+      ? Math.min(rawEnd, maxEndSec)
+      : rawEnd;
+  const safeEnd = Math.max(safeStart, cappedEnd);
+  const leftPx = safeStart * pxPerSec;
+  const rightPx = safeEnd * pxPerSec;
+  const widthPx = Math.max(2, rightPx - leftPx);
+  return { leftPx, widthPx };
 }
 
 export function ProjectTimelineEditor({
@@ -156,7 +221,6 @@ export function ProjectTimelineEditor({
   onTogglePlay,
   onPause,
   onSeek,
-  onPlayFromTime,
   onUpdateScenes,
   onUpdateSubtitleTiming,
   onShiftAllSubtitles,
@@ -172,17 +236,24 @@ export function ProjectTimelineEditor({
   isCollapsed = false,
   onToggleCollapse,
   cutSpeechRegions: controlledCutSpeechRegions,
-  clipSubtitleCounts,
-  regeneratingClipId = null,
-  regeneratingClipPercent = null,
-  onGenerateSingleClip,
+  onGenerateSubtitles,
+  generationProgress = null,
   isBusy = false,
   onPreviewSourceSeek,
+  selectedSubtitleId,
+  onSelectSubtitle,
+  hideUndoRedo = false,
+  compactMobileExpanded = false,
+  hideHeader = false,
+  hideTransport = false,
+  hideCaptions = false,
+  showSubtitleTrack = false,
+  fillHeight = false,
+  compactDock = false,
 }: ProjectTimelineEditorProps) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const trackSlideRef = useRef<HTMLDivElement | null>(null);
   const timeReadoutRef = useRef<HTMLSpanElement | null>(null);
-  const [showDockScenes, setShowDockScenes] = useState(false);
   const [showRangeFill, setShowRangeFill] = useState(false);
   const [rangeStartVal, setRangeStartVal] = useState("0");
   const [rangeEndVal, setRangeEndVal] = useState("3");
@@ -191,7 +262,16 @@ export function ProjectTimelineEditor({
   const [pxPerSec, setPxPerSec] = useState(32);
   const [viewportWidth, setViewportWidth] = useState(560);
   const [activeSceneId, setActiveSceneId] = useState<string | null>(null);
-  const [activeSubId, setActiveSubId] = useState<string | null>(null);
+  const [localActiveSubId, setLocalActiveSubId] = useState<string | null>(null);
+  const activeSubId =
+    selectedSubtitleId !== undefined ? selectedSubtitleId : localActiveSubId;
+  const selectSub = useCallback(
+    (id: string | null, opts?: { scrollList?: boolean }) => {
+      setLocalActiveSubId(id);
+      onSelectSubtitle?.(id, opts);
+    },
+    [onSelectSubtitle]
+  );
   const [dragSubPreview, setDragSubPreview] = useState<{
     id: string;
     startTime: number;
@@ -210,7 +290,13 @@ export function ProjectTimelineEditor({
   const [liveScrubCutTime, setLiveScrubCutTime] = useState<number | null>(null);
   const [frozenTrackTime, setFrozenTrackTime] = useState<number | null>(null);
   const [dragBadge, setDragBadge] = useState<{ label: string; sec: number } | null>(null);
-  const [thumbnails, setThumbnails] = useState<string[]>([]);
+  const [thumbnails, setThumbnails] = useState<TimelineThumbFrame[]>([]);
+  const [thumbAspect, setThumbAspect] = useState<number>(9 / 16);
+  const thumbCacheRef = useRef<{
+    localUrl: string;
+    aspect: number;
+    byBucket: Map<number, TimelineThumbFrame>;
+  }>({ localUrl: "", aspect: 9 / 16, byBucket: new Map() });
   const [baselineSubRegions, setBaselineSubRegions] = useState<SpeechRegion[]>([]);
 
   const dragStateRef = useRef<DragMode | null>(null);
@@ -262,6 +348,20 @@ export function ProjectTimelineEditor({
     startX: number;
     moved: boolean;
   } | null>(null);
+  const [clipReorder, setClipReorder] = useState<ClipReorderState | null>(null);
+  const clipReorderRef = useRef<ClipReorderState | null>(null);
+  const [reorderHint, setReorderHint] = useState<string | null>(null);
+  const reorderHintTimerRef = useRef<number | null>(null);
+  const reorderStripRef = useRef<HTMLDivElement | null>(null);
+  const reorderTrackRef = useRef<HTMLDivElement | null>(null);
+  const longPressTimerRef = useRef<number | null>(null);
+  const longPressPendingRef = useRef<{
+    sceneId: string;
+    index: number;
+    pointerId: number;
+    startClientX: number;
+    startClientY: number;
+  } | null>(null);
 
   const activeTimelineProject = hasProjectMedia(project) ? project : null;
   const isDraft = Boolean(activeTimelineProject?.isDraft);
@@ -310,6 +410,196 @@ export function ProjectTimelineEditor({
   totalCutDurationRef.current = totalCutDuration;
   const cutTimeRef = useRef(cutTime);
   cutTimeRef.current = cutTime;
+  const isPlayingRef = useRef(isPlaying);
+  isPlayingRef.current = isPlaying;
+  const onPauseRef = useRef(onPause);
+  onPauseRef.current = onPause;
+
+  const cancelClipLongPress = useCallback(() => {
+    if (longPressTimerRef.current !== null) {
+      window.clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+    longPressPendingRef.current = null;
+  }, []);
+
+  const showReorderHint = useCallback((message: string) => {
+    setReorderHint(message);
+    if (reorderHintTimerRef.current !== null) {
+      window.clearTimeout(reorderHintTimerRef.current);
+    }
+    reorderHintTimerRef.current = window.setTimeout(() => {
+      reorderHintTimerRef.current = null;
+      setReorderHint(null);
+    }, 1800);
+  }, []);
+
+  const computeReorderMetrics = useCallback((clientX: number, segCount: number) => {
+    const vpRect = viewportRef.current?.getBoundingClientRect();
+    const vpWidth = vpRect?.width ?? 320;
+    const rawLocalX = vpRect ? clientX - vpRect.left : vpWidth / 2;
+    const pointerLocalX = Math.max(
+      REORDER_TILE_W / 2,
+      Math.min(Math.max(REORDER_TILE_W / 2, vpWidth - REORDER_TILE_W / 2), rawLocalX)
+    );
+
+    const trackEl = reorderTrackRef.current;
+    let toIndex = 0;
+    if (trackEl) {
+      const trackRect = trackEl.getBoundingClientRect();
+      const relX = clientX - (trackRect.left + REORDER_STRIP_PAD);
+      toIndex = Math.max(0, Math.min(Math.max(0, segCount - 1), Math.floor(relX / REORDER_TILE_STRIDE)));
+    } else {
+      toIndex = Math.max(0, Math.min(Math.max(0, segCount - 1), clipReorderRef.current?.toIndex ?? 0));
+    }
+
+    return { toIndex, pointerLocalX };
+  }, []);
+
+  const scheduleClipLongPress = useCallback(
+    (sceneId: string, index: number, pointerId: number, startClientX: number, startClientY: number) => {
+      cancelClipLongPress();
+      longPressPendingRef.current = {
+        sceneId,
+        index,
+        pointerId,
+        startClientX,
+        startClientY,
+      };
+      longPressTimerRef.current = window.setTimeout(() => {
+        longPressTimerRef.current = null;
+        const pending = longPressPendingRef.current;
+        longPressPendingRef.current = null;
+        if (!pending) return;
+        if (activePointersRef.current.size !== 1) return;
+        if (dragStateRef.current?.type !== "scrub") return;
+
+        const currentSegs = segmentsRef.current;
+        if (currentSegs.length < 2) {
+          showReorderHint("Split into 2+ clips to reorder");
+          return;
+        }
+
+        if (typeof navigator !== "undefined" && typeof navigator.vibrate === "function") {
+          try {
+            navigator.vibrate(18);
+          } catch {
+            // ignore unsupported haptics
+          }
+        }
+
+        if (isPlayingRef.current) {
+          onPauseRef.current();
+        }
+        tappedClipRef.current = null;
+        tappedSubRef.current = null;
+        liveScrubCutRef.current = null;
+        setLiveScrubCutTime(null);
+        setDragBadge(null);
+
+        const vpRect = viewportRef.current?.getBoundingClientRect();
+        const vpWidth = vpRect?.width ?? 320;
+        const rawLocalX = vpRect ? pending.startClientX - vpRect.left : vpWidth / 2;
+        const pointerLocalX = Math.max(
+          REORDER_TILE_W / 2,
+          Math.min(Math.max(REORDER_TILE_W / 2, vpWidth - REORDER_TILE_W / 2), rawLocalX)
+        );
+        const clampedFrom = Math.max(0, Math.min(currentSegs.length - 1, pending.index));
+
+        dragStateRef.current = {
+          type: "clip-reorder",
+          sceneId: pending.sceneId,
+          fromIndex: clampedFrom,
+          toIndex: clampedFrom,
+          pointerId: pending.pointerId,
+          startClientX: pending.startClientX,
+          currentClientX: pending.startClientX,
+        };
+        setActiveSceneId(pending.sceneId);
+        const nextReorder: ClipReorderState = {
+          sceneId: pending.sceneId,
+          fromIndex: clampedFrom,
+          toIndex: clampedFrom,
+          pointerLocalX,
+        };
+        clipReorderRef.current = nextReorder;
+        setClipReorder(nextReorder);
+      }, CLIP_LONG_PRESS_MS);
+    },
+    [cancelClipLongPress, showReorderHint]
+  );
+
+  // Align minimized reorder strip so the held clip starts right under the user's pointer
+  const activeReorderSceneId = clipReorder?.sceneId ?? null;
+  useIsomorphicLayoutEffect(() => {
+    if (!activeReorderSceneId) return;
+    const strip = reorderStripRef.current;
+    const current = clipReorderRef.current;
+    if (!strip || !current) return;
+    const maxScroll = Math.max(0, strip.scrollWidth - strip.clientWidth);
+    if (maxScroll <= 0) return;
+    const tileCenterX =
+      REORDER_STRIP_PAD + current.fromIndex * REORDER_TILE_STRIDE + REORDER_TILE_W / 2;
+    const desiredScroll = Math.max(0, Math.min(maxScroll, tileCenterX - current.pointerLocalX));
+    strip.scrollLeft = desiredScroll;
+  }, [activeReorderSceneId]);
+
+  // Smooth horizontal auto-scroll when dragging a minimized clip near the viewport edges
+  useEffect(() => {
+    if (!activeReorderSceneId) return;
+    let rafId = 0;
+    const tick = () => {
+      const drag = dragStateRef.current;
+      if (!drag || drag.type !== "clip-reorder") return;
+      const vpRect = viewportRef.current?.getBoundingClientRect();
+      const strip = reorderStripRef.current;
+      if (vpRect && strip && strip.scrollWidth > strip.clientWidth) {
+        const localX = drag.currentClientX - vpRect.left;
+        const edgeZone = 44;
+        let delta = 0;
+        if (localX < edgeZone) {
+          delta = -Math.max(2, Math.round(((edgeZone - localX) / edgeZone) * 9));
+        } else if (localX > vpRect.width - edgeZone) {
+          delta = Math.max(2, Math.round(((localX - (vpRect.width - edgeZone)) / edgeZone) * 9));
+        }
+        if (delta !== 0) {
+          const prevScroll = strip.scrollLeft;
+          const maxScroll = Math.max(0, strip.scrollWidth - strip.clientWidth);
+          const nextScroll = Math.max(0, Math.min(maxScroll, prevScroll + delta));
+          if (nextScroll !== prevScroll) {
+            strip.scrollLeft = nextScroll;
+            const { toIndex, pointerLocalX } = computeReorderMetrics(
+              drag.currentClientX,
+              segmentsRef.current.length
+            );
+            if (toIndex !== drag.toIndex) {
+              drag.toIndex = toIndex;
+              if (typeof navigator !== "undefined" && typeof navigator.vibrate === "function") {
+                try {
+                  navigator.vibrate(8);
+                } catch {
+                  // ignore
+                }
+              }
+            }
+            const updated: ClipReorderState = {
+              sceneId: drag.sceneId,
+              fromIndex: drag.fromIndex,
+              toIndex: drag.toIndex,
+              pointerLocalX,
+            };
+            clipReorderRef.current = updated;
+            setClipReorder(updated);
+          }
+        }
+      }
+      rafId = window.requestAnimationFrame(tick);
+    };
+    rafId = window.requestAnimationFrame(tick);
+    return () => {
+      if (rafId) window.cancelAnimationFrame(rafId);
+    };
+  }, [activeReorderSceneId, computeReorderMetrics]);
 
   // Reset undo & drag state only when switching to a genuinely different source project
   const projectIdentity = activeTimelineProject
@@ -321,6 +611,14 @@ export function ProjectTimelineEditor({
       window.clearTimeout(previewSeekTimerRef.current);
       previewSeekTimerRef.current = null;
     }
+    cancelClipLongPress();
+    if (reorderHintTimerRef.current !== null) {
+      window.clearTimeout(reorderHintTimerRef.current);
+      reorderHintTimerRef.current = null;
+    }
+    setReorderHint(null);
+    clipReorderRef.current = null;
+    setClipReorder(null);
     queuedPreviewSourceSecRef.current = null;
     if (isPreviewOverrideActiveRef.current) {
       isPreviewOverrideActiveRef.current = false;
@@ -338,7 +636,7 @@ export function ProjectTimelineEditor({
     setDragSubPreview(null);
     setDragBadge(null);
     setActiveSceneId(null);
-    setActiveSubId(null);
+    setLocalActiveSubId(null);
     setShowRangeFill(false);
     setRangeNotice(null);
     setBaselineSubRegions(
@@ -376,12 +674,12 @@ export function ProjectTimelineEditor({
     }
   }, [segments, activeSceneId]);
 
-  // Clear activeSubId if the subtitle no longer exists
+  // Clear localActiveSubId if the subtitle no longer exists
   useEffect(() => {
-    if (activeSubId && !project?.subtitles.some((s) => s.id === activeSubId)) {
-      setActiveSubId(null);
+    if (localActiveSubId && !project?.subtitles.some((s) => s.id === localActiveSubId)) {
+      setLocalActiveSubId(null);
     }
-  }, [project?.subtitles, activeSubId]);
+  }, [project?.subtitles, localActiveSubId]);
 
   // Measure timeline viewport width so center playhead stays exact
   useEffect(() => {
@@ -398,31 +696,107 @@ export function ProjectTimelineEditor({
     return () => ro.disconnect();
   }, [projectIdentity, isCollapsed]);
 
-  // Capture filmstrip frames for local videos
+  // Stable rounded key for kept clip source intervals so thumbnails sample the actual kept clips
+  const clipThumbSpanKey = useMemo(() => {
+    if (!segments.length) return `full:${Math.round(sourceDuration)}`;
+    return segments
+      .map((s) => `${Math.floor(s.startSec)}-${Math.ceil(s.endSec)}`)
+      .join("|");
+  }, [segments, sourceDuration]);
+
+  // Capture crisp, aspect-accurate filmstrip frames sampled across actual kept clips
   useEffect(() => {
     if (!activeTimelineProject) {
       setThumbnails([]);
+      thumbCacheRef.current = { localUrl: "", aspect: 9 / 16, byBucket: new Map() };
       return;
     }
 
     if (!activeTimelineProject.localUrl) {
       const fallback = activeTimelineProject.keyframeUrls[0] || "";
-      setThumbnails(fallback ? [fallback] : []);
+      setThumbnails(fallback ? [{ sourceSec: 0, url: fallback }] : []);
       return;
     }
 
     if (isCollapsed) return;
 
+    const currentLocalUrl = activeTimelineProject.localUrl;
+    if (thumbCacheRef.current.localUrl !== currentLocalUrl) {
+      thumbCacheRef.current = {
+        localUrl: currentLocalUrl,
+        aspect: 9 / 16,
+        byBucket: new Map(),
+      };
+      setThumbnails([]);
+    }
+
+    // Build target source timestamps distributed proportionally across the kept clips
+    const rawIntervals =
+      segments.length > 0
+        ? segments.map((s) => ({
+            start: Math.max(0, s.startSec),
+            end: Math.max(s.startSec + 0.1, s.endSec),
+          }))
+        : [{ start: 0, end: Math.max(1, activeTimelineProject.sourceDurationSec || sourceDuration) }];
+
+    const totalKeptSpan = rawIntervals.reduce(
+      (sum, it) => sum + Math.max(0.1, it.end - it.start),
+      0
+    );
+    const targetCount = Math.min(36, Math.max(12, Math.ceil(totalKeptSpan / 2)));
+
+    const sampleTimes: number[] = [];
+    for (let i = 0; i < targetCount; i++) {
+      const offset = ((i + 0.5) / targetCount) * totalKeptSpan;
+      let acc = 0;
+      let chosen = rawIntervals[0].start;
+      for (const it of rawIntervals) {
+        const len = Math.max(0.1, it.end - it.start);
+        if (offset <= acc + len || it === rawIntervals[rawIntervals.length - 1]) {
+          chosen = it.start + Math.min(len, Math.max(0, offset - acc));
+          break;
+        }
+        acc += len;
+      }
+      sampleTimes.push(chosen);
+    }
+
+    // Deduplicate against cached 0.5s buckets so previously captured frames never flicker or re-decode
+    const cache = thumbCacheRef.current;
+    const toCapture: { sec: number; bucket: number }[] = [];
+    const seenBuckets = new Set<number>();
+    for (const sec of sampleTimes) {
+      const bucket = Math.round(sec * 2);
+      if (seenBuckets.has(bucket)) continue;
+      seenBuckets.add(bucket);
+      if (!cache.byBucket.has(bucket)) {
+        toCapture.push({ sec, bucket });
+      }
+    }
+
+    const flushCacheToState = () => {
+      const sorted = Array.from(cache.byBucket.values()).sort(
+        (a, b) => a.sourceSec - b.sourceSec
+      );
+      setThumbnails(sorted);
+    };
+
+    if (cache.byBucket.size > 0) {
+      setThumbAspect(cache.aspect);
+      flushCacheToState();
+    }
+    if (toCapture.length === 0) return;
+
     let cancelled = false;
     const estDur = Math.max(1, activeTimelineProject.sourceDurationSec || sourceDuration);
-    const targetCount = Math.min(12, Math.max(6, Math.ceil(estDur / 6)));
     const hiddenVid = document.createElement("video");
     hiddenVid.muted = true;
     hiddenVid.playsInline = true;
-    hiddenVid.preload = "metadata";
+    hiddenVid.preload = "auto";
 
     const releaseHiddenVid = () => {
       hiddenVid.onloadeddata = null;
+      hiddenVid.onloadedmetadata = null;
       hiddenVid.onerror = null;
       try {
         hiddenVid.pause();
@@ -435,15 +809,21 @@ export function ProjectTimelineEditor({
 
     const captureFrames = async () => {
       // Let primary 9:16 video stage initialize decoder cleanly first
-      await new Promise((r) => setTimeout(r, 420));
+      await new Promise((r) => setTimeout(r, cache.byBucket.size === 0 ? 320 : 120));
       if (cancelled) return;
-      hiddenVid.src = activeTimelineProject.localUrl!;
+      hiddenVid.src = currentLocalUrl;
 
       await new Promise<void>((resolve) => {
-        if (hiddenVid.readyState >= 1) return resolve();
-        hiddenVid.onloadeddata = () => resolve();
-        hiddenVid.onerror = () => resolve();
-        setTimeout(resolve, 2500);
+        if (hiddenVid.readyState >= 2 && hiddenVid.videoWidth > 0) return resolve();
+        let settled = false;
+        const done = () => {
+          if (settled) return;
+          settled = true;
+          resolve();
+        };
+        hiddenVid.onloadeddata = done;
+        hiddenVid.onerror = done;
+        setTimeout(done, 3000);
       });
       if (cancelled) return;
 
@@ -451,33 +831,67 @@ export function ProjectTimelineEditor({
         Number.isFinite(hiddenVid.duration) && hiddenVid.duration > 0
           ? hiddenVid.duration
           : estDur;
+      const vw = hiddenVid.videoWidth || 720;
+      const vh = hiddenVid.videoHeight || 1280;
+      const rawAspect = vw > 0 && vh > 0 ? vw / vh : 9 / 16;
+      const clampedAspect = Math.max(0.5625, Math.min(1.78, rawAspect));
+      cache.aspect = clampedAspect;
+      setThumbAspect(clampedAspect);
+
+      // Crisp 2x Retina canvas matching true video aspect ratio (no stretching)
+      const ch = 128;
+      const cw = Math.max(72, Math.min(228, Math.round(ch * clampedAspect)));
       const canvas = document.createElement("canvas");
-      const cw = 96;
-      const ch = 56;
       canvas.width = cw;
       canvas.height = ch;
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
 
-      const frames: string[] = [];
-      for (let i = 0; i < targetCount; i++) {
+      // Center-crop cover source rect so unusual aspect ratios never distort
+      const targetRatio = cw / ch;
+      let sx = 0;
+      let sy = 0;
+      let sw = vw;
+      let sh = vh;
+      if (rawAspect > targetRatio) {
+        sw = vh * targetRatio;
+        sx = (vw - sw) * 0.5;
+      } else if (rawAspect < targetRatio) {
+        sh = vw / targetRatio;
+        sy = (vh - sh) * 0.5;
+      }
+
+      let capturedCount = 0;
+      for (const item of toCapture) {
         if (cancelled) break;
-        const t = Math.min(actualDur - 0.05, ((i + 0.5) / targetCount) * actualDur);
-        hiddenVid.currentTime = Math.max(0, t);
+        const clampedT = Math.max(0, Math.min(Math.max(0, actualDur - 0.05), item.sec));
+        hiddenVid.currentTime = clampedT;
         await new Promise<void>((res) => {
-          const onSeeked = () => {
+          let settled = false;
+          const finish = () => {
+            if (settled) return;
+            settled = true;
             hiddenVid.removeEventListener("seeked", onSeeked);
             res();
           };
+          const onSeeked = () => finish();
           hiddenVid.addEventListener("seeked", onSeeked, { once: true });
-          setTimeout(res, 450);
+          setTimeout(finish, 1400);
         });
         if (cancelled) break;
+        // Wait one paint frame so the decoded video frame is ready on GPU
+        await new Promise<void>((r) => requestAnimationFrame(() => r()));
+        if (cancelled) break;
+
         try {
-          ctx.drawImage(hiddenVid, 0, 0, cw, ch);
-          frames.push(canvas.toDataURL("image/jpeg", 0.55));
-          if (frames.length % 3 === 0 || frames.length === targetCount) {
-            setThumbnails([...frames]);
+          ctx.drawImage(hiddenVid, sx, sy, sw, sh, 0, 0, cw, ch);
+          const dataUrl = canvas.toDataURL("image/jpeg", 0.82);
+          cache.byBucket.set(item.bucket, { sourceSec: clampedT, url: dataUrl });
+          capturedCount++;
+          if (capturedCount === 1 || capturedCount % 3 === 0 || capturedCount === toCapture.length) {
+            flushCacheToState();
           }
         } catch {
           break;
@@ -491,7 +905,7 @@ export function ProjectTimelineEditor({
       cancelled = true;
       releaseHiddenVid();
     };
-  }, [project?.localUrl, isCollapsed]);
+  }, [project?.localUrl, isCollapsed, clipThumbSpanKey]);
 
   // Smoothly throttle rapid drag seeks on Stage9x16 so local video playback stays fluid
   const dispatchSeek = useCallback(
@@ -802,6 +1216,67 @@ export function ProjectTimelineEditor({
 
   const cutSpeechRegions = controlledCutSpeechRegions ?? computedCutSpeechRegions;
 
+  const aiSubtitleGuides = useMemo(() => {
+    const subs = activeTimelineProject?.subtitles ?? [];
+    if (subs.length === 0 || segments.length === 0) return [];
+    const list: Array<{
+      key: string;
+      subId: string;
+      subIdx: number;
+      cutStart: number;
+      cutEnd: number;
+      currentStart: number;
+      currentEnd: number;
+    }> = [];
+    subs.forEach((sub, subIdx) => {
+      const origSrcStart =
+        typeof sub.aiSourceStartSec === "number" && Number.isFinite(sub.aiSourceStartSec)
+          ? sub.aiSourceStartSec
+          : sub.sourceStartSec;
+      const origSrcEnd =
+        typeof sub.aiSourceEndSec === "number" && Number.isFinite(sub.aiSourceEndSec)
+          ? sub.aiSourceEndSec
+          : sub.sourceEndSec;
+      if (!Number.isFinite(origSrcStart) || !Number.isFinite(origSrcEnd) || origSrcEnd <= origSrcStart) {
+        return;
+      }
+
+      const matchesCurrentSource =
+        !sub.isManuallyEdited &&
+        Math.abs(origSrcStart - sub.sourceStartSec) < 0.005 &&
+        Math.abs(origSrcEnd - sub.sourceEndSec) < 0.005;
+
+      if (matchesCurrentSource) {
+        list.push({
+          key: `ai-guide-${sub.id}-0`,
+          subId: sub.id,
+          subIdx,
+          cutStart: sub.startTime,
+          cutEnd: sub.endTime,
+          currentStart: sub.startTime,
+          currentEnd: sub.endTime,
+        });
+        return;
+      }
+
+      const projected = projectSpeechRegionsToCutTimeline(segments, [
+        { sourceStartSec: origSrcStart, sourceEndSec: origSrcEnd },
+      ]);
+      projected.forEach((proj, pIdx) => {
+        list.push({
+          key: `ai-guide-${sub.id}-${pIdx}`,
+          subId: sub.id,
+          subIdx,
+          cutStart: Number(proj.cutStart.toFixed(2)),
+          cutEnd: Number(proj.cutEnd.toFixed(2)),
+          currentStart: sub.startTime,
+          currentEnd: sub.endTime,
+        });
+      });
+    });
+    return list;
+  }, [activeTimelineProject?.subtitles, segments]);
+
   const unmatchedSpeechGaps = useMemo(
     () =>
       project
@@ -923,9 +1398,14 @@ export function ProjectTimelineEditor({
 
   useEffect(() => {
     return () => {
+      cancelClipLongPress();
+      if (reorderHintTimerRef.current !== null) {
+        window.clearTimeout(reorderHintTimerRef.current);
+        reorderHintTimerRef.current = null;
+      }
       stopWindowPointerTracking();
     };
-  }, [stopWindowPointerTracking]);
+  }, [cancelClipLongPress, stopWindowPointerTracking]);
 
   const handlePointerDownViewport = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0 && e.pointerType === "mouse") return;
@@ -945,8 +1425,16 @@ export function ProjectTimelineEditor({
     startWindowPointerTracking();
 
     if (activePointersRef.current.size >= 2) {
+      cancelClipLongPress();
       if (isPlaying) onPause();
       updateDragState(null);
+      clipReorderRef.current = null;
+      setClipReorder(null);
+      trimPreviewRef.current = null;
+      setTrimPreview(null);
+      setDragSubPreview(null);
+      frozenTrackTimeRef.current = null;
+      setFrozenTrackTime(null);
       setDragBadge(null);
       const pts = Array.from(activePointersRef.current.values());
       const dist = Math.max(10, Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y));
@@ -980,6 +1468,7 @@ export function ProjectTimelineEditor({
     seg: ClipSegment
   ) => {
     e.stopPropagation();
+    cancelClipLongPress();
     if (e.button !== 0 && e.pointerType === "mouse") return;
     e.preventDefault();
     blurFocusedButton();
@@ -1025,6 +1514,7 @@ export function ProjectTimelineEditor({
     subIndex: number
   ) => {
     e.stopPropagation();
+    cancelClipLongPress();
     if (e.button !== 0 && e.pointerType === "mouse") return;
     blurFocusedButton();
     try {
@@ -1036,7 +1526,7 @@ export function ProjectTimelineEditor({
     if (isPlaying) onPause();
 
     lastDragTargetRef.current = null;
-    setActiveSubId(sub.id);
+    selectSub(sub.id, { scrollList: false });
     setFrozenTrackTime(cutTimeRef.current);
     setDragSubPreview({
       id: sub.id,
@@ -1063,7 +1553,7 @@ export function ProjectTimelineEditor({
       const pts = Array.from(activePointersRef.current.values());
       const dist = Math.max(10, Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y));
       const nextZoom = clampZoom(
-        Math.round(pinchStartRef.current.pxPerSec * (dist / pinchStartRef.current.dist))
+        pinchStartRef.current.pxPerSec * (dist / pinchStartRef.current.dist)
       );
       setPxPerSec(nextZoom);
       return;
@@ -1072,6 +1562,46 @@ export function ProjectTimelineEditor({
     const activeDrag = dragStateRef.current;
     if (!activeDrag) return;
     if ("cancelable" in e && e.cancelable) e.preventDefault();
+
+    if (activeDrag.type === "clip-reorder") {
+      activeDrag.currentClientX = e.clientX;
+      const { toIndex, pointerLocalX } = computeReorderMetrics(
+        e.clientX,
+        segmentsRef.current.length
+      );
+      if (toIndex !== activeDrag.toIndex) {
+        activeDrag.toIndex = toIndex;
+        if (typeof navigator !== "undefined" && typeof navigator.vibrate === "function") {
+          try {
+            navigator.vibrate(8);
+          } catch {
+            // ignore
+          }
+        }
+      }
+      const nextReorder: ClipReorderState = {
+        sceneId: activeDrag.sceneId,
+        fromIndex: activeDrag.fromIndex,
+        toIndex: activeDrag.toIndex,
+        pointerLocalX,
+      };
+      clipReorderRef.current = nextReorder;
+      setClipReorder(nextReorder);
+      return;
+    }
+
+    if (longPressPendingRef.current) {
+      const pending = longPressPendingRef.current;
+      const holdMoveDist = Math.hypot(
+        e.clientX - pending.startClientX,
+        e.clientY - pending.startClientY
+      );
+      if (holdMoveDist < 8) {
+        return;
+      }
+      cancelClipLongPress();
+    }
+
     const dx = e.clientX - activeDrag.startClientX;
 
     if (activeDrag.type === "scrub") {
@@ -1167,62 +1697,95 @@ export function ProjectTimelineEditor({
       return;
     }
 
-    if (activeDrag.type === "sub-move") {
-      const dur = Math.max(0.2, activeDrag.origEndTime - activeDrag.origStartTime);
-      const maxTotal = Math.max(dur, totalCutDurationRef.current || dur);
-      const nextStart = roundTenth(
-        Math.max(0, Math.min(maxTotal - dur, activeDrag.origStartTime + dt))
+    if (
+      activeDrag.type === "sub-move" ||
+      activeDrag.type === "sub-trim-start" ||
+      activeDrag.type === "sub-trim-end"
+    ) {
+      const sortedSubs = [...(projectRef.current?.subtitles ?? [])].sort(
+        (a, b) => a.startTime - b.startTime || a.endTime - b.endTime
       );
-      const nextEnd = roundTenth(nextStart + dur);
-      if (Math.abs(nextStart - activeDrag.origStartTime) >= 0.01) {
+      const curIdx = sortedSubs.findIndex((s) => s.id === activeDrag.subId);
+      const prevSub = curIdx > 0 ? sortedSubs[curIdx - 1] : null;
+      const nextSub =
+        curIdx >= 0 && curIdx < sortedSubs.length - 1 ? sortedSubs[curIdx + 1] : null;
+      const maxTotal = Math.max(
+        activeDrag.origEndTime,
+        totalCutDurationRef.current || activeDrag.origEndTime
+      );
+      const prevEndBound = prevSub ? Math.max(0, prevSub.endTime) : 0;
+      const nextStartBound = nextSub ? Math.min(maxTotal, nextSub.startTime) : maxTotal;
+
+      if (activeDrag.type === "sub-move") {
+        const dur = Math.max(0.2, activeDrag.origEndTime - activeDrag.origStartTime);
+        const minStart =
+          prevEndBound <= activeDrag.origStartTime
+            ? prevEndBound
+            : Math.min(activeDrag.origStartTime, prevEndBound);
+        const rawMaxStart = Math.max(0, nextStartBound - dur);
+        const maxStart =
+          rawMaxStart >= minStart
+            ? rawMaxStart
+            : Math.max(minStart, activeDrag.origStartTime);
+        const unclamped = roundTenth(activeDrag.origStartTime + dt);
+        const nextStart = Number(Math.max(minStart, Math.min(maxStart, unclamped)).toFixed(2));
+        const nextEnd = Number(
+          Math.min(Math.max(nextStart + 0.2, nextStartBound), nextStart + dur).toFixed(2)
+        );
         const preview = { id: activeDrag.subId, startTime: nextStart, endTime: nextEnd };
         dragSubPreviewRef.current = preview;
         setDragSubPreview(preview);
         lastDragTargetRef.current = { cutTime: nextStart, sourceSec: nextStart };
         dispatchSeek(nextStart);
         setDragBadge({ label: `Sub #${activeDrag.subIndex + 1}`, sec: nextStart });
+        return;
       }
-      return;
-    }
 
-    if (activeDrag.type === "sub-trim-start") {
-      const nextStart = roundTenth(
-        Math.max(0, Math.min(activeDrag.origEndTime - 0.2, activeDrag.origStartTime + dt))
-      );
-      const preview = {
-        id: activeDrag.subId,
-        startTime: nextStart,
-        endTime: activeDrag.origEndTime,
-      };
-      dragSubPreviewRef.current = preview;
-      setDragSubPreview(preview);
-      lastDragTargetRef.current = { cutTime: nextStart, sourceSec: nextStart };
-      dispatchSeek(nextStart);
-      setDragBadge({ label: `Sub #${activeDrag.subIndex + 1} In`, sec: nextStart });
-      return;
-    }
+      if (activeDrag.type === "sub-trim-start") {
+        const upperLimit = Math.max(0, activeDrag.origEndTime - 0.2);
+        const lowerLimit =
+          prevEndBound <= upperLimit ? prevEndBound : Math.min(activeDrag.origStartTime, upperLimit);
+        const unclamped = roundTenth(activeDrag.origStartTime + dt);
+        const nextStart = Number(Math.max(lowerLimit, Math.min(upperLimit, unclamped)).toFixed(2));
+        const preview = {
+          id: activeDrag.subId,
+          startTime: nextStart,
+          endTime: activeDrag.origEndTime,
+        };
+        dragSubPreviewRef.current = preview;
+        setDragSubPreview(preview);
+        lastDragTargetRef.current = { cutTime: nextStart, sourceSec: nextStart };
+        dispatchSeek(nextStart);
+        setDragBadge({ label: `Sub #${activeDrag.subIndex + 1} In`, sec: nextStart });
+        return;
+      }
 
-    if (activeDrag.type === "sub-trim-end") {
-      const maxTotal = Math.max(activeDrag.origStartTime + 0.2, totalCutDurationRef.current);
-      const nextEnd = roundTenth(
-        Math.min(maxTotal, Math.max(activeDrag.origStartTime + 0.2, activeDrag.origEndTime + dt))
-      );
-      const previewCut = Math.max(activeDrag.origStartTime, nextEnd - 0.05);
-      const preview = {
-        id: activeDrag.subId,
-        startTime: activeDrag.origStartTime,
-        endTime: nextEnd,
-      };
-      dragSubPreviewRef.current = preview;
-      setDragSubPreview(preview);
-      lastDragTargetRef.current = { cutTime: previewCut, sourceSec: nextEnd };
-      dispatchSeek(previewCut);
-      setDragBadge({ label: `Sub #${activeDrag.subIndex + 1} Out`, sec: nextEnd });
+      if (activeDrag.type === "sub-trim-end") {
+        const lowerLimit = activeDrag.origStartTime + 0.2;
+        const upperLimit =
+          nextStartBound >= lowerLimit
+            ? nextStartBound
+            : Math.max(activeDrag.origEndTime, lowerLimit);
+        const unclamped = roundTenth(activeDrag.origEndTime + dt);
+        const nextEnd = Number(Math.min(upperLimit, Math.max(lowerLimit, unclamped)).toFixed(2));
+        const previewCut = Math.max(activeDrag.origStartTime, nextEnd - 0.05);
+        const preview = {
+          id: activeDrag.subId,
+          startTime: activeDrag.origStartTime,
+          endTime: nextEnd,
+        };
+        dragSubPreviewRef.current = preview;
+        setDragSubPreview(preview);
+        lastDragTargetRef.current = { cutTime: previewCut, sourceSec: nextEnd };
+        dispatchSeek(previewCut);
+        setDragBadge({ label: `Sub #${activeDrag.subIndex + 1} Out`, sec: nextEnd });
+      }
     }
   };
 
   const handlePointerUpAny = useCallback(
     (e?: React.PointerEvent<HTMLElement> | PointerEvent) => {
+      cancelClipLongPress();
       if (e && "pointerId" in e) {
         activePointersRef.current.delete(e.pointerId);
         if (activePointersRef.current.size < 2) {
@@ -1244,6 +1807,41 @@ export function ProjectTimelineEditor({
       }
       dragStateRef.current = null;
 
+      if (activeDrag.type === "clip-reorder") {
+        const { fromIndex, toIndex, sceneId } = activeDrag;
+        clipReorderRef.current = null;
+        setClipReorder(null);
+        tappedClipRef.current = null;
+        tappedSubRef.current = null;
+
+        if (fromIndex !== toIndex) {
+          const nextScenes = [...normalizedScenesRef.current];
+          if (fromIndex >= 0 && fromIndex < nextScenes.length) {
+            const [moved] = nextScenes.splice(fromIndex, 1);
+            if (moved) {
+              const clampedTo = Math.max(0, Math.min(nextScenes.length, toIndex));
+              nextScenes.splice(clampedTo, 0, moved);
+              onUpdateScenes(nextScenes);
+              let movedCutStart = 0;
+              for (let i = 0; i < clampedTo; i++) {
+                movedCutStart += Math.max(0.1, nextScenes[i].endSec - nextScenes[i].startSec);
+              }
+              setActiveSceneId(sceneId);
+              dispatchSeek(movedCutStart, true);
+            }
+          }
+        } else {
+          setActiveSceneId(sceneId);
+        }
+
+        setDragBadge(null);
+        updateDragState(null);
+        if (activePointersRef.current.size === 0) {
+          stopWindowPointerTracking();
+        }
+        return;
+      }
+
       let subTapSeekTarget: number | null = null;
       if (activeDrag.type === "scrub") {
         const hadClipTap = Boolean(tappedClipRef.current && !tappedClipRef.current.moved);
@@ -1256,11 +1854,11 @@ export function ProjectTimelineEditor({
           const tappedId = tappedClipRef.current.sceneId;
           setActiveSceneId((cur) => (cur === tappedId ? null : tappedId));
         } else if (hadSubTap && tappedSubRef.current) {
-          setActiveSubId(tappedSubRef.current.subId);
+          selectSub(tappedSubRef.current.subId, { scrollList: true });
           subTapSeekTarget = tappedSubRef.current.startTime;
         } else if (isUnmovedTouchTap && !hadClipTap && !hadSubTap) {
           setActiveSceneId(null);
-          setActiveSubId(null);
+          selectSub(null, { scrollList: false });
         }
       }
       tappedClipRef.current = null;
@@ -1298,6 +1896,7 @@ export function ProjectTimelineEditor({
         } else if (activeDrag.type === "sub-move" && !target) {
           dispatchSeek(activeDrag.origStartTime, true);
         }
+        selectSub(activeDrag.subId, { scrollList: true });
         lastDragTargetRef.current = null;
         dragSubPreviewRef.current = null;
         setDragSubPreview(null);
@@ -1351,13 +1950,16 @@ export function ProjectTimelineEditor({
       dispatchSeek,
       onUpdateScenes,
       onUpdateSubtitleTiming,
+      selectSub,
       stopWindowPointerTracking,
       updateDragState,
+      cancelClipLongPress,
     ]
   );
 
   const handlePointerCancelAny = useCallback(
     (e?: PointerEvent) => {
+      cancelClipLongPress();
       if (e && "pointerId" in e) {
         activePointersRef.current.delete(e.pointerId);
         if (activePointersRef.current.size < 2) {
@@ -1373,6 +1975,11 @@ export function ProjectTimelineEditor({
       tappedClipRef.current = null;
       tappedSubRef.current = null;
       lastDragTargetRef.current = null;
+
+      if (activeDrag?.type === "clip-reorder" || clipReorderRef.current) {
+        clipReorderRef.current = null;
+        setClipReorder(null);
+      }
 
       if (activeDrag?.type === "scrub") {
         liveScrubCutRef.current = null;
@@ -1403,7 +2010,7 @@ export function ProjectTimelineEditor({
         stopWindowPointerTracking();
       }
     },
-    [clearPreviewSourceSeekState, stopWindowPointerTracking]
+    [cancelClipLongPress, clearPreviewSourceSeekState, stopWindowPointerTracking]
   );
 
   pointerMoveHandlerRef.current = handlePointerMoveViewport;
@@ -1421,7 +2028,7 @@ export function ProjectTimelineEditor({
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
         const factor = Math.exp(-e.deltaY * 0.008);
-        setPxPerSec((z) => clampZoom(Math.round(z * factor)));
+        setPxPerSec((z) => clampZoom(z * factor));
         return;
       }
       const isHorizontalScroll =
@@ -1473,11 +2080,25 @@ export function ProjectTimelineEditor({
     };
   }, [projectIdentity, isCollapsed]);
 
+  const handleTimelineContextMenu = (e: React.MouseEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement | null;
+    if (target?.closest("input, textarea")) return;
+    e.preventDefault();
+  };
+
   // Empty "No video" state when no active project media is loaded
   if (!activeTimelineProject) {
     if (dockMode) {
       return (
-        <div className="border-t border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] overflow-hidden">
+        <div
+          onContextMenu={handleTimelineContextMenu}
+          onDragStart={(e) => e.preventDefault()}
+          className={`timeline-no-callout ${
+            fillHeight
+              ? "flex-1 min-h-0 flex flex-col justify-center bg-white dark:bg-[#0d1022] overflow-hidden"
+              : "border-t border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] overflow-hidden"
+          }`}
+        >
           <div className="px-4 py-2.5 flex items-center justify-between gap-3">
             <div className="flex items-center gap-2.5 min-w-0">
               <div className="w-7 h-7 rounded-md bg-teal-50 dark:bg-teal-950/60 border border-teal-200/70 dark:border-teal-500/25 flex items-center justify-center text-teal-700 dark:text-teal-400 shrink-0">
@@ -1488,13 +2109,15 @@ export function ProjectTimelineEditor({
                   Timeline Dock
                 </p>
                 <p className="text-[11px] text-[#4d597d] dark:text-[#919ec4] truncate">
-                  Upload a video and generate subtitles in Upload &amp; Cut to unlock the multi-track timeline.
+                  {hideCaptions
+                    ? "Upload a video on the 9:16 Stage to split, trim, and arrange clips on the timeline."
+                    : "Upload a video and generate subtitles in Upload & Cut to unlock the multi-track timeline."}
                 </p>
               </div>
             </div>
 
             <div className="flex items-center gap-2 shrink-0">
-              {onGoToScenes && (
+              {!hideCaptions && onGoToScenes && (
                 <button
                   type="button"
                   onClick={onGoToScenes}
@@ -1520,7 +2143,11 @@ export function ProjectTimelineEditor({
     }
 
     return (
-      <div className="flex flex-col gap-4 pb-6">
+      <div
+        onContextMenu={handleTimelineContextMenu}
+        onDragStart={(e) => e.preventDefault()}
+        className="timeline-no-callout flex flex-col gap-4 pb-6"
+      >
         <div className="w-full aspect-video rounded-lg border border-dashed border-[#bcc9e6] dark:border-[#2e3644] bg-white dark:bg-[#0d1022] flex flex-col items-center justify-center text-center p-6 gap-3">
           <div className="w-10 h-10 rounded-lg bg-teal-50 dark:bg-teal-950/60 border border-teal-200/70 dark:border-teal-500/25 flex items-center justify-center text-teal-700 dark:text-teal-400">
             <Film className="w-5 h-5" />
@@ -1530,7 +2157,9 @@ export function ProjectTimelineEditor({
               No video
             </p>
             <p className="text-xs text-[#4d597d] dark:text-[#919ec4] leading-relaxed">
-              Generate subtitles first to edit your 9:16 video on the timeline before exporting.
+              {hideCaptions
+                ? "Upload a video to split, trim, and arrange clips on the timeline before exporting."
+                : "Generate subtitles first to edit your 9:16 video on the timeline before exporting."}
             </p>
           </div>
           {onGoToScenes && (
@@ -1539,7 +2168,7 @@ export function ProjectTimelineEditor({
               onClick={onGoToScenes}
               className="mt-1 h-9 px-4 rounded-md bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] text-xs font-semibold flex items-center gap-2 whitespace-nowrap cursor-pointer transition-colors"
             >
-              <span>Upload &amp; Cut</span>
+              <span>{hideCaptions ? "Edit" : "Upload & Cut"}</span>
             </button>
           )}
         </div>
@@ -1549,21 +2178,27 @@ export function ProjectTimelineEditor({
 
   return (
     <div
-      className={
+      onContextMenu={handleTimelineContextMenu}
+      onDragStart={(e) => e.preventDefault()}
+      className={`timeline-no-callout ${
         dockMode
-          ? "border-t border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] overflow-hidden flex flex-col"
-          : "flex flex-col gap-3.5 pb-6"
-      }
+          ? fillHeight
+            ? "flex-1 min-h-0 bg-white dark:bg-[#0d1022] overflow-hidden flex flex-col"
+            : "border-t border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] overflow-hidden flex flex-col"
+          : compactMobileExpanded
+            ? "bg-white dark:bg-[#0d1022] overflow-hidden flex flex-col"
+            : "flex flex-col gap-3.5 pb-6"
+      }`}
     >
       {/* Video Summary Header (Standard Mode) */}
-      {!dockMode && (
+      {!dockMode && !compactMobileExpanded && !hideHeader && (
         <div className="px-3 py-2 border-b border-[#d2dcf0] dark:border-[#21284c] flex items-center justify-between gap-3">
           <div className="min-w-0 flex-1">
             <p className="text-xs font-semibold text-[#0c1026] dark:text-[#f3f5fc] truncate">
               {activeTimelineProject.title}
             </p>
             <p className="text-[11px] font-mono-tabular text-[#4d597d] dark:text-[#919ec4]">
-              {isDraft ? "Local Video" : "9:16 Subtitle Video"} · {segments.length}{" "}
+              {isDraft || hideCaptions ? "9:16 Video" : "9:16 Subtitle Video"} · {segments.length}{" "}
               {segments.length === 1 ? "clip" : "clips"} · {roundTenth(totalCutDuration)}s
             </p>
           </div>
@@ -1574,47 +2209,46 @@ export function ProjectTimelineEditor({
       <div
         className={
           dockMode
-            ? `px-4 py-1.5 flex flex-wrap items-center justify-between gap-2 bg-[#f3f5fc] dark:bg-[#0d1022] ${
-                !isCollapsed || showDockScenes ? "border-b border-[#d2dcf0] dark:border-[#21284c]" : ""
+            ? `px-3.5 py-1.5 flex flex-wrap items-center justify-between gap-2 bg-[#f3f5fc]/70 dark:bg-[#0a0d1c] ${
+                !isCollapsed ? "border-b border-[#d2dcf0] dark:border-[#21284c]" : ""
               }`
-            : "flex flex-wrap items-center justify-between gap-2 px-0.5"
+            : compactMobileExpanded
+              ? "px-2.5 py-1 flex items-center justify-between gap-1.5 overflow-x-auto no-scrollbar bg-[#f3f5fc]/50 dark:bg-[#070814]/60 border-b border-[#d2dcf0] dark:border-[#21284c]"
+              : "flex flex-wrap items-center justify-between gap-2 px-0.5"
         }
       >
-        <div className="flex items-center gap-2.5 min-w-0">
-          {dockMode && (
-            <span className="text-[11px] font-semibold uppercase tracking-wider text-teal-700 dark:text-teal-400 shrink-0">
+        {hideTransport || compactMobileExpanded ? (
+          dockMode ? (
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-[#4d597d] dark:text-[#919ec4] shrink-0 select-none">
               Timeline
             </span>
-          )}
-          <button
-            type="button"
-            onClick={(e) => {
-              e.currentTarget.blur();
-              onTogglePlay();
-            }}
-            disabled={segments.length === 0}
-            aria-label={isPlaying ? "Pause video" : "Play video"}
-            className="h-7 w-7 rounded-md bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] flex items-center justify-center disabled:opacity-40 cursor-pointer shrink-0 transition-colors"
-          >
-            {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5 ml-0.5" />}
-          </button>
+          ) : null
+        ) : (
+          <div className="flex items-center gap-2 min-w-0">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.currentTarget.blur();
+                onTogglePlay();
+              }}
+              disabled={segments.length === 0}
+              aria-label={isPlaying ? "Pause video" : "Play video"}
+              className="h-7 w-7 rounded-md bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] flex items-center justify-center disabled:opacity-40 cursor-pointer shrink-0 transition-colors"
+            >
+              {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5 ml-0.5" />}
+            </button>
 
-          <span className="text-xs font-mono-tabular text-[#0c1026] dark:text-[#f3f5fc] shrink-0">
-            <span ref={timeReadoutRef} />
-            <span className="text-[#4d597d] dark:text-[#919ec4]">
-              {" "}
-              / {formatTimePrecise(totalCutDuration)}
+            <span className="text-xs font-mono-tabular text-[#0c1026] dark:text-[#f3f5fc] shrink-0">
+              <span ref={timeReadoutRef} />
+              <span className="text-[#4d597d] dark:text-[#919ec4]">
+                {" "}
+                / {formatTimePrecise(totalCutDuration)}
+              </span>
             </span>
-          </span>
+          </div>
+        )}
 
-          {dockMode && (
-            <span className="hidden xl:inline text-[11px] text-[#4d597d] dark:text-[#919ec4] truncate max-w-[260px]">
-              · {activeTimelineProject.title}
-            </span>
-          )}
-        </div>
-
-        <div className="flex flex-wrap items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-1">
           <button
             type="button"
             onClick={(e) => {
@@ -1623,9 +2257,9 @@ export function ProjectTimelineEditor({
             }}
             disabled={!canSplitAtPlayhead}
             title="Split clip at center playhead"
-            className="h-7 px-2.5 rounded-md bg-teal-700 text-white hover:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] disabled:opacity-40 disabled:cursor-not-allowed text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors"
+            className="h-7 px-2.5 rounded-sm bg-teal-700 text-white hover:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] disabled:opacity-40 disabled:cursor-not-allowed text-[11px] font-semibold flex items-center gap-1 whitespace-nowrap cursor-pointer transition-colors"
           >
-            <Scissors className="w-3.5 h-3.5" />
+            <Scissors className="w-3 h-3" />
             <span>Split</span>
           </button>
 
@@ -1637,39 +2271,43 @@ export function ProjectTimelineEditor({
             }}
             disabled={!targetClipForDelete}
             title="Delete selected clip"
-            className="h-7 px-2.5 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] hover:bg-red-50 hover:text-red-600 hover:border-red-200 dark:hover:bg-red-950/30 dark:hover:text-red-400 dark:hover:border-red-900 text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center gap-1.5 whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
+            className="h-7 px-2 rounded-sm hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40 dark:hover:text-red-400 text-[11px] font-medium text-[#4d597d] dark:text-[#919ec4] flex items-center gap-1 whitespace-nowrap disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors"
           >
             <Trash2 className="w-3.5 h-3.5" />
-            <span>Delete</span>
+            <span className="hidden sm:inline">Delete</span>
           </button>
 
-          <button
-            type="button"
-            onClick={(e) => {
-              e.currentTarget.blur();
-              handleUndo();
-            }}
-            disabled={!canUndo || !onUndo}
-            title="Undo last edit"
-            aria-label="Undo last edit"
-            className="h-7 px-2 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
-          >
-            <Undo2 className="w-3.5 h-3.5" />
-          </button>
+          {!hideUndoRedo && (
+            <>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  handleUndo();
+                }}
+                disabled={!canUndo || !onUndo}
+                title="Undo last edit"
+                aria-label="Undo last edit"
+                className="h-7 w-7 rounded-sm hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] flex items-center justify-center disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors"
+              >
+                <Undo2 className="w-3.5 h-3.5" />
+              </button>
 
-          <button
-            type="button"
-            onClick={(e) => {
-              e.currentTarget.blur();
-              handleRedo();
-            }}
-            disabled={!canRedo || !onRedo}
-            title="Redo last edit"
-            aria-label="Redo last edit"
-            className="h-7 px-2 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
-          >
-            <Redo2 className="w-3.5 h-3.5" />
-          </button>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  handleRedo();
+                }}
+                disabled={!canRedo || !onRedo}
+                title="Redo last edit"
+                aria-label="Redo last edit"
+                className="h-7 w-7 rounded-sm hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] flex items-center justify-center disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors"
+              >
+                <Redo2 className="w-3.5 h-3.5" />
+              </button>
+            </>
+          )}
 
           <button
             type="button"
@@ -1679,50 +2317,55 @@ export function ProjectTimelineEditor({
             }}
             title="Reset timeline edits"
             aria-label="Reset timeline edits"
-            className="h-7 px-2 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center gap-1 cursor-pointer transition-colors"
+            className="h-7 w-7 rounded-sm hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] flex items-center justify-center cursor-pointer transition-colors"
           >
             <RotateCcw className="w-3.5 h-3.5" />
           </button>
 
-          {!isDraft && onShiftAllSubtitles && (
-            <div
-              role="group"
-              aria-label="Subtitle timing micro-nudge"
-              className="inline-flex items-center border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] rounded-md overflow-hidden"
-            >
-              <span className="px-1.5 text-[10px] font-semibold uppercase tracking-wide text-[#4d597d] dark:text-[#919ec4] select-none">
-                Sub
-              </span>
-              <button
-                type="button"
-                disabled={!activeTimelineProject.subtitles.length}
-                onClick={(e) => {
-                  e.currentTarget.blur();
-                  onShiftAllSubtitles(-0.1);
-                }}
-                title="Nudge all subtitles -0.1s"
-                aria-label="Shift all subtitles -0.1s"
-                className="h-7 px-1.5 border-l border-[#d2dcf0] dark:border-[#21284c] text-[11px] font-mono-tabular font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors whitespace-nowrap"
+          {!isDraft && !hideCaptions && onShiftAllSubtitles && (
+            <>
+              <span aria-hidden="true" className="h-4 w-px bg-[#d2dcf0] dark:bg-[#21284c] mx-0.5" />
+              <div
+                role="group"
+                aria-label="Subtitle timing micro-nudge"
+                className="inline-flex items-center gap-0.5"
               >
-                -0.1s
-              </button>
-              <button
-                type="button"
-                disabled={!activeTimelineProject.subtitles.length}
-                onClick={(e) => {
-                  e.currentTarget.blur();
-                  onShiftAllSubtitles(0.1);
-                }}
-                title="Nudge all subtitles +0.1s"
-                aria-label="Shift all subtitles +0.1s"
-                className="h-7 px-1.5 border-l border-[#d2dcf0] dark:border-[#21284c] text-[11px] font-mono-tabular font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors whitespace-nowrap"
-              >
-                +0.1s
-              </button>
-            </div>
+                <span className="px-1 text-[10px] font-medium text-[#4d597d] dark:text-[#919ec4] select-none hidden sm:inline">
+                  Nudge
+                </span>
+                <button
+                  type="button"
+                  disabled={!activeTimelineProject.subtitles.length}
+                  onClick={(e) => {
+                    e.currentTarget.blur();
+                    onShiftAllSubtitles(-0.1);
+                  }}
+                  title="Nudge all subtitles -0.1s"
+                  aria-label="Shift all subtitles -0.1s"
+                  className="h-7 px-1.5 rounded-sm text-[11px] font-mono-tabular font-medium text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors whitespace-nowrap"
+                >
+                  -0.1s
+                </button>
+                <button
+                  type="button"
+                  disabled={!activeTimelineProject.subtitles.length}
+                  onClick={(e) => {
+                    e.currentTarget.blur();
+                    onShiftAllSubtitles(0.1);
+                  }}
+                  title="Nudge all subtitles +0.1s"
+                  aria-label="Shift all subtitles +0.1s"
+                  className="h-7 px-1.5 rounded-sm text-[11px] font-mono-tabular font-medium text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors whitespace-nowrap"
+                >
+                  +0.1s
+                </button>
+              </div>
+            </>
           )}
 
-          <div className="inline-flex items-center border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] rounded-md overflow-hidden ml-0.5">
+          <span aria-hidden="true" className="h-4 w-px bg-[#d2dcf0] dark:bg-[#21284c] mx-0.5" />
+
+          <div className="inline-flex items-center">
             <button
               type="button"
               onClick={(e) => {
@@ -1730,7 +2373,7 @@ export function ProjectTimelineEditor({
                 setPxPerSec((z) => clampZoom(Math.round(z * 0.75)));
               }}
               aria-label="Zoom out timeline"
-              className="h-7 w-7 flex items-center justify-center text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] cursor-pointer transition-colors"
+              className="h-7 w-7 rounded-sm flex items-center justify-center text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] cursor-pointer transition-colors"
             >
               <ZoomOut className="w-3.5 h-3.5" />
             </button>
@@ -1741,13 +2384,13 @@ export function ProjectTimelineEditor({
                 setPxPerSec((z) => clampZoom(Math.round(z * 1.35)));
               }}
               aria-label="Zoom in timeline"
-              className="h-7 w-7 flex items-center justify-center border-l border-[#d2dcf0] dark:border-[#21284c] text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] cursor-pointer transition-colors"
+              className="h-7 w-7 rounded-sm flex items-center justify-center text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] cursor-pointer transition-colors"
             >
               <ZoomIn className="w-3.5 h-3.5" />
             </button>
           </div>
 
-          {!isDraft && onTranscribeRange && (
+          {!isDraft && !hideCaptions && onTranscribeRange && (
             <button
               type="button"
               disabled={segments.length === 0 || Boolean(transcribingRange)}
@@ -1761,43 +2404,80 @@ export function ProjectTimelineEditor({
                 }
               }}
               title="AI transcribe missing speech in a time range"
-              className={`h-7 px-2.5 rounded-md border text-xs font-medium flex items-center gap-1.5 whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors ${
+              className={`h-7 px-2 rounded-sm text-[11px] font-medium flex items-center gap-1 whitespace-nowrap disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors ${
                 showRangeFill || transcribingRange
-                  ? "border-teal-600/70 bg-teal-50 text-teal-800 dark:border-teal-400/70 dark:bg-teal-950/60 dark:text-teal-200"
+                  ? "bg-teal-50 text-teal-800 dark:bg-teal-950/60 dark:text-teal-200 font-semibold"
                   : unmatchedSpeechGaps.length > 0
-                    ? "border-amber-500/60 bg-amber-50/90 text-amber-900 hover:bg-amber-100 dark:border-amber-400/50 dark:bg-amber-950/40 dark:text-amber-200 dark:hover:bg-amber-900/50"
-                    : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142]"
+                    ? "bg-amber-50/90 text-amber-900 hover:bg-amber-100 dark:bg-amber-950/40 dark:text-amber-200 dark:hover:bg-amber-900/50"
+                    : "text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142]"
               }`}
             >
               {transcribingRange ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                <Loader2 className="w-3 h-3 animate-spin" />
               ) : (
-                <Sparkles className="w-3.5 h-3.5" />
+                <Sparkles className="w-3 h-3" />
               )}
-              <span>{transcribingRange ? "Transcribing…" : "AI Fill"}</span>
+              <span>{transcribingRange ? "Filling…" : "AI Fill"}</span>
               {!transcribingRange && unmatchedSpeechGaps.length > 0 && (
-                <span className="px-1 py-0.2 rounded bg-amber-600/15 dark:bg-amber-400/20 text-[10px] font-mono-tabular font-bold">
+                <span className="px-1 rounded bg-amber-600/15 dark:bg-amber-400/20 text-[10px] font-mono-tabular font-bold">
                   {unmatchedSpeechGaps.length}
                 </span>
               )}
             </button>
           )}
 
-          {dockMode && (
-              <button
-              type="button"
-              onClick={() => setShowDockScenes((v) => !v)}
-              title="Show or hide kept clips list"
-              className={`h-7 px-2.5 rounded-md border text-xs font-medium flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors ${
-                showDockScenes
-                  ? "border-teal-600/70 bg-teal-50 text-teal-800 dark:border-teal-400/70 dark:bg-teal-950/60 dark:text-teal-200"
-                  : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142]"
-              }`}
-            >
-              <List className="w-3.5 h-3.5" />
-              <span>Clips ({segments.length})</span>
-            </button>
-          )}
+          {onGenerateSubtitles && (() => {
+            const hasExistingSubtitles =
+              !isDraft && activeTimelineProject.subtitles.length > 0;
+            const genPct =
+              typeof generationProgress?.percent === "number"
+                ? Math.max(0, Math.min(100, Math.round(generationProgress.percent)))
+                : null;
+            return (
+              <>
+                <span aria-hidden="true" className="h-4 w-px bg-[#d2dcf0] dark:bg-[#21284c] mx-0.5" />
+                <button
+                  type="button"
+                  disabled={isBusy || segments.length === 0 || Boolean(transcribingRange)}
+                  onClick={(e) => {
+                    e.currentTarget.blur();
+                    onGenerateSubtitles();
+                  }}
+                  title={
+                    hasExistingSubtitles
+                      ? "Regenerate subtitles for timeline clips"
+                      : "Generate subtitles for timeline clips"
+                  }
+                  className={`h-7 px-2.5 rounded-sm text-[11px] flex items-center gap-1.5 whitespace-nowrap disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer transition-colors ${
+                    isBusy
+                      ? "bg-[#e6ecfc] text-[#1c3db8] dark:bg-[#1a2554] dark:text-[#93b5fa] border border-[#b8cafc] dark:border-[#32468a] font-semibold"
+                      : hasExistingSubtitles
+                        ? "border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] hover:border-teal-600/60 dark:hover:border-teal-400/60 text-[#0c1026] dark:text-[#f3f5fc] font-medium"
+                        : "bg-[#e6ecfc] hover:bg-[#d5e0fb] text-[#1c3db8] dark:bg-[#1a2554] dark:hover:bg-[#23326e] dark:text-[#93b5fa] border border-[#b8cafc] dark:border-[#32468a] font-semibold"
+                  }`}
+                >
+                  {isBusy ? (
+                    <>
+                      <Loader2 className="w-3 h-3 animate-spin shrink-0" />
+                      <span className="font-mono-tabular">
+                        {genPct !== null ? `Generating ${genPct}%` : "Generating…"}
+                      </span>
+                    </>
+                  ) : hasExistingSubtitles ? (
+                    <>
+                      <RefreshCw className="w-3 h-3 shrink-0" />
+                      <span>Regenerate Subtitle</span>
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-3 h-3 shrink-0" />
+                      <span>Generate Subtitle</span>
+                    </>
+                  )}
+                </button>
+              </>
+            );
+          })()}
 
           {dockMode && onToggleCollapse && (
             <button
@@ -1805,7 +2485,7 @@ export function ProjectTimelineEditor({
               onClick={onToggleCollapse}
               title={isCollapsed ? "Expand timeline dock" : "Collapse timeline dock"}
               aria-label={isCollapsed ? "Expand timeline dock" : "Collapse timeline dock"}
-              className="h-7 w-7 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[#4d597d] dark:text-[#919ec4] flex items-center justify-center cursor-pointer transition-colors"
+              className="h-7 w-7 rounded-sm hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] flex items-center justify-center cursor-pointer transition-colors"
             >
               {isCollapsed ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
             </button>
@@ -1813,7 +2493,27 @@ export function ProjectTimelineEditor({
         </div>
       </div>
 
-      {!isDraft && onTranscribeRange && showRangeFill && (
+      {/* Compact Subtitle Generation Progress Bar */}
+      {isBusy && generationProgress && (
+        <div className="px-3.5 py-1 bg-[#eef2fc] dark:bg-[#10152e] border-b border-[#d2dcf0] dark:border-[#21284c] flex items-center gap-2.5">
+          <span className="text-[11px] font-medium text-[#1c3db8] dark:text-[#93b5fa] truncate flex-1">
+            {generationProgress.label || "Generating subtitles…"}
+          </span>
+          <div className="w-24 h-1.5 rounded-full bg-[#d2dcf0] dark:bg-[#21284c] overflow-hidden shrink-0">
+            <div
+              style={{
+                width: `${Math.max(4, Math.min(100, Math.round(generationProgress.percent || 5)))}%`,
+              }}
+              className="h-full bg-[#1c3db8] dark:bg-[#4e7ef7] transition-[width] duration-300"
+            />
+          </div>
+          <span className="text-[10px] font-mono-tabular font-semibold text-[#1c3db8] dark:text-[#93b5fa] shrink-0">
+            {Math.max(0, Math.min(100, Math.round(generationProgress.percent || 0)))}%
+          </span>
+        </div>
+      )}
+
+      {!isDraft && !hideCaptions && onTranscribeRange && showRangeFill && (
         <div
           className={`flex flex-wrap items-center gap-2 text-xs bg-[#eef2fc] dark:bg-[#10152e] border-b border-[#d2dcf0] dark:border-[#21284c] ${
             dockMode ? "px-4 py-1.5" : "px-2.5 py-2 rounded-md border"
@@ -1908,14 +2608,34 @@ export function ProjectTimelineEditor({
       )}
 
       {/* Fixed-Center-Playhead Split & Delete Timeline with Dedicated Bottom Scroll Space */}
-      {(!dockMode || !isCollapsed) && (
+      {(!dockMode || !isCollapsed) && (() => {
+        const showFullSubTrack = !isDraft && !hideCaptions;
+        const showSubtitleClipsOnly =
+          !isDraft && hideCaptions && showSubtitleTrack && activeTimelineProject.subtitles.length > 0;
+        const hasVisibleSubTrack = showFullSubTrack || showSubtitleClipsOnly;
+
+        return (
         <div
           ref={viewportRef}
           onPointerDown={handlePointerDownViewport}
           className={`relative overflow-hidden select-none touch-none [&_*]:touch-none cursor-grab active:cursor-grabbing bg-[#e7ecf8] dark:bg-[#050712] ${
             dockMode
-              ? "h-48"
-              : "h-64 rounded-lg border border-[#d2dcf0] dark:border-[#21284c]"
+              ? fillHeight
+                ? hasVisibleSubTrack
+                  ? "flex-1 min-h-[152px]"
+                  : "flex-1 min-h-[112px]"
+                : compactDock
+                  ? hasVisibleSubTrack
+                    ? "h-36"
+                    : "h-24"
+                  : hasVisibleSubTrack
+                    ? "h-44"
+                    : "h-32"
+              : compactMobileExpanded
+                ? "h-[144px]"
+                : hasVisibleSubTrack
+                  ? "h-64 rounded-lg border border-[#d2dcf0] dark:border-[#21284c]"
+                  : "h-40 rounded-lg border border-[#d2dcf0] dark:border-[#21284c]"
           }`}
         >
         {/* Full-Width Stationary Ruler Bar Background */}
@@ -1950,34 +2670,75 @@ export function ProjectTimelineEditor({
           </div>
 
           {/* Kept Video Clips Track */}
-          <div className="relative h-16 mt-2">
-            {segments.map((seg, idx) => {
+          <div
+            className={`relative h-16 mt-2 transition-opacity duration-150 ${
+              clipReorder ? "opacity-0 pointer-events-none" : ""
+            }`}
+          >
+            {(() => {
+              const trimIdx = trimPreview
+                ? segments.findIndex((s) => s.sceneId === trimPreview.sceneId)
+                : -1;
+              const trimDeltaStart =
+                trimPreview && trimPreview.mode === "trim-start"
+                  ? trimPreview.nextStartSec - trimPreview.origStartSec
+                  : 0;
+              const trimDeltaEnd =
+                trimPreview && trimPreview.mode === "trim-end"
+                  ? trimPreview.nextEndSec - trimPreview.origEndSec
+                  : 0;
+
+              return segments.map((seg, idx) => {
               const activeTrim = trimPreview?.sceneId === seg.sceneId ? trimPreview : null;
-              const deltaStart = activeTrim ? activeTrim.nextStartSec - activeTrim.origStartSec : 0;
-              const deltaEnd = activeTrim ? activeTrim.nextEndSec - activeTrim.origEndSec : 0;
-              const leftPx = (seg.cutStart + deltaStart) * pxPerSec;
-              const rightPx = (seg.cutEnd + deltaEnd) * pxPerSec;
-              const widthPx = Math.max(18, rightPx - leftPx);
+              let liveCutStart = seg.cutStart;
+              let liveCutEnd = seg.cutEnd;
+              if (trimIdx >= 0) {
+                if (idx === trimIdx) {
+                  liveCutStart += trimDeltaStart;
+                  liveCutEnd += trimDeltaEnd;
+                } else if (trimPreview?.mode === "trim-start" && idx < trimIdx) {
+                  liveCutStart += trimDeltaStart;
+                  liveCutEnd += trimDeltaStart;
+                } else if (trimPreview?.mode === "trim-end" && idx > trimIdx) {
+                  liveCutStart += trimDeltaEnd;
+                  liveCutEnd += trimDeltaEnd;
+                }
+              }
+              const leftPx = liveCutStart * pxPerSec;
+              const rightPx = liveCutEnd * pxPerSec;
+              const widthPx = Math.max(2, rightPx - leftPx);
               const displayDur = activeTrim
                 ? Math.max(0.1, activeTrim.nextEndSec - activeTrim.nextStartSec)
                 : seg.clipDur;
               const isSelected = seg.sceneId === activeSceneId;
 
-              const slotCount = Math.max(2, Math.min(18, Math.ceil(widthPx / 52)));
+              const naturalTileW = Math.max(36, Math.min(114, Math.round(64 * thumbAspect)));
+              const rawTileCount = Math.max(1, Math.ceil(widthPx / naturalTileW));
+              const useExactTileW = rawTileCount <= 64;
+              const slotCount = useExactTileW ? rawTileCount : 64;
+
               const clipThumbs =
                 thumbnails.length > 0
                   ? Array.from({ length: slotCount }, (_, slotIdx) => {
                       const effectiveStart = activeTrim ? activeTrim.nextStartSec : seg.startSec;
-                      const sampleSourceSec =
-                        effectiveStart + ((slotIdx + 0.5) / slotCount) * displayDur;
-                      const thumbIdx = Math.max(
-                        0,
-                        Math.min(
-                          thumbnails.length - 1,
-                          Math.floor((sampleSourceSec / sourceDuration) * thumbnails.length)
-                        )
-                      );
-                      return thumbnails[thumbIdx];
+                      const slotFrac = useExactTileW
+                        ? Math.min(1, ((slotIdx + 0.5) * naturalTileW) / Math.max(1, widthPx))
+                        : (slotIdx + 0.5) / slotCount;
+                      const sampleSourceSec = effectiveStart + slotFrac * displayDur;
+
+                      // Pick nearest captured thumbnail frame by source timestamp
+                      let best = thumbnails[0];
+                      let bestDiff = Math.abs(best.sourceSec - sampleSourceSec);
+                      for (let k = 1; k < thumbnails.length; k++) {
+                        const diff = Math.abs(thumbnails[k].sourceSec - sampleSourceSec);
+                        if (diff < bestDiff) {
+                          best = thumbnails[k];
+                          bestDiff = diff;
+                        } else if (thumbnails[k].sourceSec > sampleSourceSec) {
+                          break;
+                        }
+                      }
+                      return best.url;
                     })
                   : [];
 
@@ -1991,54 +2752,67 @@ export function ProjectTimelineEditor({
                       startX: e.clientX,
                       moved: false,
                     };
+                    if (e.button === 0 || e.pointerType !== "mouse") {
+                      scheduleClipLongPress(seg.sceneId, idx, e.pointerId, e.clientX, e.clientY);
+                    }
                   }}
-                  className={`absolute inset-y-0 rounded-md overflow-hidden transition-shadow cursor-pointer ${
+                  className={`absolute inset-y-0 rounded-md transition-shadow cursor-pointer ${
                     activeTrim
-                      ? "z-20 shadow-md"
+                      ? "z-30 shadow-lg"
                       : isSelected
-                        ? "z-10 shadow-md"
-                        : "ring-1 ring-neutral-400/70 dark:ring-neutral-700/90 hover:ring-neutral-500"
+                        ? "z-20 shadow-md"
+                        : "z-0 ring-1 ring-black/20 dark:ring-white/15 hover:ring-teal-500/60"
                   }`}
                 >
-                  {/* Clip Filmstrip Frames */}
-                  <div className="absolute inset-0 bg-neutral-900 flex">
-                    {clipThumbs.length > 0 ? (
-                      clipThumbs.map((src, tIdx) => (
-                        <img
-                          key={tIdx}
-                          src={src}
-                          alt=""
-                          draggable={false}
-                          referrerPolicy="no-referrer"
-                          className="h-full flex-1 min-w-0 object-cover pointer-events-none"
-                        />
-                      ))
-                    ) : (
-                      <div className="w-full h-full bg-gradient-to-r from-neutral-800 via-neutral-700 to-neutral-800" />
-                    )}
-                  </div>
-
-                  {/* Subtle Label Inside Clip */}
+                  {/* Clipped Inner Media + Label Layer (keeps outside trim handles unclipped) */}
                   <div
-                    className={`pointer-events-none relative pt-1 flex items-center justify-between text-[10px] font-mono-tabular font-semibold text-white ${
-                      isSelected ? "px-4" : "px-2"
+                    className={`absolute inset-0 overflow-hidden ${
+                      isSelected ? "rounded-none" : "rounded-md"
                     }`}
                   >
-                    <span className="px-1.5 py-0.5 rounded bg-black/70 backdrop-blur-xs truncate">
-                      #{idx + 1} · {roundTenth(displayDur)}s
-                    </span>
+                    {/* Clip Filmstrip Frames */}
+                    <div className="absolute inset-0 bg-neutral-950 flex overflow-hidden">
+                      {clipThumbs.length > 0 ? (
+                        clipThumbs.map((src, tIdx) => (
+                          <img
+                            key={tIdx}
+                            src={src}
+                            alt=""
+                            draggable={false}
+                            referrerPolicy="no-referrer"
+                            style={useExactTileW ? { width: `${naturalTileW}px` } : undefined}
+                            className={`h-full object-cover border-r border-black/30 last:border-r-0 pointer-events-none ${
+                              useExactTileW ? "shrink-0" : "flex-1 min-w-0"
+                            }`}
+                          />
+                        ))
+                      ) : (
+                        <div className="w-full h-full bg-gradient-to-r from-neutral-900 via-neutral-800 to-neutral-900 animate-pulse" />
+                      )}
+                      <div
+                        aria-hidden="true"
+                        className="pointer-events-none absolute inset-0 bg-gradient-to-b from-black/35 via-transparent to-black/20"
+                      />
+                    </div>
+
+                    {/* Subtle Label Inside Clip */}
+                    <div className="pointer-events-none relative pt-1 px-2 flex items-center justify-between text-[10px] font-mono-tabular font-semibold text-white">
+                      <span className="px-1.5 py-0.5 rounded bg-black/75 border border-white/10 backdrop-blur-xs truncate">
+                        #{idx + 1} · {roundTenth(displayDur)}s
+                      </span>
+                    </div>
                   </div>
 
-                  {/* Seamless Non-Overlapping Selection Frame & Edge Trim Handles */}
+                  {/* External Oversized Trim Handles & Seamless Bracket Selection Frame */}
                   {isSelected && (
                     <>
                       <div
                         aria-hidden="true"
-                        className="pointer-events-none absolute top-0 left-3.5 right-3.5 h-[2px] bg-teal-600 dark:bg-teal-400 z-20"
+                        className="pointer-events-none absolute -top-[2px] left-0 right-0 h-[2.5px] bg-teal-600 dark:bg-teal-400 z-20"
                       />
                       <div
                         aria-hidden="true"
-                        className="pointer-events-none absolute bottom-0 left-3.5 right-3.5 h-[2px] bg-teal-600 dark:bg-teal-400 z-20"
+                        className="pointer-events-none absolute -bottom-[2px] left-0 right-0 h-[2.5px] bg-teal-600 dark:bg-teal-400 z-20"
                       />
                       <div
                         role="slider"
@@ -2047,9 +2821,16 @@ export function ProjectTimelineEditor({
                         aria-valuemax={seg.endSec}
                         aria-valuenow={seg.startSec}
                         onPointerDown={(e) => handlePointerDownTrimHandle(e, "trim-start", seg)}
-                        className="absolute left-0 inset-y-0 w-3.5 bg-teal-700 dark:bg-teal-400 text-white dark:text-[#060918] flex items-center justify-center cursor-ew-resize touch-none z-20"
+                        className="absolute right-full -top-[2px] -bottom-[2px] w-6 rounded-l-lg bg-teal-600 hover:bg-teal-700 active:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 text-white dark:text-[#060918] shadow-md flex items-center justify-center cursor-ew-resize touch-none z-30"
                       >
-                        <div className="w-0.5 h-5 rounded-full bg-current opacity-95" />
+                        <span
+                          aria-hidden="true"
+                          className="absolute -inset-y-1.5 -left-2.5 right-0"
+                        />
+                        <span className="pointer-events-none flex items-center gap-[3px]">
+                          <span className="w-[2.5px] h-6 rounded-full bg-current opacity-95" />
+                          <span className="w-[2.5px] h-6 rounded-full bg-current opacity-65" />
+                        </span>
                       </div>
                       <div
                         role="slider"
@@ -2058,81 +2839,129 @@ export function ProjectTimelineEditor({
                         aria-valuemax={sourceDuration}
                         aria-valuenow={seg.endSec}
                         onPointerDown={(e) => handlePointerDownTrimHandle(e, "trim-end", seg)}
-                        className="absolute right-0 inset-y-0 w-3.5 bg-teal-700 dark:bg-teal-400 text-white dark:text-[#060918] flex items-center justify-center cursor-ew-resize touch-none z-20"
+                        className="absolute left-full -top-[2px] -bottom-[2px] w-6 rounded-r-lg bg-teal-600 hover:bg-teal-700 active:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 text-white dark:text-[#060918] shadow-md flex items-center justify-center cursor-ew-resize touch-none z-30"
                       >
-                        <div className="w-0.5 h-5 rounded-full bg-current opacity-95" />
+                        <span
+                          aria-hidden="true"
+                          className="absolute -inset-y-1.5 left-0 -right-2.5"
+                        />
+                        <span className="pointer-events-none flex items-center gap-[3px]">
+                          <span className="w-[2.5px] h-6 rounded-full bg-current opacity-65" />
+                          <span className="w-[2.5px] h-6 rounded-full bg-current opacity-95" />
+                        </span>
                       </div>
                     </>
                   )}
                 </div>
               );
-            })}
+            });
+            })()}
           </div>
 
-          {/* Interactive Subtitles Track + Underlying Original Speech & Waveform Markers */}
-          {!isDraft && (
-          <div className="relative h-16 mt-2">
-            {/* Background Speech Bands (align vertically behind subtitles so handles snap visually) */}
-            <div className="pointer-events-none absolute inset-0">
-              {cutSpeechRegions.map((sr, srIdx) => {
-                const leftPx = sr.cutStart * pxPerSec;
-                const widthPx = Math.max(4, (sr.cutEnd - sr.cutStart) * pxPerSec);
+          {/* Interactive Subtitles Track + AI Original Position Background Highlights */}
+          {hasVisibleSubTrack && (
+          <div
+            className={`relative h-10 mt-2 transition-opacity duration-150 ${
+              clipReorder ? "opacity-35 pointer-events-none" : ""
+            }`}
+          >
+            {/* AI Original Subtitle Guide Area (highlights original AI positions when edited) */}
+            {(() => {
+              const resolvedGuides =
+                aiSubtitleGuides.length > 0
+                  ? aiSubtitleGuides
+                  : cutSpeechRegions.map((sr, srIdx) => ({
+                      key: `sr-${srIdx}-${sr.cutStart.toFixed(2)}`,
+                      subId: "",
+                      subIdx: srIdx,
+                      cutStart: sr.cutStart,
+                      cutEnd: sr.cutEnd,
+                      currentStart: sr.cutStart,
+                      currentEnd: sr.cutEnd,
+                    }));
+
+              const guideItems = resolvedGuides.map((guide, gIdx) => {
+                const nextGuide = resolvedGuides[gIdx + 1];
+                const nextGuideStart =
+                  nextGuide && nextGuide.cutStart >= guide.cutStart
+                    ? nextGuide.cutStart
+                    : undefined;
+                const { leftPx, widthPx } = computeTimelineSpanPx(
+                  guide.cutStart,
+                  guide.cutEnd,
+                  pxPerSec,
+                  nextGuideStart
+                );
+                const isDraggingThis = Boolean(dragSubPreview && dragSubPreview.id === guide.subId);
+                const liveStart = isDraggingThis ? dragSubPreview!.startTime : guide.currentStart;
+                const liveEnd = isDraggingThis ? dragSubPreview!.endTime : guide.currentEnd;
+                const isEdited =
+                  Boolean(guide.subId) &&
+                  (Math.abs(liveStart - guide.cutStart) > 0.05 ||
+                    Math.abs(liveEnd - guide.cutEnd) > 0.05);
+                const isThisSelected = Boolean(guide.subId) && guide.subId === activeSubId;
                 const alignedLeft =
                   Boolean(dragSubPreview) &&
-                  (Math.abs(dragSubPreview!.startTime - sr.cutStart) <= 0.12 ||
-                    Math.abs(dragSubPreview!.endTime - sr.cutStart) <= 0.12);
+                  (Math.abs(dragSubPreview!.startTime - guide.cutStart) <= 0.12 ||
+                    Math.abs(dragSubPreview!.endTime - guide.cutStart) <= 0.12);
                 const alignedRight =
                   Boolean(dragSubPreview) &&
-                  (Math.abs(dragSubPreview!.endTime - sr.cutEnd) <= 0.12 ||
-                    Math.abs(dragSubPreview!.startTime - sr.cutEnd) <= 0.12);
-                const isEdgeAligned = alignedLeft || alignedRight;
+                  (Math.abs(dragSubPreview!.endTime - guide.cutEnd) <= 0.12 ||
+                    Math.abs(dragSubPreview!.startTime - guide.cutEnd) <= 0.12);
 
-                return (
-                  <div
-                    key={`sr-${srIdx}-${sr.cutStart.toFixed(2)}`}
-                    style={{ left: `${leftPx}px`, width: `${widthPx}px` }}
-                    className={`absolute inset-y-0 transition-colors ${
-                      isEdgeAligned
-                        ? "bg-amber-600/22 dark:bg-amber-500/20"
-                        : "bg-amber-600/12 dark:bg-amber-500/10"
-                    }`}
-                  >
-                    <div
-                      className={`absolute inset-y-0 left-0 w-[1.5px] ${
-                        alignedLeft
-                          ? "bg-amber-700/85 dark:bg-amber-400/85"
-                          : "bg-amber-700/40 dark:bg-amber-500/35"
-                      }`}
-                    />
-                    <div
-                      className={`absolute inset-y-0 right-0 w-[1.5px] ${
-                        alignedRight
-                          ? "bg-amber-700/85 dark:bg-amber-400/85"
-                          : "bg-amber-700/40 dark:bg-amber-500/35"
-                      }`}
-                    />
-                  </div>
-                );
-              })}
+                return {
+                  guide,
+                  leftPx,
+                  widthPx,
+                  isEdited,
+                  isThisSelected,
+                  alignedLeft,
+                  alignedRight,
+                };
+              });
 
-              {/* Lower Initial Subtitle Area Highlight Bars (no gray track background) */}
-              <div className="absolute inset-x-0 bottom-0.5 h-3">
-                {cutSpeechRegions.map((sr, srIdx) => {
-                  const leftPx = sr.cutStart * pxPerSec;
-                  const widthPx = Math.max(4, (sr.cutEnd - sr.cutStart) * pxPerSec);
-                  return (
-                    <div
-                      key={`sr-bar-${srIdx}-${sr.cutStart.toFixed(2)}`}
-                      style={{ left: `${leftPx}px`, width: `${widthPx}px` }}
-                      className="absolute inset-y-0 rounded-[3px] bg-amber-600/45 dark:bg-amber-500/40 border border-amber-800/45 dark:border-amber-400/45"
-                    />
-                  );
-                })}
-              </div>
-            </div>
+              return (
+                <div className="pointer-events-none absolute inset-0">
+                  {guideItems.map(
+                    ({ guide, leftPx, widthPx, isEdited, isThisSelected, alignedLeft, alignedRight }) => (
+                      <div
+                        key={guide.key}
+                        style={{ left: `${leftPx}px`, width: `${widthPx}px` }}
+                        className={`absolute inset-y-0 rounded-md overflow-hidden transition-colors ${
+                          isEdited
+                            ? "bg-amber-500/28 dark:bg-amber-400/24"
+                            : isThisSelected || alignedLeft || alignedRight
+                              ? "bg-amber-500/18 dark:bg-amber-400/16"
+                              : "bg-amber-500/10 dark:bg-amber-400/10"
+                        }`}
+                      >
+                        <div
+                          className={`absolute inset-y-0 left-0 transition-colors ${
+                            alignedLeft
+                              ? "w-[2px] bg-emerald-500 dark:bg-emerald-400"
+                              : isEdited
+                                ? "w-[2px] bg-amber-600/90 dark:bg-amber-400/90"
+                                : "w-[1px] bg-amber-600/35 dark:bg-amber-400/35"
+                          }`}
+                        />
+                        <div
+                          className={`absolute inset-y-0 right-0 transition-colors ${
+                            alignedRight
+                              ? "w-[2px] bg-emerald-500 dark:bg-emerald-400"
+                              : isEdited
+                                ? "w-[2px] bg-amber-600/90 dark:bg-amber-400/90"
+                                : "w-[1px] bg-amber-600/35 dark:bg-amber-400/35"
+                          }`}
+                        />
+                      </div>
+                    )
+                  )}
+                </div>
+              );
+            })()}
 
             {/* Unmatched Speech Gap Quick-Fill Highlights */}
-            {onTranscribeRange &&
+            {showFullSubTrack && onTranscribeRange &&
               unmatchedSpeechGaps.map((gap, gapIdx) => {
                 const leftPx = gap.startSec * pxPerSec;
                 const widthPx = Math.max(20, gap.durationSec * pxPerSec);
@@ -2177,9 +3006,20 @@ export function ProjectTimelineEditor({
               const preview = dragSubPreview?.id === sub.id ? dragSubPreview : null;
               const startTime = preview ? preview.startTime : sub.startTime;
               const endTime = preview ? preview.endTime : sub.endTime;
-              const dur = Math.max(0.2, endTime - startTime);
-              const leftPx = startTime * pxPerSec;
-              const widthPx = Math.max(22, dur * pxPerSec);
+              const nextSub = activeTimelineProject.subtitles[subIdx + 1];
+              const nextSubPreview =
+                nextSub && dragSubPreview?.id === nextSub.id ? dragSubPreview : null;
+              const nextStart = nextSub
+                ? nextSubPreview
+                  ? nextSubPreview.startTime
+                  : nextSub.startTime
+                : undefined;
+              const { leftPx, widthPx } = computeTimelineSpanPx(
+                startTime,
+                endTime,
+                pxPerSec,
+                nextStart
+              );
               const isSelected = sub.id === activeSubId;
               const isAtPlayhead = cutTime >= startTime && cutTime <= endTime;
 
@@ -2200,38 +3040,48 @@ export function ProjectTimelineEditor({
                     }
                   }}
                   title={`#${subIdx + 1} (${formatTimePrecise(startTime)} – ${formatTimePrecise(endTime)}): ${sub.burmese || sub.thaiPhonetic}`}
-                  className={`absolute top-0 h-10 rounded-md overflow-hidden flex items-center transition-shadow ${
-                    isSelected
-                      ? "bg-[#1c3db8] dark:bg-[#264cd6] text-white px-4 z-10 shadow-sm cursor-grab active:cursor-grabbing touch-none"
-                      : isAtPlayhead
-                        ? "bg-[#e6ecfc] dark:bg-[#101c45] text-[#142d87] dark:text-[#a8c3fa] px-2 ring-1 ring-[#264cd6]/70 dark:ring-[#4e7ef7]/60 cursor-pointer"
-                        : "bg-white/95 dark:bg-[#141933]/95 text-[#0c1026] dark:text-[#f3f5fc] px-2 ring-1 ring-[#bcc9e6] dark:ring-[#2f3866] hover:ring-[#264cd6]/60 cursor-pointer"
+                  className={`absolute top-0 h-10 transition-shadow ${
+                    preview
+                      ? "z-30 shadow-lg cursor-grabbing touch-none"
+                      : isSelected
+                        ? "z-20 shadow-md cursor-grab active:cursor-grabbing touch-none"
+                        : "z-[6] cursor-pointer"
                   }`}
                 >
-                  <div className="pointer-events-none flex items-center gap-1.5 min-w-0 w-full">
-                    <span
-                      className={`text-[10px] font-mono-tabular font-bold shrink-0 ${
-                        isSelected
-                          ? "text-[#d5e2fc]"
-                          : "text-[#1c3db8] dark:text-[#7ca3fb]"
-                      }`}
-                    >
-                      S{subIdx + 1}
-                    </span>
-                    <span className="text-[11px] font-medium truncate">
-                      {sub.burmese || sub.thaiPhonetic}
-                    </span>
+                  <div
+                    className={`w-full h-full px-2 flex items-center overflow-hidden ${
+                      isSelected
+                        ? "rounded-none bg-[#1c3db8] dark:bg-[#264cd6] text-white"
+                        : isAtPlayhead
+                          ? "rounded-md bg-[#e6ecfc] dark:bg-[#101c45] text-[#142d87] dark:text-[#a8c3fa] ring-1 ring-inset ring-[#264cd6]/70 dark:ring-[#4e7ef7]/60"
+                          : "rounded-md bg-white/95 dark:bg-[#141933]/95 text-[#0c1026] dark:text-[#f3f5fc] ring-1 ring-inset ring-[#bcc9e6] dark:ring-[#2f3866] hover:ring-[#264cd6]/60"
+                    }`}
+                  >
+                    <div className="pointer-events-none flex items-center gap-1.5 min-w-0 w-full">
+                      <span
+                        className={`text-[10px] font-mono-tabular font-bold shrink-0 ${
+                          isSelected
+                            ? "text-[#d5e2fc]"
+                            : "text-[#1c3db8] dark:text-[#7ca3fb]"
+                        }`}
+                      >
+                        S{subIdx + 1}
+                      </span>
+                      <span className="text-[11px] font-medium truncate">
+                        {sub.burmese || sub.thaiPhonetic}
+                      </span>
+                    </div>
                   </div>
 
                   {isSelected && onUpdateSubtitleTiming && (
                     <>
                       <div
                         aria-hidden="true"
-                        className="pointer-events-none absolute top-0 left-3 right-3 h-[2px] bg-[#89aef9] dark:bg-[#93b5fa]/85 z-20"
+                        className="pointer-events-none absolute -top-[2px] left-0 right-0 h-[2.5px] bg-[#132b85] dark:bg-[#4e7ef7] z-20"
                       />
                       <div
                         aria-hidden="true"
-                        className="pointer-events-none absolute bottom-0 left-3 right-3 h-[2px] bg-[#89aef9] dark:bg-[#93b5fa]/85 z-20"
+                        className="pointer-events-none absolute -bottom-[2px] left-0 right-0 h-[2.5px] bg-[#132b85] dark:bg-[#4e7ef7] z-20"
                       />
                       <div
                         role="slider"
@@ -2242,9 +3092,16 @@ export function ProjectTimelineEditor({
                         onPointerDown={(e) =>
                           handlePointerDownSubInteraction(e, "sub-trim-start", sub, subIdx)
                         }
-                        className="absolute left-0 inset-y-0 w-3 bg-[#132b85] dark:bg-[#4e7ef7] text-white dark:text-[#060918] flex items-center justify-center cursor-ew-resize touch-none z-20"
+                        className="absolute right-full -top-[2px] -bottom-[2px] w-5 rounded-l-md bg-[#132b85] hover:bg-[#1c3db8] dark:bg-[#4e7ef7] dark:hover:bg-[#7ca3fb] text-white dark:text-[#060918] shadow-md flex items-center justify-center cursor-ew-resize touch-none z-30"
                       >
-                        <div className="w-0.5 h-4 rounded-full bg-current opacity-90" />
+                        <span
+                          aria-hidden="true"
+                          className="absolute -inset-y-1.5 -left-2.5 right-0"
+                        />
+                        <span className="pointer-events-none flex items-center gap-[2.5px]">
+                          <span className="w-[2px] h-4 rounded-full bg-current opacity-95" />
+                          <span className="w-[2px] h-4 rounded-full bg-current opacity-65" />
+                        </span>
                       </div>
                       <div
                         role="slider"
@@ -2255,9 +3112,16 @@ export function ProjectTimelineEditor({
                         onPointerDown={(e) =>
                           handlePointerDownSubInteraction(e, "sub-trim-end", sub, subIdx)
                         }
-                        className="absolute right-0 inset-y-0 w-3 bg-[#132b85] dark:bg-[#4e7ef7] text-white dark:text-[#060918] flex items-center justify-center cursor-ew-resize touch-none z-20"
+                        className="absolute left-full -top-[2px] -bottom-[2px] w-5 rounded-r-md bg-[#132b85] hover:bg-[#1c3db8] dark:bg-[#4e7ef7] dark:hover:bg-[#7ca3fb] text-white dark:text-[#060918] shadow-md flex items-center justify-center cursor-ew-resize touch-none z-30"
                       >
-                        <div className="w-0.5 h-4 rounded-full bg-current opacity-90" />
+                        <span
+                          aria-hidden="true"
+                          className="absolute -inset-y-1.5 left-0 -right-2.5"
+                        />
+                        <span className="pointer-events-none flex items-center gap-[2.5px]">
+                          <span className="w-[2px] h-4 rounded-full bg-current opacity-65" />
+                          <span className="w-[2px] h-4 rounded-full bg-current opacity-95" />
+                        </span>
                       </div>
                     </>
                   )}
@@ -2275,176 +3139,225 @@ export function ProjectTimelineEditor({
         </div>
 
         {/* Fixed Center Playhead Line */}
-        <div
-          aria-hidden="true"
-          className="pointer-events-none absolute inset-y-0 left-1/2 -translate-x-1/2 z-30 flex flex-col items-center"
-        >
-          <div className="w-3 h-3 rounded-b-sm bg-teal-700 dark:bg-teal-400 shadow-sm" />
-          <div className="w-[2px] flex-1 bg-teal-700 dark:bg-teal-400 shadow-[0_0_5px_rgba(28,61,184,0.38)]" />
-        </div>
+        {!clipReorder && (
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-y-0 left-1/2 -translate-x-1/2 z-30 flex flex-col items-center"
+          >
+            <div className="w-3 h-3 rounded-b-sm bg-teal-700 dark:bg-teal-400 shadow-sm" />
+            <div className="w-[2px] flex-1 bg-teal-700 dark:bg-teal-400 shadow-[0_0_5px_rgba(28,61,184,0.38)]" />
+          </div>
+        )}
 
         {/* Live Trim Timestamp Badge */}
-        {dragBadge && (
+        {dragBadge && !clipReorder && (
           <div className="pointer-events-none absolute top-2 right-2.5 z-30 px-2 py-0.5 rounded bg-[#070814]/90 text-white text-[11px] font-mono-tabular shadow">
             {dragBadge.label}: {formatTimePrecise(dragBadge.sec)}
           </div>
         )}
 
-      </div>
-      )}
+        {/* Brief Reorder Hint (when long-pressing with only 1 clip) */}
+        {reorderHint && !clipReorder && (
+          <div className="pointer-events-none absolute top-2 left-1/2 -translate-x-1/2 z-30 px-2.5 py-1 rounded-md bg-[#0c1026]/92 dark:bg-[#141933]/95 border border-white/15 text-white text-[11px] font-medium shadow-md whitespace-nowrap">
+            {reorderHint}
+          </div>
+        )}
 
-      {/* Kept Scenes Summary List (inline below in standard mode, or toggled drawer in dockMode) */}
-      {(!dockMode || showDockScenes) && (
-      <div
-        className={
-          dockMode
-            ? "border-t border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] max-h-36 overflow-y-auto studio-scrollbar"
-            : "border-y border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] overflow-hidden"
-        }
-      >
-        {segments.length === 0 ? (
-          <div className="p-4 text-center space-y-2">
+        {/* In-Place Minimized Clip Reorder Strip (stays in the exact Video Clips row: top-8 h-16) */}
+        {clipReorder && (() => {
+          const draggedSeg = segments[clipReorder.fromIndex] ?? null;
+          const getMidThumb = (seg: ClipSegment): string | null => {
+            if (thumbnails.length === 0) return null;
+            const midSec = (seg.startSec + seg.endSec) / 2;
+            let best = thumbnails[0];
+            let bestDiff = Math.abs(best.sourceSec - midSec);
+            for (let k = 1; k < thumbnails.length; k++) {
+              const diff = Math.abs(thumbnails[k].sourceSec - midSec);
+              if (diff < bestDiff) {
+                best = thumbnails[k];
+                bestDiff = diff;
+              } else if (thumbnails[k].sourceSec > midSec) {
+                break;
+              }
+            }
+            return best.url;
+          };
+
+          const draggedThumb = draggedSeg ? getMidThumb(draggedSeg) : null;
+
+          return (
+            <>
+              {/* Compact Reorder Status Inside Top Ruler Bar */}
+              <div className="pointer-events-none absolute inset-x-0 top-0 h-6 z-40 px-2.5 border-b border-[#d2dcf0] dark:border-[#21284c] bg-white/95 dark:bg-[#0d1022]/95 flex items-center justify-between gap-2 text-[10px]">
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <GripHorizontal className="w-3.5 h-3.5 text-teal-700 dark:text-teal-400 shrink-0" />
+                  <span className="font-semibold text-[#0c1026] dark:text-[#f3f5fc] truncate">
+                    Reorder Clips
+                  </span>
+                  <span className="font-mono-tabular font-semibold text-teal-700 dark:text-teal-400 shrink-0">
+                    {clipReorder.fromIndex === clipReorder.toIndex
+                      ? `#${clipReorder.fromIndex + 1}`
+                      : `#${clipReorder.fromIndex + 1} → #${clipReorder.toIndex + 1}`}
+                  </span>
+                </div>
+                <span className="text-[#4d597d] dark:text-[#919ec4] shrink-0">
+                  Drag &amp; release
+                </span>
+              </div>
+
+              {/* Minimized Horizontal Clip Cards Directly Inside Original Video Clips Row */}
+              <div className="absolute inset-x-0 top-8 h-16 z-40 flex items-center">
+                <div
+                  ref={reorderStripRef}
+                  className="w-full h-full overflow-x-auto no-scrollbar flex items-center"
+                >
+                  <div
+                    ref={reorderTrackRef}
+                    style={{
+                      paddingLeft: `${REORDER_STRIP_PAD}px`,
+                      paddingRight: `${REORDER_STRIP_PAD}px`,
+                      gap: `${REORDER_TILE_GAP}px`,
+                    }}
+                    className="relative flex items-center mx-auto shrink-0"
+                  >
+                    {/* Animated Target Drop Slot Outline */}
+                    <div
+                      aria-hidden="true"
+                      style={{
+                        left: `${REORDER_STRIP_PAD}px`,
+                        width: `${REORDER_TILE_W}px`,
+                        height: `${REORDER_TILE_H}px`,
+                        transform: `translate3d(${clipReorder.toIndex * REORDER_TILE_STRIDE}px, 0, 0)`,
+                      }}
+                      className="pointer-events-none absolute top-0 rounded-lg border-2 border-dashed border-teal-600/85 dark:border-teal-400/85 bg-teal-600/12 dark:bg-teal-400/12 transition-transform duration-150 ease-out"
+                    />
+
+                    {/* Minimized Sibling Clip Tiles */}
+                    {segments.map((seg, origIdx) => {
+                      const isDraggedOrig = origIdx === clipReorder.fromIndex;
+                      let shiftPx = 0;
+                      if (!isDraggedOrig) {
+                        if (
+                          clipReorder.fromIndex < clipReorder.toIndex &&
+                          origIdx > clipReorder.fromIndex &&
+                          origIdx <= clipReorder.toIndex
+                        ) {
+                          shiftPx = -REORDER_TILE_STRIDE;
+                        } else if (
+                          clipReorder.fromIndex > clipReorder.toIndex &&
+                          origIdx >= clipReorder.toIndex &&
+                          origIdx < clipReorder.fromIndex
+                        ) {
+                          shiftPx = REORDER_TILE_STRIDE;
+                        }
+                      }
+
+                      const tileThumb = !isDraggedOrig ? getMidThumb(seg) : null;
+
+                      return (
+                        <div
+                          key={seg.sceneId}
+                          style={{
+                            width: `${REORDER_TILE_W}px`,
+                            height: `${REORDER_TILE_H}px`,
+                            transform: `translate3d(${shiftPx}px, 0, 0)`,
+                          }}
+                          className={`relative rounded-lg overflow-hidden shrink-0 transition-transform duration-150 ease-out ${
+                            isDraggedOrig
+                              ? "opacity-0 pointer-events-none"
+                              : "bg-neutral-950 ring-1 ring-black/25 dark:ring-white/20 shadow-xs"
+                          }`}
+                        >
+                          {!isDraggedOrig && (
+                            <>
+                              {tileThumb ? (
+                                <img
+                                  src={tileThumb}
+                                  alt=""
+                                  draggable={false}
+                                  referrerPolicy="no-referrer"
+                                  className="w-full h-full object-cover pointer-events-none"
+                                />
+                              ) : (
+                                <div className="w-full h-full bg-gradient-to-br from-neutral-800 to-neutral-950" />
+                              )}
+                              <div
+                                aria-hidden="true"
+                                className="pointer-events-none absolute inset-0 bg-gradient-to-b from-black/55 via-transparent to-black/65"
+                              />
+                              <span className="pointer-events-none absolute top-1 left-1 px-1 py-0.5 rounded bg-black/75 text-white text-[9px] font-mono-tabular font-bold leading-none">
+                                #{origIdx + 1}
+                              </span>
+                              <span className="pointer-events-none absolute bottom-1 right-1 px-1 py-0.5 rounded bg-black/75 text-white/90 text-[9px] font-mono-tabular leading-none">
+                                {roundTenth(seg.clipDur)}s
+                              </span>
+                            </>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Floating Lifted Clip Tile Tracking the Pointer */}
+                {draggedSeg && (
+                  <div
+                    style={{
+                      width: `${REORDER_TILE_W}px`,
+                      height: `${REORDER_TILE_H}px`,
+                      transform: `translate3d(${clipReorder.pointerLocalX - REORDER_TILE_W / 2}px, -54%, 0) scale(1.08)`,
+                    }}
+                    className="pointer-events-none absolute left-0 top-1/2 z-30 rounded-lg overflow-hidden bg-neutral-950 ring-2 ring-teal-600 dark:ring-teal-400 shadow-xl shadow-black/45"
+                  >
+                    {draggedThumb ? (
+                      <img
+                        src={draggedThumb}
+                        alt=""
+                        draggable={false}
+                        referrerPolicy="no-referrer"
+                        className="w-full h-full object-cover"
+                      />
+                    ) : (
+                      <div className="w-full h-full bg-gradient-to-br from-neutral-800 to-neutral-950" />
+                    )}
+                    <div
+                      aria-hidden="true"
+                      className="absolute inset-0 bg-gradient-to-b from-black/50 via-transparent to-black/70"
+                    />
+                    <span className="absolute top-1 left-1 px-1.5 py-0.5 rounded bg-teal-600 dark:bg-teal-400 text-white dark:text-[#060918] text-[9px] font-mono-tabular font-bold leading-none shadow-xs">
+                      #{clipReorder.fromIndex + 1}
+                    </span>
+                    <span className="absolute bottom-1 right-1 px-1 py-0.5 rounded bg-black/80 text-white text-[9px] font-mono-tabular font-semibold leading-none">
+                      {roundTenth(draggedSeg.clipDur)}s
+                    </span>
+                  </div>
+                )}
+              </div>
+            </>
+          );
+        })()}
+
+        {/* Empty Clips Recovery Overlay when all clips were deleted */}
+        {segments.length === 0 && (
+          <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-2 bg-[#e7ecf8]/95 dark:bg-[#050712]/95 px-4 text-center">
             <p className="text-xs text-[#4d597d] dark:text-[#919ec4]">
-              All clips were deleted. Restore the original clips to split and keep the parts you want.
+              All clips were deleted. Restore the original clips to keep editing.
             </p>
             <button
               type="button"
+              onPointerDown={(e) => e.stopPropagation()}
               onClick={handleRestoreOriginal}
-              className="h-8 px-3 rounded-md bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer transition-colors"
+              className="h-7 px-3 rounded-md bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer transition-colors"
             >
               <RotateCcw className="w-3.5 h-3.5" />
               <span>Restore Original Clips</span>
             </button>
           </div>
-        ) : (
-          <div className="divide-y divide-[#d2dcf0] dark:divide-[#21284c]">
-            {segments.map((seg, idx) => {
-              const isSelected = seg.sceneId === activeSceneId;
-              const dur = roundTenth(seg.clipDur);
-              const subCount = clipSubtitleCounts?.[seg.sceneId] ?? 0;
-              const hasExistingSubs = subCount > 0;
-              const isRegeneratingThis = regeneratingClipId === seg.sceneId;
-              const busyElsewhere = Boolean(isBusy) || (Boolean(regeneratingClipId) && !isRegeneratingThis);
-
-              return (
-                <div
-                  key={seg.sceneId}
-                  onClick={() => {
-                    if (isPlaying) onPause();
-                    setActiveSceneId(seg.sceneId);
-                    dispatchSeek(seg.cutStart, true);
-                  }}
-                  className={`px-3.5 py-2 flex items-center justify-between gap-3 cursor-pointer transition-colors ${
-                    isSelected
-                      ? "bg-teal-50/70 dark:bg-teal-950/30"
-                      : "bg-white dark:bg-[#0d1022] hover:bg-[#e7ecf8] dark:hover:bg-[#141933]"
-                  }`}
-                >
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <span
-                      className={`text-[11px] font-mono-tabular font-semibold shrink-0 ${
-                        isSelected ? "text-teal-700 dark:text-teal-400" : "text-[#4d597d] dark:text-[#919ec4]"
-                      }`}
-                    >
-                      {String(idx + 1).padStart(2, "0")}
-                    </span>
-                    <span className="text-xs font-semibold text-[#0c1026] dark:text-[#f3f5fc] whitespace-nowrap">
-                      Clip {idx + 1}
-                    </span>
-                    <span className="text-xs font-mono-tabular text-[#4d597d] dark:text-[#919ec4] truncate">
-                      {formatTimePrecise(seg.startSec)} – {formatTimePrecise(seg.endSec)}
-                    </span>
-                    {onGenerateSingleClip && hasExistingSubs && (
-                      <span className="text-[11px] font-mono-tabular text-teal-700 dark:text-teal-400 whitespace-nowrap shrink-0">
-                        · {subCount} sub
-                      </span>
-                    )}
-                  </div>
-
-                  <div className="flex items-center gap-2 shrink-0">
-                    {onGenerateSingleClip && (
-                      <button
-                        type="button"
-                        disabled={busyElsewhere || isRegeneratingThis}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          e.currentTarget.blur();
-                          setActiveSceneId(seg.sceneId);
-                          onGenerateSingleClip(seg.sceneId);
-                        }}
-                        title={
-                          hasExistingSubs
-                            ? `Replace subtitles for Clip ${idx + 1}`
-                            : `Generate subtitles for Clip ${idx + 1}`
-                        }
-                        aria-label={
-                          hasExistingSubs
-                            ? `Replace subtitles for Clip ${idx + 1}`
-                            : `Generate subtitles for Clip ${idx + 1}`
-                        }
-                        className="h-6 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] hover:border-teal-700/50 dark:hover:border-teal-400/50 hover:text-teal-700 dark:hover:text-teal-400 text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] inline-flex items-center gap-1 whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
-                      >
-                        {isRegeneratingThis ? (
-                          <>
-                            <Loader2 className="w-3 h-3 animate-spin text-teal-700 dark:text-teal-400 shrink-0" />
-                            <span className="font-mono-tabular">
-                              {typeof regeneratingClipPercent === "number"
-                                ? `${regeneratingClipPercent}%`
-                                : "..."}
-                            </span>
-                          </>
-                        ) : hasExistingSubs ? (
-                          <>
-                            <RefreshCw className="w-3 h-3 shrink-0" />
-                            <span>Replace</span>
-                          </>
-                        ) : (
-                          <>
-                            <Sparkles className="w-3 h-3 shrink-0" />
-                            <span>Generate</span>
-                          </>
-                        )}
-                      </button>
-                    )}
-
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        e.currentTarget.blur();
-                        setActiveSceneId(seg.sceneId);
-                        onPlayFromTime(seg.cutStart);
-                      }}
-                      title={`Play Clip ${idx + 1}`}
-                      aria-label={`Play Clip ${idx + 1}`}
-                      className="p-1 text-[#4d597d] hover:text-teal-700 dark:text-[#919ec4] dark:hover:text-teal-400 transition-colors cursor-pointer"
-                    >
-                      <Play className="w-3.5 h-3.5" />
-                    </button>
-                    <span className="text-xs font-mono-tabular font-medium text-[#0c1026] dark:text-[#f3f5fc]">
-                      {dur}s
-                    </span>
-                    <button
-                      type="button"
-                      disabled={isRegeneratingThis}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        e.currentTarget.blur();
-                        handleDeleteClip(seg.sceneId);
-                      }}
-                      aria-label={`Delete clip ${idx + 1}`}
-                      className="p-1 text-[#4d597d] dark:text-[#919ec4] hover:text-red-600 dark:hover:text-red-400 disabled:opacity-40 transition-colors cursor-pointer"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
         )}
+
       </div>
-      )}
+        );
+      })()}
     </div>
   );
 }

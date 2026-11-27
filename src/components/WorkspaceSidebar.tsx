@@ -12,6 +12,8 @@ import {
   BookOpen,
   Captions,
   Check,
+  ChevronDown,
+  ChevronUp,
   ClipboardPaste,
   Clock,
   Copy,
@@ -92,7 +94,7 @@ const NOOP_RESTORE_SNAPSHOT = () => {};
 
 export type WorkspaceTab = "youtube" | "studio" | "projects";
 
-export type StudioSectionId = "clips" | "captions" | "visual" | "audio" | "timeline";
+export type StudioSectionId = "edit" | "visual" | "audio" | "subtitle";
 
 interface WorkspaceSidebarProps {
   activeTab: WorkspaceTab;
@@ -218,16 +220,21 @@ interface WorkspaceSidebarProps {
   onClearSearch: () => void;
   studioSection: StudioSectionId;
   onChangeStudioSection: (section: StudioSectionId) => void;
-  showMobileTimelineTab?: boolean;
   selectedSubtitleId?: string | null;
   onSelectSubtitle?: (id: string | null) => void;
+  onSelectTimelineSubtitle?: (id: string | null, opts?: { scrollList?: boolean }) => void;
   captionTab?: "script" | "style" | "sync";
   onChangeCaptionTab?: (tab: "script" | "style" | "sync") => void;
   isSubtitleSearchOpen?: boolean;
   onChangeSubtitleSearchOpen?: (open: boolean) => void;
   autoFollowState?: AutoFollowState;
   onChangeAutoFollowState?: (next: AutoFollowState) => void;
-  stageSelectRequest?: { id: string; focusPhonetic?: boolean; nonce: number } | null;
+  stageSelectRequest?: {
+    id: string;
+    focusPhonetic?: boolean;
+    source?: "stage" | "timeline" | "keyboard";
+    nonce: number;
+  } | null;
   cutSpeechRegions?: CutSpeechRegion[];
   onUpdateWordChip?: (
     subId: string,
@@ -251,6 +258,7 @@ interface WorkspaceSidebarProps {
   transcribingRange?: { startSec: number; endSec: number } | null;
   onApplyPasteTranscriptSync?: (nextSubtitles: SubtitleItem[], changedCount: number) => void;
   onPreviewSourceSeek?: (sourceSec: number | null, opts?: { skipResync?: boolean }) => void;
+  hideCaptions?: boolean;
 }
 
 const SUBTITLE_TONE_OPTIONS: { id: TranslationTone; label: string }[] = [
@@ -379,9 +387,9 @@ export function WorkspaceSidebar({
   onClearSearch,
   studioSection,
   onChangeStudioSection,
-  showMobileTimelineTab = false,
   selectedSubtitleId: controlledSelectedSubId,
   onSelectSubtitle,
+  onSelectTimelineSubtitle,
   captionTab: controlledCaptionTab,
   onChangeCaptionTab,
   isSubtitleSearchOpen: controlledSearchOpen,
@@ -398,6 +406,7 @@ export function WorkspaceSidebar({
   transcribingRange = null,
   onApplyPasteTranscriptSync,
   onPreviewSourceSeek,
+  hideCaptions = false,
 }: WorkspaceSidebarProps) {
   const scrollRootRef = useRef<HTMLDivElement | null>(null);
   const loadMoreSentinelRef = useRef<HTMLDivElement | null>(null);
@@ -447,10 +456,13 @@ export function WorkspaceSidebar({
   const [showToneConfirm, setShowToneConfirm] = useState(false);
   const [skipManualOnToneApply, setSkipManualOnToneApply] = useState(true);
   const [showResyncConfirm, setShowResyncConfirm] = useState(false);
-  const [showExportMenu, setShowExportMenu] = useState(false);
+  const [showDiagnosticsDrawer, setShowDiagnosticsDrawer] = useState(false);
+  const [showSourceMenu, setShowSourceMenu] = useState(false);
+  const [sourceConfirmAction, setSourceConfirmAction] = useState<"regenerate" | "clear" | null>(null);
+  const [mobileTimelineExpanded, setMobileTimelineExpanded] = useState(false);
   const [copiedTranscript, setCopiedTranscript] = useState(false);
   const [showPasteSyncModal, setShowPasteSyncModal] = useState(false);
-  const exportMenuRef = useRef<HTMLDivElement | null>(null);
+  const sourceMenuRef = useRef<HTMLDivElement | null>(null);
   const aiPopoverRef = useRef<HTMLDivElement | null>(null);
   const moreMenuRef = useRef<HTMLDivElement | null>(null);
   const timePopoverRef = useRef<HTMLDivElement | null>(null);
@@ -460,6 +472,7 @@ export function WorkspaceSidebar({
   const subtitleViewportRef = useRef<SubtitleListViewportHandle | null>(null);
   const selectedPhoneticInputRef = useRef<HTMLInputElement | null>(null);
   const suppressNextFocusPauseRef = useRef(false);
+  const lastHandledStageSelectNonceRef = useRef<number | null>(null);
 
   const suggestChipSplitParts = useCallback((phonetic: string): [string, string] => {
     const clean = phonetic.trim();
@@ -629,13 +642,24 @@ export function WorkspaceSidebar({
 
   useEffect(() => {
     if (!stageSelectRequest) return;
-    if (studioSection !== "captions" || captionTab !== "script") return;
-    if (subSearchQuery.trim()) {
-      setSubSearchQuery("");
+    if (lastHandledStageSelectNonceRef.current === stageSelectRequest.nonce) return;
+    if (studioSection !== "edit" || captionTab !== "script") return;
+    lastHandledStageSelectNonceRef.current = stageSelectRequest.nonce;
+
+    const isTimelineSync = stageSelectRequest.source === "timeline";
+    if (isTimelineSync && autoFollowStateRef.current !== "following") {
+      return;
     }
-    if (qualityFilter !== "all") {
-      setQualityFilter("all");
+
+    if (!isTimelineSync) {
+      if (subSearchQuery.trim()) {
+        setSubSearchQuery("");
+      }
+      if (qualityFilter !== "all") {
+        setQualityFilter("all");
+      }
     }
+
     let innerRaf = 0;
     const outerRaf = requestAnimationFrame(() => {
       innerRaf = requestAnimationFrame(() => {
@@ -703,15 +727,27 @@ export function WorkspaceSidebar({
   );
 
   useEffect(() => {
-    if (!showExportMenu) return;
+    if (!showSourceMenu) return;
     const onPointerDown = (e: MouseEvent) => {
-      if (exportMenuRef.current && !exportMenuRef.current.contains(e.target as Node)) {
-        setShowExportMenu(false);
+      const target = e.target as Node;
+      if (sourceMenuRef.current && !sourceMenuRef.current.contains(target)) {
+        setShowSourceMenu(false);
+        setSourceConfirmAction(null);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setShowSourceMenu(false);
+        setSourceConfirmAction(null);
       }
     };
     document.addEventListener("mousedown", onPointerDown);
-    return () => document.removeEventListener("mousedown", onPointerDown);
-  }, [showExportMenu]);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [showSourceMenu]);
 
   useEffect(() => {
     if (!aiPopoverId && !moreMenuId && !editingTimeId && !activeWordChip) return;
@@ -756,8 +792,9 @@ export function WorkspaceSidebar({
     if (
       !isWorkspaceVisible ||
       activeTab !== "studio" ||
-      studioSection !== "captions" ||
+      studioSection !== "edit" ||
       !hasGeneratedProject(project) ||
+      project.subtitles.length === 0 ||
       captionTab !== "script"
     ) {
       return;
@@ -808,14 +845,10 @@ export function WorkspaceSidebar({
   const openAddSubtitleForm = () => {
     if (!hasGeneratedProject(project)) return;
     const maxDur = Math.max(0.5, project.targetDurationSec || 10);
-    const suggested = suggestTranscribeRange(
-      project.subtitles,
-      cutSpeechRegions,
-      cutTime,
-      maxDur
-    );
-    setNewSubStart(suggested.startSec.toFixed(1));
-    setNewSubEnd(suggested.endSec.toFixed(1));
+    const startSec = Math.min(maxDur - 0.5, Math.max(0, cutTime));
+    const endSec = Math.min(maxDur, startSec + 2.5);
+    setNewSubStart(startSec.toFixed(1));
+    setNewSubEnd(endSec.toFixed(1));
     setNewSubPhonetic("");
     setNewSubBurmese("");
     setRangeFeedback(null);
@@ -858,6 +891,32 @@ export function WorkspaceSidebar({
     }
   };
 
+  const hasStudioVideo = Boolean(localMedia || hasProjectMedia(project));
+  const hasSubtitles =
+    !hideCaptions && Boolean(hasGeneratedProject(project) && project.subtitles.length > 0);
+  const isStudioView = activeTab === "studio";
+
+  // Reset mobile timeline expand state cleanly when project identity or pre/post subtitle state changes
+  const mobileTimelineStateKey = `${activeSavedId ?? localMedia?.localUrl ?? project?.localUrl ?? "none"}::${
+    hasSubtitles ? "post" : "pre"
+  }`;
+  useEffect(() => {
+    setMobileTimelineExpanded(!hasSubtitles);
+    setShowSourceMenu(false);
+    setSourceConfirmAction(null);
+  }, [mobileTimelineStateKey, hasSubtitles]);
+
+  const hideDesktopEditTab = !isMobileStudio && hideCaptions && hasStudioVideo;
+  const mobileDirectTimeline = Boolean(
+    isMobileStudio && hideCaptions && studioSection === "edit"
+  );
+
+  useEffect(() => {
+    if (hideDesktopEditTab && studioSection === "edit") {
+      onChangeStudioSection("visual");
+    }
+  }, [hideDesktopEditTab, studioSection, onChangeStudioSection]);
+
   const dirtyMap = getVideoEditDirtyMap(editSettings, voiceSettings);
   const studioTabs: {
     id: StudioSectionId;
@@ -866,20 +925,20 @@ export function WorkspaceSidebar({
     dirty?: boolean;
     count?: number;
   }[] = [
-    {
-      id: "clips",
-      label: "Upload & Cut",
-      icon: Upload,
-      count: !hasGeneratedProject(project) && selectedScenes.length > 0 ? selectedScenes.length : undefined,
-    },
-    {
-      id: "captions",
-      label: "Captions",
-      icon: Captions,
-      count: hasGeneratedProject(project) ? project.subtitles.length : undefined,
-    },
-    ...(showMobileTimelineTab
-      ? [{ id: "timeline" as const, label: "Timeline", icon: Scissors, dirty: timelineDirty }]
+    ...(!hideDesktopEditTab
+      ? [
+          {
+            id: "edit" as const,
+            label: "Edit",
+            icon: hideCaptions ? Scissors : hasSubtitles ? Captions : Upload,
+            count: hasSubtitles
+              ? project!.subtitles.length
+              : selectedScenes.length > 0
+                ? selectedScenes.length
+                : undefined,
+            dirty: timelineDirty,
+          },
+        ]
       : []),
     {
       id: "visual",
@@ -893,10 +952,12 @@ export function WorkspaceSidebar({
       icon: Mic,
       dirty: dirtyMap.audioDirty,
     },
+    {
+      id: "subtitle",
+      label: "Subtitle",
+      icon: Captions,
+    },
   ];
-
-  const hasStudioVideo = Boolean(localMedia || hasProjectMedia(project));
-  const isStudioView = activeTab === "studio";
 
   const rawTargetDuration =
     hasGeneratedProject(project) &&
@@ -944,7 +1005,7 @@ export function WorkspaceSidebar({
               : "max-w-5xl mx-auto p-3 sm:p-5 lg:p-6 space-y-4 pb-8"
           }
         >
-          {isProcessing && (
+          {!hideCaptions && isProcessing && (
             <div className="px-3.5 py-2.5 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] flex items-center justify-between gap-3 text-xs sm:text-sm text-[#0c1026] dark:text-[#f3f5fc]">
               <div className="flex items-center gap-2.5 min-w-0">
                 <Loader2 className="w-4 h-4 animate-spin text-teal-700 dark:text-teal-400 shrink-0" />
@@ -1300,7 +1361,7 @@ export function WorkspaceSidebar({
               {studioTabs.map((item) => {
                 const Icon = item.icon;
                 const active = studioSection === item.id;
-                const isDisabled = !hasStudioVideo && item.id !== "clips";
+                const isDisabled = !hasStudioVideo && item.id !== "edit";
                 return (
                   <button
                     key={item.id}
@@ -1343,7 +1404,32 @@ export function WorkspaceSidebar({
               })}
             </div>
 
-            <div className="flex items-center gap-2.5 shrink-0">
+            <div className="flex items-center gap-1 shrink-0">
+              {hasStudioVideo && (onUndoProp || onUndoSubtitles || onRedoProp || onRedoSubtitles) && (
+                <div className="inline-flex items-center">
+                  <button
+                    type="button"
+                    disabled={!(canUndoProp ?? canUndoSubtitles) || !(onUndoProp ?? onUndoSubtitles)}
+                    onClick={onUndoProp ?? onUndoSubtitles}
+                    title="Undo (Ctrl+Z)"
+                    aria-label="Undo edit"
+                    className="h-7 w-7 rounded-sm flex items-center justify-center text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer transition-colors"
+                  >
+                    <Undo2 className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!(canRedoProp ?? canRedoSubtitles) || !(onRedoProp ?? onRedoSubtitles)}
+                    onClick={onRedoProp ?? onRedoSubtitles}
+                    title="Redo (Ctrl+Shift+Z)"
+                    aria-label="Redo edit"
+                    className="h-7 w-7 rounded-sm flex items-center justify-center text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer transition-colors"
+                  >
+                    <Redo2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
+
               {dirtyMap.isModified &&
                 (studioSection === "visual" || studioSection === "audio") && (
                   <button
@@ -1361,30 +1447,44 @@ export function WorkspaceSidebar({
                       });
                       onChangeVoiceSettings({ ...DEFAULT_VOICE_SETTINGS });
                     }}
-                    className="text-[11px] font-medium text-[#4d597d] dark:text-[#919ec4] hover:text-teal-700 dark:hover:text-teal-400 flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer transition-colors"
+                    className="text-[11px] font-medium text-[#4d597d] dark:text-[#919ec4] hover:text-teal-700 dark:hover:text-teal-400 flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer transition-colors px-1.5"
                   >
                     <RotateCcw className="w-3 h-3" />
                     <span className="hidden sm:inline">Reset All</span>
                   </button>
                 )}
 
-              {hasGeneratedProject(project) && (
-                <span className="text-[11px] text-[#4d597d] dark:text-[#919ec4] font-mono-tabular whitespace-nowrap">
-                  {`${project.scenes.length} · ${studioHeaderDuration}s`}
-                </span>
+              {hideCaptions && hasStudioVideo && onClearLocalVideo && (
+                <>
+                  <span
+                    aria-hidden="true"
+                    className="h-3.5 w-px bg-[#d2dcf0] dark:bg-[#21284c] mx-0.5 shrink-0"
+                  />
+                  <button
+                    type="button"
+                    onClick={onClearLocalVideo}
+                    title="Clear video"
+                    aria-label="Clear video"
+                    className="h-7 px-1.5 sm:px-2 rounded-sm text-[11px] font-medium text-[#4d597d] dark:text-[#919ec4] hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50/80 dark:hover:bg-red-950/40 flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer transition-colors"
+                  >
+                    <X className="w-3.5 h-3.5 shrink-0" />
+                    <span className="hidden sm:inline">Clear Video</span>
+                  </button>
+                </>
               )}
             </div>
           </div>
 
           {/* Flat Edge-to-Edge Studio Body */}
+          {!mobileDirectTimeline && (
           <div
             className={
-              studioSection === "captions" && hasGeneratedProject(project) && captionTab === "script"
-                ? "flex-1 min-h-0 flex flex-col overflow-hidden"
-                : "flex-1 overflow-y-auto overscroll-y-contain studio-scrollbar min-h-0"
+              studioSection === "edit" && hasSubtitles && captionTab === "script"
+                ? "@container flex-1 min-h-0 flex flex-col overflow-hidden"
+                : "@container flex-1 overflow-y-auto overscroll-y-contain studio-scrollbar min-h-0"
             }
           >
-            {(isProcessing || Boolean(regeneratingClipId)) && (() => {
+            {!hideCaptions && (isProcessing || Boolean(regeneratingClipId)) && (() => {
               const stage = generationProgress?.stage ?? "extracting";
               const percent = Math.max(0, Math.min(100, generationProgress?.percent ?? 5));
               const label =
@@ -1468,33 +1568,64 @@ export function WorkspaceSidebar({
               );
             })()}
 
-            {studioSection === "clips" && (
-              <div className="px-3.5 py-3 flex flex-col gap-4 pb-6">
-                {localMedia ? (
+            {studioSection === "edit" && !hasSubtitles && !(hideCaptions && hasStudioVideo) && (
+              <div className="px-3.5 py-3 flex flex-col gap-3.5 pb-6">
+                {hasStudioVideo ? (
                   <>
                     <UploadHeader
-                      title={localMedia.title}
-                      durationSec={localMedia.durationSec}
+                      title={localMedia?.title || project?.title || "Local Video"}
+                      durationSec={
+                        localMedia?.durationSec ??
+                        project?.sourceDurationSec ??
+                        project?.targetDurationSec ??
+                        0
+                      }
                       onClearVideo={onClearLocalVideo}
                     />
-                    <PreGenerateBar
-                      scenes={selectedScenes}
-                      isProcessing={isProcessing}
-                      generationProgress={generationProgress}
-                      translationTone={editSettings.translationTone}
-                      onChangeTranslationTone={(tone) =>
-                        onChangeEditSettings({ ...editSettings, translationTone: tone })
-                      }
-                      onGenerate={onGenerateSubtitles}
-                      regeneratingClipId={regeneratingClipId}
-                    />
-                    {isMobileStudio && (
+                    {!hideCaptions && (
+                      <PreGenerateBar
+                        scenes={selectedScenes}
+                        isProcessing={isProcessing}
+                        generationProgress={generationProgress}
+                        translationTone={editSettings.translationTone}
+                        onChangeTranslationTone={(tone) =>
+                          onChangeEditSettings({ ...editSettings, translationTone: tone })
+                        }
+                        onGenerate={onGenerateSubtitles}
+                        regeneratingClipId={regeneratingClipId}
+                      />
+                    )}
+                    {!hideCaptions && hasGeneratedProject(project) && (
+                      <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc]/70 dark:bg-[#141933]/60 text-xs">
+                        <span className="text-[#4d597d] dark:text-[#919ec4]">
+                          No subtitle lines yet. Generate above or add a line manually.
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const maxDur = Math.max(0.5, project.targetDurationSec || 10);
+                            const s = Math.min(maxDur - 0.5, Math.max(0, cutTime));
+                            onAddSubtitle({
+                              startTime: s,
+                              endTime: Math.min(maxDur, s + 2.5),
+                              thaiPhonetic: "",
+                              burmese: "",
+                            });
+                          }}
+                          className="h-7 px-2.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:border-teal-600/60 dark:hover:border-teal-400/60 text-[11px] font-semibold text-[#0c1026] dark:text-[#f3f5fc] inline-flex items-center gap-1 cursor-pointer transition-colors"
+                        >
+                          <Plus className="w-3 h-3" />
+                          <span>Add Manual Line</span>
+                        </button>
+                      </div>
+                    )}
+                    {isMobileStudio && !hideCaptions ? (
                       <ProjectTimelineEditor
                         project={project}
                         cutTime={cutTime}
                         subscribeCutTime={subscribeCutTime}
                         isPlaying={isPlaying}
-                        isActive={isWorkspaceVisible && isStudioView && studioSection === "clips"}
+                        isActive={isWorkspaceVisible && isStudioView && studioSection === "edit"}
                         onTogglePlay={onTogglePlay}
                         onPause={onPause}
                         onSeek={onSeek}
@@ -1507,7 +1638,7 @@ export function WorkspaceSidebar({
                         canUndo={canUndoProp ?? canUndoSubtitles}
                         canRedo={canRedoProp ?? canRedoSubtitles}
                         onResetTimeline={onResetTimeline}
-                        onGoToScenes={() => onChangeStudioSection("clips")}
+                        onGoToScenes={() => onChangeStudioSection("edit")}
                         cutSpeechRegions={cutSpeechRegions}
                         onTranscribeRange={onTranscribeRange}
                         transcribingRange={transcribingRange}
@@ -1517,7 +1648,17 @@ export function WorkspaceSidebar({
                         onGenerateSingleClip={onGenerateSingleClip}
                         isBusy={isProcessing}
                         onPreviewSourceSeek={onPreviewSourceSeek}
+                        selectedSubtitleId={selectedSubtitleId}
+                        onSelectSubtitle={onSelectTimelineSubtitle ?? setSelectedSubtitleId}
+                        hideUndoRedo
+                        hideHeader
+                        hideTransport
+                        hideCaptions={hideCaptions}
                       />
+                    ) : (
+                      <p className="text-[11px] text-[#4d597d] dark:text-[#919ec4] leading-relaxed">
+                        Trim or split clips in the timeline below, then click Generate Subtitles.
+                      </p>
                     )}
                   </>
                 ) : (
@@ -1527,49 +1668,30 @@ export function WorkspaceSidebar({
                         Upload a local video on the 9:16 Stage
                       </p>
                       <p className="text-[11px] text-[#4d597d] dark:text-[#919ec4]">
-                        Click or drop a video file on the 9:16 preview to cut clips and generate subtitles.
+                        {hideCaptions
+                          ? "Click or drop a video file on the 9:16 preview to cut clips and edit video & audio in this workspace."
+                          : "Click or drop a video file on the 9:16 preview to cut clips, generate subtitles, and edit everything in this workspace."}
                       </p>
                     </div>
-                    <PreGenerateBar
-                      scenes={[]}
-                      isProcessing={isProcessing}
-                      generationProgress={generationProgress}
-                      translationTone={editSettings.translationTone}
-                      onChangeTranslationTone={(tone) =>
-                        onChangeEditSettings({ ...editSettings, translationTone: tone })
-                      }
-                      onGenerate={onGenerateSubtitles}
-                      regeneratingClipId={regeneratingClipId}
-                    />
+                    {!hideCaptions && (
+                      <PreGenerateBar
+                        scenes={[]}
+                        isProcessing={isProcessing}
+                        generationProgress={generationProgress}
+                        translationTone={editSettings.translationTone}
+                        onChangeTranslationTone={(tone) =>
+                          onChangeEditSettings({ ...editSettings, translationTone: tone })
+                        }
+                        onGenerate={onGenerateSubtitles}
+                        regeneratingClipId={regeneratingClipId}
+                      />
+                    )}
                   </>
                 )}
               </div>
             )}
 
-            {studioSection === "captions" && !hasGeneratedProject(project) && (
-              <div className="p-6 text-center space-y-3">
-                <div className="w-9 h-9 rounded-md bg-teal-50 dark:bg-teal-950/60 border border-teal-200/70 dark:border-teal-500/25 text-teal-700 dark:text-teal-400 flex items-center justify-center mx-auto">
-                  <Captions className="w-4 h-4" />
-                </div>
-                <div className="space-y-1 max-w-sm mx-auto">
-                  <p className="font-display text-sm font-semibold text-[#0c1026] dark:text-[#f3f5fc]">
-                    No generated captions yet
-                  </p>
-                  <p className="text-xs text-[#4d597d] dark:text-[#919ec4] leading-relaxed">
-                    Upload a video, cut the clips you want, and generate subtitles in Upload &amp; Cut to edit Thai phonetics, Burmese translations, and styling.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => onChangeStudioSection("clips")}
-                  className="h-8 px-3.5 rounded-md bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer transition-colors"
-                >
-                  <span>Upload &amp; Cut</span>
-                </button>
-              </div>
-            )}
-
-            {studioSection === "captions" && hasGeneratedProject(project) && (() => {
+            {studioSection === "edit" && hasSubtitles && project && (() => {
               const effectiveSpd = getEffectivePlaybackSpeed(
                 editSettings.playbackSpeed,
                 voiceSettings.speed
@@ -1584,6 +1706,41 @@ export function WorkspaceSidebar({
               const manuallyEditedCount = project.subtitles.filter((s) =>
                 Boolean(s.isManuallyEdited)
               ).length;
+              const triggerToneApply = () => {
+                if (manuallyEditedCount > 0) {
+                  setSkipManualOnToneApply(true);
+                  setShowToneConfirm(true);
+                } else {
+                  onRetranslateAll(editSettings.translationTone, {
+                    skipManuallyEdited: false,
+                  });
+                }
+              };
+              const handleCopyForAiChat = async () => {
+                try {
+                  await navigator.clipboard.writeText(
+                    buildAiChatTranscriptContent(project.title, project.subtitles, exportOpts)
+                  );
+                  setCopiedTranscript(true);
+                  setTimeout(() => setCopiedTranscript(false), 2000);
+                } catch {
+                  // ignore clipboard permission failure
+                }
+                setShowSourceMenu(false);
+              };
+              const handleCopyPlainTranscript = async () => {
+                try {
+                  await navigator.clipboard.writeText(
+                    buildStudyTextContent(project.title, project.subtitles, exportOpts)
+                  );
+                  setCopiedTranscript(true);
+                  setTimeout(() => setCopiedTranscript(false), 2000);
+                } catch {
+                  // ignore clipboard permission failure
+                }
+                setShowSourceMenu(false);
+              };
+              const videoLabel = localMedia?.title || project.title || "Video";
 
               return (
                 <div
@@ -1593,12 +1750,12 @@ export function WorkspaceSidebar({
                       : "flex flex-col"
                   }
                 >
-                  {/* Persistent Captions Header: 3-Tab Segmented Control + Undo/Redo + Export */}
-                  <div className="shrink-0 px-3.5 py-2 border-b border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc]/70 dark:bg-[#070814]/60 flex flex-wrap items-center justify-between gap-2">
+                  {/* Calm 4-Control Primary Command Row */}
+                  <div className="shrink-0 px-3 py-1.5 border-b border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] flex items-center justify-between gap-2">
                     <div
                       role="tablist"
-                      aria-label="Captions inspector tabs"
-                      className="inline-flex items-center p-0.5 rounded-sm bg-[#e7ecf8] dark:bg-[#141933] border border-[#d2dcf0] dark:border-[#21284c]"
+                      aria-label="Edit mode"
+                      className="inline-flex items-center p-0.5 rounded-sm bg-[#eef2fb] dark:bg-[#141933] shrink-0"
                     >
                       {(
                         [
@@ -1619,7 +1776,7 @@ export function WorkspaceSidebar({
                               setAiPopoverId(null);
                               setMoreMenuId(null);
                             }}
-                            className={`px-3 py-1 rounded-xs text-[11px] font-semibold whitespace-nowrap transition-colors cursor-pointer ${
+                            className={`px-2.5 py-1 rounded-xs text-[11px] font-semibold whitespace-nowrap transition-colors cursor-pointer ${
                               active
                                 ? "bg-white dark:bg-[#0d1022] text-teal-700 dark:text-teal-400 shadow-xs"
                                 : "text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
@@ -1631,166 +1788,30 @@ export function WorkspaceSidebar({
                       })}
                     </div>
 
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <div className="inline-flex items-center border border-[#d2dcf0] dark:border-[#21284c] rounded-sm overflow-hidden bg-white dark:bg-[#141933]">
-                        <button
-                          type="button"
-                          disabled={!(canUndoProp ?? canUndoSubtitles) || !(onUndoProp ?? onUndoSubtitles)}
-                          onClick={onUndoProp ?? onUndoSubtitles}
-                          title="Undo edit"
-                          aria-label="Undo edit"
-                          className="h-7 px-2 flex items-center gap-1 text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors whitespace-nowrap"
-                        >
-                          <Undo2 className="w-3 h-3" />
-                          <span>Undo</span>
-                        </button>
-                        <button
-                          type="button"
-                          disabled={!(canRedoProp ?? canRedoSubtitles) || !(onRedoProp ?? onRedoSubtitles)}
-                          onClick={onRedoProp ?? onRedoSubtitles}
-                          title="Redo edit"
-                          aria-label="Redo edit"
-                          className="h-7 px-2 flex items-center gap-1 text-[11px] font-medium border-l border-[#d2dcf0] dark:border-[#21284c] text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors whitespace-nowrap"
-                        >
-                          <Redo2 className="w-3 h-3" />
-                          <span>Redo</span>
-                        </button>
-                      </div>
-
-                      {project.subtitles.length > 0 && (
-                        <div ref={exportMenuRef} className="relative">
-                          <button
-                            type="button"
-                            onClick={() => setShowExportMenu((v) => !v)}
-                            title="Export .SRT, .VTT, -study.txt or Copy"
-                            aria-label="Export captions"
-                            className="h-7 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center gap-1 cursor-pointer whitespace-nowrap transition-colors"
-                          >
-                            {copiedTranscript ? (
-                              <>
-                                <Check className="w-3 h-3 text-emerald-600 dark:text-emerald-400" />
-                                <span className="text-emerald-700 dark:text-emerald-300">Copied</span>
-                              </>
-                            ) : (
-                              <>
-                                <Download className="w-3 h-3" />
-                                <span>Export</span>
-                              </>
-                            )}
-                          </button>
-
-                          {showExportMenu && (
-                            <div className="absolute right-0 mt-1 w-48 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] shadow-lg p-1 z-30 space-y-0.5">
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  downloadTextFile(
-                                    `${slug}.srt`,
-                                    buildSrtContent(project.subtitles, exportOpts),
-                                    "application/x-subrip;charset=utf-8"
-                                  );
-                                  setShowExportMenu(false);
-                                }}
-                                className="w-full px-2.5 py-1.5 rounded-sm text-left text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] flex items-center gap-2 cursor-pointer"
-                              >
-                                <FileText className="w-3.5 h-3.5 text-[#4d597d] dark:text-[#919ec4]" />
-                                <span>Download .SRT</span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  downloadTextFile(
-                                    `${slug}.vtt`,
-                                    buildVttContent(project.subtitles, exportOpts),
-                                    "text/vtt;charset=utf-8"
-                                  );
-                                  setShowExportMenu(false);
-                                }}
-                                className="w-full px-2.5 py-1.5 rounded-sm text-left text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] flex items-center gap-2 cursor-pointer"
-                              >
-                                <FileText className="w-3.5 h-3.5 text-[#4d597d] dark:text-[#919ec4]" />
-                                <span>Download .VTT</span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  downloadTextFile(
-                                    `${slug}-study.txt`,
-                                    buildStudyTextContent(project.title, project.subtitles, exportOpts),
-                                    "text/plain;charset=utf-8"
-                                  );
-                                  setShowExportMenu(false);
-                                }}
-                                className="w-full px-2.5 py-1.5 rounded-sm text-left text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] flex items-center gap-2 cursor-pointer"
-                              >
-                                <BookOpen className="w-3.5 h-3.5 text-[#4d597d] dark:text-[#919ec4]" />
-                                <span>Study Sheet .TXT</span>
-                              </button>
-                              <div className="my-1 border-t border-[#d2dcf0] dark:border-[#21284c]" />
-                              <button
-                                type="button"
-                                onClick={async () => {
-                                  try {
-                                    await navigator.clipboard.writeText(
-                                      buildAiChatTranscriptContent(project.title, project.subtitles, exportOpts)
-                                    );
-                                    setCopiedTranscript(true);
-                                    setTimeout(() => setCopiedTranscript(false), 2000);
-                                  } catch {
-                                    // ignore clipboard permission failure
-                                  }
-                                  setShowExportMenu(false);
-                                }}
-                                className="w-full px-2.5 py-1.5 rounded-sm text-left text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] flex items-center gap-2 cursor-pointer"
-                              >
-                                <Sparkles className="w-3.5 h-3.5 text-teal-700 dark:text-teal-400" />
-                                <span>Copy for AI Chat</span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={async () => {
-                                  try {
-                                    await navigator.clipboard.writeText(
-                                      buildStudyTextContent(project.title, project.subtitles, exportOpts)
-                                    );
-                                    setCopiedTranscript(true);
-                                    setTimeout(() => setCopiedTranscript(false), 2000);
-                                  } catch {
-                                    // ignore clipboard permission failure
-                                  }
-                                  setShowExportMenu(false);
-                                }}
-                                className="w-full px-2.5 py-1.5 rounded-sm text-left text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] flex items-center gap-2 cursor-pointer"
-                              >
-                                <Copy className="w-3.5 h-3.5 text-[#4d597d] dark:text-[#919ec4]" />
-                                <span>Copy Transcript</span>
-                              </button>
-                              {onApplyPasteTranscriptSync && (
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setShowExportMenu(false);
-                                    setShowPasteSyncModal(true);
-                                  }}
-                                  className="w-full px-2.5 py-1.5 rounded-sm text-left text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] flex items-center gap-2 cursor-pointer"
-                                >
-                                  <ClipboardPaste className="w-3.5 h-3.5 text-teal-700 dark:text-teal-400" />
-                                  <span>Paste &amp; Sync</span>
-                                </button>
-                              )}
-                            </div>
+                    <div className="flex items-center gap-1 shrink-0">
+                      {isRetranslatingAll && (
+                        <div className="inline-flex items-center gap-1 mr-0.5">
+                          <span className="h-7 px-2 rounded-sm bg-teal-50 dark:bg-teal-950/50 text-teal-800 dark:text-teal-200 text-[11px] font-medium flex items-center gap-1 whitespace-nowrap">
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                            <span>Applying</span>
+                          </span>
+                          {onCancelRetranslateAll && (
+                            <button
+                              type="button"
+                              onClick={onCancelRetranslateAll}
+                              title="Stop Apply Tone"
+                              aria-label="Stop Apply Tone"
+                              className="h-7 px-2 rounded-sm bg-red-50 dark:bg-red-950/60 hover:bg-red-100 dark:hover:bg-red-900/70 text-[11px] font-semibold text-red-700 dark:text-red-300 flex items-center gap-1 whitespace-nowrap cursor-pointer transition-colors"
+                            >
+                              <Square className="w-2.5 h-2.5 fill-current" />
+                              <span>Stop</span>
+                            </button>
                           )}
                         </div>
                       )}
-                    </div>
-                  </div>
 
-                  {/* TAB 1: SCRIPT */}
-                  {captionTab === "script" && (
-                    <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
-                      {/* Compact Top Bar: Search Toggle + Tone Selector/Apply + Follow/Jump + Add */}
-                      <div className="shrink-0 px-3.5 py-2 border-b border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc]/40 dark:bg-[#070814]/40 flex flex-wrap items-center justify-between gap-2">
-                        <div className="flex flex-wrap items-center gap-1.5">
+                      {captionTab === "script" && (
+                        <>
                           <button
                             type="button"
                             onClick={() => {
@@ -1803,85 +1824,226 @@ export function WorkspaceSidebar({
                             title="Search & Replace (Ctrl/Cmd+F)"
                             aria-label="Search subtitles"
                             aria-expanded={isSearchOpen}
-                            className={`h-7 w-7 rounded-sm border flex items-center justify-center cursor-pointer transition-colors ${
+                            className={`h-7 w-7 rounded-sm flex items-center justify-center shrink-0 cursor-pointer transition-colors ${
                               isSearchOpen || subSearchQuery.trim()
-                                ? "border-teal-600/80 bg-teal-50/90 text-teal-800 dark:border-teal-400/80 dark:bg-teal-950/60 dark:text-teal-200"
-                                : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
+                                ? "bg-teal-50 text-teal-700 dark:bg-teal-950/60 dark:text-teal-300"
+                                : "text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142]"
                             }`}
                           >
                             <Search className="w-3.5 h-3.5" />
                           </button>
 
-                          <div className="flex items-center gap-1">
-                            <select
-                              value={editSettings.translationTone}
-                              onChange={(e) =>
-                                onChangeEditSettings({
-                                  ...editSettings,
-                                  translationTone: e.target.value as TranslationTone,
-                                })
-                              }
-                              aria-label="Translation tone"
-                              className="h-7 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] cursor-pointer focus:outline-none focus:border-teal-700 dark:focus:border-teal-400"
-                            >
-                              {SUBTITLE_TONE_OPTIONS.map((opt) => (
-                                <option key={opt.id} value={opt.id}>
-                                  Tone: {opt.label}
-                                </option>
-                              ))}
-                            </select>
+                          <button
+                            type="button"
+                            onClick={() => (showAddSub ? setShowAddSub(false) : openAddSubtitleForm())}
+                            className="h-7 px-2.5 rounded-sm bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] text-[11px] font-semibold flex items-center gap-1 whitespace-nowrap shrink-0 transition-colors cursor-pointer"
+                          >
+                            {showAddSub ? <X className="w-3 h-3" /> : <Plus className="w-3 h-3" />}
+                            <span>{showAddSub ? "Close" : "Add"}</span>
+                          </button>
+                        </>
+                      )}
 
-                            {project.subtitles.length > 0 && (
-                              isRetranslatingAll ? (
-                                <div className="inline-flex items-center gap-1">
-                                  <span className="h-7 px-2 rounded-sm border border-teal-300 dark:border-teal-500/40 bg-teal-50 dark:bg-teal-950/50 text-teal-800 dark:text-teal-200 text-[11px] font-medium flex items-center gap-1 whitespace-nowrap">
-                                    <Loader2 className="w-3 h-3 animate-spin" />
-                                    <span>Applying</span>
-                                  </span>
-                                  {onCancelRetranslateAll && (
+                      {isMobileStudio && (
+                        <button
+                          type="button"
+                          onClick={() => setMobileTimelineExpanded((v) => !v)}
+                          aria-expanded={mobileTimelineExpanded}
+                          aria-label={mobileTimelineExpanded ? "Collapse timeline" : "Expand timeline"}
+                          title={mobileTimelineExpanded ? "Hide timeline" : "Show timeline"}
+                          className={`relative h-7 px-2 rounded-sm flex items-center gap-1 text-[11px] font-medium whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
+                            mobileTimelineExpanded
+                              ? "bg-teal-50 text-teal-700 dark:bg-teal-950/60 dark:text-teal-300 font-semibold"
+                              : "text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142]"
+                          }`}
+                        >
+                          <Scissors className="w-3.5 h-3.5 shrink-0" />
+                          {timelineDirty && !mobileTimelineExpanded && (
+                            <span
+                              aria-hidden="true"
+                              className="w-1.5 h-1.5 rounded-full bg-teal-600 dark:bg-teal-400 shrink-0"
+                            />
+                          )}
+                          {mobileTimelineExpanded ? (
+                            <ChevronUp className="w-3 h-3 shrink-0" />
+                          ) : (
+                            <ChevronDown className="w-3 h-3 shrink-0" />
+                          )}
+                        </button>
+                      )}
+
+                      {/* Single Clean Overflow & Source Menu */}
+                      <div ref={sourceMenuRef} className="relative shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSourceConfirmAction(null);
+                            setShowSourceMenu((v) => !v);
+                          }}
+                          title="More tools, export & source"
+                          aria-label="More tools and source"
+                          aria-expanded={showSourceMenu}
+                          className={`h-7 w-7 rounded-sm flex items-center justify-center cursor-pointer transition-colors ${
+                            showSourceMenu
+                              ? "bg-teal-50 text-teal-700 dark:bg-teal-950/60 dark:text-teal-300"
+                              : copiedTranscript
+                                ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300"
+                                : "text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142]"
+                          }`}
+                        >
+                          {copiedTranscript ? (
+                            <Check className="w-3.5 h-3.5" />
+                          ) : (
+                            <MoreHorizontal className="w-4 h-4" />
+                          )}
+                        </button>
+
+                        {showSourceMenu && (
+                          <div className="absolute right-0 mt-1 w-64 max-h-[75vh] overflow-y-auto studio-scrollbar rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] shadow-lg p-1.5 z-40 space-y-1.5">
+                            {/* Source summary */}
+                            <div className="px-2 py-1 border-b border-[#d2dcf0] dark:border-[#21284c]">
+                              <p className="text-xs font-semibold text-[#0c1026] dark:text-[#f3f5fc] truncate">
+                                {videoLabel}
+                              </p>
+                              <p className="text-[11px] font-mono-tabular text-[#4d597d] dark:text-[#919ec4]">
+                                {project.scenes.length} {project.scenes.length === 1 ? "clip" : "clips"} · {studioHeaderDuration}s · {project.subtitles.length} lines
+                              </p>
+                            </div>
+
+                            {/* Translation Tone + Apply */}
+                            <div className="px-2 py-1 space-y-1.5 border-b border-[#d2dcf0] dark:border-[#21284c]">
+                              <span className="block text-[10px] font-semibold uppercase tracking-wider text-[#4d597d] dark:text-[#919ec4]">
+                                Translation Tone
+                              </span>
+                              <div className="flex items-center gap-1.5">
+                                <select
+                                  value={editSettings.translationTone}
+                                  onChange={(e) =>
+                                    onChangeEditSettings({
+                                      ...editSettings,
+                                      translationTone: e.target.value as TranslationTone,
+                                    })
+                                  }
+                                  aria-label="Translation tone"
+                                  className="flex-1 h-7 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc]"
+                                >
+                                  {SUBTITLE_TONE_OPTIONS.map((opt) => (
+                                    <option key={opt.id} value={opt.id}>
+                                      {opt.label}
+                                    </option>
+                                  ))}
+                                </select>
+                                {isRetranslatingAll ? (
+                                  onCancelRetranslateAll && (
                                     <button
                                       type="button"
-                                      onClick={onCancelRetranslateAll}
-                                      title="Stop Apply Tone"
-                                      aria-label="Stop Apply Tone"
-                                      className="h-7 px-2 rounded-sm border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/60 hover:bg-red-100 dark:hover:bg-red-900/70 text-[11px] font-semibold text-red-700 dark:text-red-300 flex items-center gap-1 whitespace-nowrap cursor-pointer transition-colors"
+                                      onClick={() => {
+                                        onCancelRetranslateAll();
+                                        setShowSourceMenu(false);
+                                      }}
+                                      className="h-7 px-2 rounded-sm border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/60 text-[11px] font-semibold text-red-700 dark:text-red-300 cursor-pointer"
                                     >
-                                      <Square className="w-2.5 h-2.5 fill-current" />
-                                      <span>Stop</span>
+                                      Stop
                                     </button>
-                                  )}
-                                </div>
-                              ) : (
+                                  )
+                                ) : (
+                                  <button
+                                    type="button"
+                                    disabled={isResyncingTimings}
+                                    onClick={() => {
+                                      setShowSourceMenu(false);
+                                      triggerToneApply();
+                                    }}
+                                    className="h-7 px-2.5 rounded-sm bg-teal-700 hover:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 text-white dark:text-[#060918] text-[11px] font-semibold cursor-pointer disabled:opacity-45"
+                                  >
+                                    Apply
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+
+                            {/* Export, Copy & Paste-Sync */}
+                            <div className="space-y-0.5 pb-1 border-b border-[#d2dcf0] dark:border-[#21284c]">
+                              {onApplyPasteTranscriptSync && (
                                 <button
                                   type="button"
-                                  disabled={isResyncingTimings}
                                   onClick={() => {
-                                    if (manuallyEditedCount > 0) {
-                                      setSkipManualOnToneApply(true);
-                                      setShowToneConfirm(true);
-                                    } else {
-                                      onRetranslateAll(editSettings.translationTone, {
-                                        skipManuallyEdited: false,
-                                      });
-                                    }
+                                    setShowSourceMenu(false);
+                                    setShowPasteSyncModal(true);
                                   }}
-                                  title="Apply selected translation tone to subtitles"
-                                  className="h-7 px-2.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:border-teal-600/60 dark:hover:border-teal-400/60 hover:text-teal-700 dark:hover:text-teal-400 text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50 transition-colors"
+                                  className="w-full px-2 py-1.5 rounded-sm text-left text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] flex items-center gap-2 cursor-pointer"
                                 >
-                                  <Sparkles className="w-3 h-3" />
-                                  <span>Apply</span>
+                                  <ClipboardPaste className="w-3.5 h-3.5 text-teal-700 dark:text-teal-400" />
+                                  <span>Paste &amp; Sync Transcript</span>
                                 </button>
-                              )
-                            )}
-                          </div>
-                        </div>
-
-                        <div className="flex items-center gap-1.5 shrink-0">
-                          {project.subtitles.length > 0 && (
-                            <>
+                              )}
                               <button
                                 type="button"
-                                aria-pressed={autoFollowState !== "off"}
+                                onClick={handleCopyForAiChat}
+                                className="w-full px-2 py-1.5 rounded-sm text-left text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] flex items-center gap-2 cursor-pointer"
+                              >
+                                <Sparkles className="w-3.5 h-3.5 text-teal-700 dark:text-teal-400" />
+                                <span>Copy for AI Chat</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={handleCopyPlainTranscript}
+                                className="w-full px-2 py-1.5 rounded-sm text-left text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] flex items-center gap-2 cursor-pointer"
+                              >
+                                <Copy className="w-3.5 h-3.5 text-[#4d597d] dark:text-[#919ec4]" />
+                                <span>Copy Transcript</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  downloadTextFile(
+                                    `${slug}.srt`,
+                                    buildSrtContent(project.subtitles, exportOpts),
+                                    "application/x-subrip;charset=utf-8"
+                                  );
+                                  setShowSourceMenu(false);
+                                }}
+                                className="w-full px-2 py-1.5 rounded-sm text-left text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] flex items-center gap-2 cursor-pointer"
+                              >
+                                <Download className="w-3.5 h-3.5 text-[#4d597d] dark:text-[#919ec4]" />
+                                <span>Download .SRT</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  downloadTextFile(
+                                    `${slug}.vtt`,
+                                    buildVttContent(project.subtitles, exportOpts),
+                                    "text/vtt;charset=utf-8"
+                                  );
+                                  setShowSourceMenu(false);
+                                }}
+                                className="w-full px-2 py-1.5 rounded-sm text-left text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] flex items-center gap-2 cursor-pointer"
+                              >
+                                <FileText className="w-3.5 h-3.5 text-[#4d597d] dark:text-[#919ec4]" />
+                                <span>Download .VTT</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  downloadTextFile(
+                                    `${slug}-study.txt`,
+                                    buildStudyTextContent(project.title, project.subtitles, exportOpts),
+                                    "text/plain;charset=utf-8"
+                                  );
+                                  setShowSourceMenu(false);
+                                }}
+                                className="w-full px-2 py-1.5 rounded-sm text-left text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] flex items-center gap-2 cursor-pointer"
+                              >
+                                <BookOpen className="w-3.5 h-3.5 text-[#4d597d] dark:text-[#919ec4]" />
+                                <span>Study Sheet .TXT</span>
+                              </button>
+                            </div>
+
+                            {/* Playback follow */}
+                            <div className="space-y-0.5">
+                              <button
+                                type="button"
                                 onClick={() => {
                                   if (autoFollowState === "off") {
                                     setAutoFollowState("following");
@@ -1896,250 +2058,480 @@ export function WorkspaceSidebar({
                                   } else {
                                     setAutoFollowState("off");
                                   }
+                                  setShowSourceMenu(false);
                                 }}
-                                title={
-                                  autoFollowState === "off"
-                                    ? "Enable Auto-Follow during playback"
-                                    : "Auto-Follow enabled (click to turn off)"
-                                }
-                                className={`h-7 px-2 rounded-sm border text-[11px] font-medium flex items-center gap-1 cursor-pointer whitespace-nowrap transition-colors ${
-                                  autoFollowState !== "off"
-                                    ? "border-teal-600/60 bg-teal-50/80 text-teal-800 dark:border-teal-400/60 dark:bg-teal-950/50 dark:text-teal-200"
-                                    : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
-                                }`}
+                                className="w-full px-2 py-1.5 rounded-sm text-left text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] flex items-center justify-between gap-2 cursor-pointer"
                               >
-                                <span>{autoFollowState === "off" ? "Follow: Off" : "Follow"}</span>
+                                <span className="flex items-center gap-2">
+                                  <LocateFixed className="w-3.5 h-3.5 text-[#4d597d] dark:text-[#919ec4]" />
+                                  <span>Auto-Follow Playback</span>
+                                </span>
+                                <span className="text-[10px] font-mono-tabular text-teal-700 dark:text-teal-400">
+                                  {autoFollowState === "off" ? "Off" : "On"}
+                                </span>
                               </button>
                               <button
                                 type="button"
-                                onClick={jumpToActiveSubtitle}
-                                title="Scroll to currently active subtitle at playhead"
-                                aria-label="Jump to active subtitle"
-                                className="h-7 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center gap-1 cursor-pointer whitespace-nowrap transition-colors"
+                                onClick={() => {
+                                  jumpToActiveSubtitle();
+                                  setShowSourceMenu(false);
+                                }}
+                                className="w-full px-2 py-1.5 rounded-sm text-left text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] flex items-center gap-2 cursor-pointer"
                               >
-                                <LocateFixed className="w-3 h-3" />
-                                <span>Jump</span>
+                                <Clock className="w-3.5 h-3.5 text-[#4d597d] dark:text-[#919ec4]" />
+                                <span>Jump to Playhead</span>
                               </button>
-                              {onApplyPasteTranscriptSync && (
-                                <button
-                                  type="button"
-                                  onClick={() => setShowPasteSyncModal(true)}
-                                  title="Paste AI-edited transcript and sync translations without losing timing"
-                                  className="h-7 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:border-teal-600/60 dark:hover:border-teal-400/60 hover:text-teal-700 dark:hover:text-teal-400 text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0 transition-colors"
-                                >
-                                  <ClipboardPaste className="w-3 h-3" />
-                                  <span>Paste &amp; Sync</span>
-                                </button>
-                              )}
-                            </>
-                          )}
-                          <button
-                            type="button"
-                            onClick={() => (showAddSub ? setShowAddSub(false) : openAddSubtitleForm())}
-                            className="h-7 px-2.5 rounded-sm bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] text-[11px] font-semibold flex items-center gap-1 whitespace-nowrap shrink-0 transition-colors cursor-pointer"
-                          >
-                            {showAddSub ? <X className="w-3 h-3" /> : <Plus className="w-3 h-3" />}
-                            <span>{showAddSub ? "Close" : "Add"}</span>
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* Quality Summary, Filter & Explicit Repair Bar */}
-                      {project.subtitles.length > 0 &&
-                        (qualitySummary.totalFlagged > 0 || qualityFilter !== "all") && (
-                          <div className="shrink-0 px-3.5 py-1.5 border-b border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc]/55 dark:bg-[#070814]/55 space-y-1.5">
-                            <div className="flex flex-wrap items-center justify-between gap-1.5">
-                              <div className="flex flex-wrap items-center gap-1">
-                                <button
-                                  type="button"
-                                  onClick={() => setQualityFilter("all")}
-                                  className={`h-6 px-2 rounded-sm border text-[11px] font-medium cursor-pointer transition-colors ${
-                                    qualityFilter === "all"
-                                      ? "border-teal-600/80 bg-teal-50 text-teal-800 dark:border-teal-400/80 dark:bg-teal-950/60 dark:text-teal-200 font-semibold"
-                                      : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
-                                  }`}
-                                >
-                                  All ({project.subtitles.length})
-                                </button>
-                                {(qualitySummary.overlapCount > 0 ||
-                                  qualityFilter === "overlap") && (
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      setQualityFilter((cur) =>
-                                        cur === "overlap" ? "all" : "overlap"
-                                      )
-                                    }
-                                    className={`h-6 px-2 rounded-sm border text-[11px] font-medium inline-flex items-center gap-1 cursor-pointer transition-colors ${
-                                      qualityFilter === "overlap"
-                                        ? "border-rose-500 bg-rose-50 text-rose-800 dark:border-rose-400 dark:bg-rose-950/60 dark:text-rose-200 font-semibold"
-                                        : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#0c1026] dark:text-[#f3f5fc]"
-                                    }`}
-                                  >
-                                    <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
-                                    <span>Overlap ({qualitySummary.overlapCount})</span>
-                                  </button>
-                                )}
-                                {(qualitySummary.tooFastCount > 0 ||
-                                  qualityFilter === "too_fast") && (
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      setQualityFilter((cur) =>
-                                        cur === "too_fast" ? "all" : "too_fast"
-                                      )
-                                    }
-                                    className={`h-6 px-2 rounded-sm border text-[11px] font-medium inline-flex items-center gap-1 cursor-pointer transition-colors ${
-                                      qualityFilter === "too_fast"
-                                        ? "border-amber-500 bg-amber-50 text-amber-900 dark:border-amber-400 dark:bg-amber-950/60 dark:text-amber-200 font-semibold"
-                                        : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#0c1026] dark:text-[#f3f5fc]"
-                                    }`}
-                                  >
-                                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
-                                    <span>Too Fast ({qualitySummary.tooFastCount})</span>
-                                  </button>
-                                )}
-                                {(qualitySummary.silentMismatchCount > 0 ||
-                                  qualityFilter === "silent_mismatch") && (
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      setQualityFilter((cur) =>
-                                        cur === "silent_mismatch" ? "all" : "silent_mismatch"
-                                      )
-                                    }
-                                    className={`h-6 px-2 rounded-sm border text-[11px] font-medium inline-flex items-center gap-1 cursor-pointer transition-colors ${
-                                      qualityFilter === "silent_mismatch"
-                                        ? "border-orange-500 bg-orange-50 text-orange-900 dark:border-orange-400 dark:bg-orange-950/60 dark:text-orange-200 font-semibold"
-                                        : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#0c1026] dark:text-[#f3f5fc]"
-                                    }`}
-                                  >
-                                    <span className="w-1.5 h-1.5 rounded-full bg-orange-500" />
-                                    <span>Silent ({qualitySummary.silentMismatchCount})</span>
-                                  </button>
-                                )}
-                                {(qualitySummary.missingGlossCount > 0 ||
-                                  qualityFilter === "missing_gloss") && (
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      setQualityFilter((cur) =>
-                                        cur === "missing_gloss" ? "all" : "missing_gloss"
-                                      )
-                                    }
-                                    className={`h-6 px-2 rounded-sm border text-[11px] font-medium inline-flex items-center gap-1 cursor-pointer transition-colors ${
-                                      qualityFilter === "missing_gloss"
-                                        ? "border-sky-500 bg-sky-50 text-sky-900 dark:border-sky-400 dark:bg-sky-950/60 dark:text-sky-200 font-semibold"
-                                        : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#0c1026] dark:text-[#f3f5fc]"
-                                    }`}
-                                  >
-                                    <span className="w-1.5 h-1.5 rounded-full bg-sky-500" />
-                                    <span>No Gloss ({qualitySummary.missingGlossCount})</span>
-                                  </button>
-                                )}
-                              </div>
-
-                              <div className="flex flex-wrap items-center gap-1">
-                                {qualitySummary.overlapCount > 0 && onAutoFixSubtitleTimings && (
-                                  <button
-                                    type="button"
-                                    disabled={isResyncingTimings || isRetranslatingAll}
-                                    onClick={onAutoFixSubtitleTimings}
-                                    className="h-6 px-2 rounded-sm border border-rose-300 dark:border-rose-700 bg-rose-50/90 dark:bg-rose-950/50 hover:bg-rose-100 dark:hover:bg-rose-900/60 text-[11px] font-semibold text-rose-800 dark:text-rose-200 inline-flex items-center gap-1 cursor-pointer disabled:opacity-45"
-                                  >
-                                    <Wand2 className="w-3 h-3" />
-                                    <span>Fix Overlaps (Local)</span>
-                                  </button>
-                                )}
-                                {qualitySummary.silentMismatchCount > 0 && onAiResyncSubtitles && (
-                                  <button
-                                    type="button"
-                                    disabled={isResyncingTimings || isRetranslatingAll}
-                                    onClick={() =>
-                                      setConfirmQualityAction((cur) =>
-                                        cur === "resync" ? null : "resync"
-                                      )
-                                    }
-                                    className="h-6 px-2 rounded-sm border border-orange-300 dark:border-orange-700 bg-orange-50/90 dark:bg-orange-950/50 hover:bg-orange-100 dark:hover:bg-orange-900/60 text-[11px] font-semibold text-orange-800 dark:text-orange-200 inline-flex items-center gap-1 cursor-pointer disabled:opacity-45"
-                                  >
-                                    <RefreshCw
-                                      className={`w-3 h-3 ${isResyncingTimings ? "animate-spin" : ""}`}
-                                    />
-                                    <span>AI Resync</span>
-                                  </button>
-                                )}
-                                {qualitySummary.missingGlossCount > 0 && onFillMissingGlosses && (
-                                  <button
-                                    type="button"
-                                    disabled={isResyncingTimings || isRetranslatingAll}
-                                    onClick={() =>
-                                      setConfirmQualityAction((cur) =>
-                                        cur === "gloss" ? null : "gloss"
-                                      )
-                                    }
-                                    className="h-6 px-2 rounded-sm border border-sky-300 dark:border-sky-700 bg-sky-50/90 dark:bg-sky-950/50 hover:bg-sky-100 dark:hover:bg-sky-900/60 text-[11px] font-semibold text-sky-800 dark:text-sky-200 inline-flex items-center gap-1 cursor-pointer disabled:opacity-45"
-                                  >
-                                    <Sparkles className="w-3 h-3" />
-                                    <span>Fill Missing Gloss (AI)</span>
-                                  </button>
-                                )}
-                              </div>
                             </div>
 
-                            {confirmQualityAction === "resync" && onAiResyncSubtitles && (
-                              <div className="p-2 rounded-sm border border-orange-300/80 dark:border-orange-600/50 bg-orange-50/85 dark:bg-orange-950/40 flex flex-wrap items-center justify-between gap-2 text-[11px]">
-                                <span className="text-orange-950 dark:text-orange-100">
-                                  Re-align subtitle timings to spoken audio via AI ({qualitySummary.silentMismatchCount} mismatch{qualitySummary.silentMismatchCount === 1 ? "" : "es"})?
-                                </span>
-                                <div className="flex items-center gap-1.5">
-                                  <button
-                                    type="button"
-                                    onClick={() => setConfirmQualityAction(null)}
-                                    className="h-6 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#4d597d] dark:text-[#919ec4] cursor-pointer"
-                                  >
-                                    Cancel
-                                  </button>
-                                  <button
-                                    type="button"
-                                    disabled={isResyncingTimings || isRetranslatingAll}
-                                    onClick={() => {
-                                      setConfirmQualityAction(null);
-                                      onAiResyncSubtitles();
-                                    }}
-                                    className="h-6 px-2.5 rounded-sm bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:text-[#060918] font-semibold cursor-pointer"
-                                  >
-                                    Confirm AI Resync
-                                  </button>
+                            {/* Destructive source actions with inline confirmation */}
+                            <div className="pt-1 border-t border-[#d2dcf0] dark:border-[#21284c] space-y-1">
+                              {sourceConfirmAction === "regenerate" ? (
+                                <div className="p-2 rounded-sm border border-amber-300/80 dark:border-amber-500/40 bg-amber-50/80 dark:bg-amber-950/35 space-y-1.5">
+                                  <p className="text-[11px] text-amber-950 dark:text-amber-100 leading-snug">
+                                    Re-generate all subtitles from the current clips? Manual text edits will be replaced.
+                                  </p>
+                                  <div className="flex items-center justify-end gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => setSourceConfirmAction(null)}
+                                      className="h-6 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[11px] text-[#4d597d] dark:text-[#919ec4] cursor-pointer"
+                                    >
+                                      Cancel
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={isProcessing || Boolean(regeneratingClipId)}
+                                      onClick={() => {
+                                        setSourceConfirmAction(null);
+                                        setShowSourceMenu(false);
+                                        onGenerateSubtitles();
+                                      }}
+                                      className="h-6 px-2.5 rounded-sm bg-teal-700 hover:bg-teal-800 dark:bg-teal-400 text-white dark:text-[#060918] text-[11px] font-semibold cursor-pointer disabled:opacity-45"
+                                    >
+                                      Re-generate
+                                    </button>
+                                  </div>
                                 </div>
-                              </div>
-                            )}
+                              ) : (
+                                <button
+                                  type="button"
+                                  disabled={isProcessing || Boolean(regeneratingClipId) || selectedScenes.length === 0}
+                                  onClick={() => setSourceConfirmAction("regenerate")}
+                                  className="w-full px-2 py-1.5 rounded-sm text-left text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] flex items-center gap-2 cursor-pointer disabled:opacity-45"
+                                >
+                                  <RefreshCw className="w-3.5 h-3.5 text-[#4d597d] dark:text-[#919ec4]" />
+                                  <span>Re-generate All Subtitles</span>
+                                </button>
+                              )}
 
-                            {confirmQualityAction === "gloss" && onFillMissingGlosses && (
-                              <div className="p-2 rounded-sm border border-sky-300/80 dark:border-sky-600/50 bg-sky-50/85 dark:bg-sky-950/40 flex flex-wrap items-center justify-between gap-2 text-[11px]">
-                                <span className="text-sky-950 dark:text-sky-100">
-                                  Fill missing word glosses via AI for {qualitySummary.missingGlossCount}{" "}
-                                  {qualitySummary.missingGlossCount === 1 ? "line" : "lines"}?
-                                </span>
-                                <div className="flex items-center gap-1.5">
-                                  <button
-                                    type="button"
-                                    onClick={() => setConfirmQualityAction(null)}
-                                    className="h-6 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#4d597d] dark:text-[#919ec4] cursor-pointer"
-                                  >
-                                    Cancel
-                                  </button>
-                                  <button
-                                    type="button"
-                                    disabled={isRetranslatingAll || isResyncingTimings}
-                                    onClick={() => {
-                                      setConfirmQualityAction(null);
-                                      onFillMissingGlosses(qualitySummary.missingGlossSubIds);
-                                    }}
-                                    className="h-6 px-2.5 rounded-sm bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:text-[#060918] font-semibold cursor-pointer"
-                                  >
-                                    Confirm Fill Gloss
-                                  </button>
+                              {sourceConfirmAction === "clear" ? (
+                                <div className="p-2 rounded-sm border border-red-300/80 dark:border-red-800/70 bg-red-50/85 dark:bg-red-950/35 space-y-1.5">
+                                  <p className="text-[11px] text-red-900 dark:text-red-200 leading-snug">
+                                    Clear this video and close the current session?
+                                  </p>
+                                  <div className="flex items-center justify-end gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => setSourceConfirmAction(null)}
+                                      className="h-6 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[11px] text-[#4d597d] dark:text-[#919ec4] cursor-pointer"
+                                    >
+                                      Cancel
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setSourceConfirmAction(null);
+                                        setShowSourceMenu(false);
+                                        onClearLocalVideo();
+                                      }}
+                                      className="h-6 px-2.5 rounded-sm bg-red-600 hover:bg-red-700 text-white text-[11px] font-semibold cursor-pointer"
+                                    >
+                                      Clear Video
+                                    </button>
+                                  </div>
                                 </div>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => setSourceConfirmAction("clear")}
+                                  className="w-full px-2 py-1.5 rounded-sm text-left text-xs font-medium text-red-700 dark:text-red-300 hover:bg-red-50 dark:hover:bg-red-950/40 flex items-center gap-2 cursor-pointer"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                  <span>Clear / Replace Video</span>
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Mobile Post-Generate Inline Push-Expand Timeline (transport stays fixed under video preview) */}
+                  {isMobileStudio && mobileTimelineExpanded && (
+                    <div className="shrink-0 border-b border-[#d2dcf0] dark:border-[#21284c]">
+                      <ProjectTimelineEditor
+                        project={project}
+                        cutTime={cutTime}
+                        subscribeCutTime={subscribeCutTime}
+                        isPlaying={isPlaying}
+                        isActive={
+                          isWorkspaceVisible &&
+                          isStudioView &&
+                          studioSection === "edit" &&
+                          mobileTimelineExpanded
+                        }
+                        onTogglePlay={onTogglePlay}
+                        onPause={onPause}
+                        onSeek={onSeek}
+                        onPlayFromTime={onPlayFromTime}
+                        onUpdateScenes={onUpdateProjectScenes}
+                        onUpdateSubtitleTiming={onUpdateSubtitleTiming}
+                        onShiftAllSubtitles={onShiftAllSubtitles}
+                        onUndo={onUndoProp ?? onUndoSubtitles}
+                        onRedo={onRedoProp ?? onRedoSubtitles}
+                        canUndo={canUndoProp ?? canUndoSubtitles}
+                        canRedo={canRedoProp ?? canRedoSubtitles}
+                        onResetTimeline={onResetTimeline}
+                        onGoToScenes={() => onChangeStudioSection("edit")}
+                        cutSpeechRegions={cutSpeechRegions}
+                        onTranscribeRange={onTranscribeRange}
+                        transcribingRange={transcribingRange}
+                        clipSubtitleCounts={clipSubtitleCounts}
+                        regeneratingClipId={regeneratingClipId}
+                        regeneratingClipPercent={regeneratingClipPercent}
+                        onGenerateSingleClip={onGenerateSingleClip}
+                        isBusy={isProcessing}
+                        onPreviewSourceSeek={onPreviewSourceSeek}
+                        selectedSubtitleId={selectedSubtitleId}
+                        onSelectSubtitle={onSelectTimelineSubtitle ?? setSelectedSubtitleId}
+                        hideUndoRedo
+                        compactMobileExpanded
+                        hideTransport
+                      />
+                    </div>
+                  )}
+
+                  {/* TAB 1: SCRIPT */}
+                  {captionTab === "script" && (
+                    <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+                      {/* Conditional Secondary Bar: Follow Paused / Off Chip */}
+                      {autoFollowState !== "following" && (
+                        <div className="shrink-0 px-3.5 py-1 border-b border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc]/50 dark:bg-[#070814]/50 flex items-center justify-between gap-2 text-[11px]">
+                          <span className="text-[#4d597d] dark:text-[#919ec4] truncate">
+                            {autoFollowState === "paused_by_editing"
+                              ? "Auto-follow paused while editing"
+                              : autoFollowState === "paused_by_scroll"
+                                ? "Auto-follow paused while scrolling"
+                                : "Auto-follow is off"}
+                          </span>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setAutoFollowState("following");
+                                if (livePlayingSubId) {
+                                  requestAnimationFrame(() => {
+                                    subtitleViewportRef.current?.scrollToSubtitle(
+                                      livePlayingSubId,
+                                      "smooth"
+                                    );
+                                  });
+                                }
+                              }}
+                              className="h-6 px-2 rounded-sm border border-teal-600/60 dark:border-teal-400/60 bg-teal-50/90 dark:bg-teal-950/60 text-teal-800 dark:text-teal-200 font-semibold cursor-pointer transition-colors"
+                            >
+                              Resume
+                            </button>
+                            <button
+                              type="button"
+                              onClick={jumpToActiveSubtitle}
+                              className="h-6 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[#0c1026] dark:text-[#f3f5fc] font-medium inline-flex items-center gap-1 cursor-pointer transition-colors"
+                            >
+                              <LocateFixed className="w-3 h-3" />
+                              <span>Jump</span>
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Unified Collapsible Diagnostics Bar (Quality + Missed Speech) — Quiet 1-line summary by default */}
+                      {project.subtitles.length > 0 &&
+                        (qualitySummary.totalFlagged > 0 ||
+                          qualityFilter !== "all" ||
+                          (unmatchedSpeechGaps.length > 0 && Boolean(onTranscribeRange))) && (
+                          <div className="shrink-0 border-b border-[#d2dcf0] dark:border-[#21284c] bg-[#f8faff] dark:bg-[#0a0d1c]">
+                            <button
+                              type="button"
+                              onClick={() => setShowDiagnosticsDrawer((v) => !v)}
+                              aria-expanded={showDiagnosticsDrawer || qualityFilter !== "all"}
+                              className="w-full px-3 py-1.5 flex items-center justify-between gap-2 text-[11px] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] cursor-pointer transition-colors"
+                            >
+                              <span className="flex items-center gap-1.5 min-w-0 truncate">
+                                <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
+                                <span className="truncate font-medium">
+                                  {[
+                                    qualitySummary.totalFlagged > 0
+                                      ? `${qualitySummary.totalFlagged} timing/gloss ${qualitySummary.totalFlagged === 1 ? "issue" : "issues"}`
+                                      : null,
+                                    unmatchedSpeechGaps.length > 0 && onTranscribeRange
+                                      ? `${unmatchedSpeechGaps.length} missed speech`
+                                      : null,
+                                  ]
+                                    .filter(Boolean)
+                                    .join(" · ") || "Filter active"}
+                                </span>
+                              </span>
+                              <span className="inline-flex items-center gap-1 text-[11px] font-medium text-teal-700 dark:text-teal-400 shrink-0">
+                                <span>{showDiagnosticsDrawer || qualityFilter !== "all" ? "Hide" : "Review"}</span>
+                                {showDiagnosticsDrawer || qualityFilter !== "all" ? (
+                                  <ChevronUp className="w-3.5 h-3.5" />
+                                ) : (
+                                  <ChevronDown className="w-3.5 h-3.5" />
+                                )}
+                              </span>
+                            </button>
+
+                            {(showDiagnosticsDrawer || qualityFilter !== "all") && (
+                              <div className="px-3 pb-2 pt-1 space-y-2 border-t border-[#d2dcf0]/70 dark:border-[#21284c]/70">
+                                {(qualitySummary.totalFlagged > 0 || qualityFilter !== "all") && (
+                                  <div className="space-y-1.5">
+                                    <div className="flex flex-wrap items-center justify-between gap-1.5">
+                                      <div className="flex flex-wrap items-center gap-1">
+                                        <button
+                                          type="button"
+                                          onClick={() => setQualityFilter("all")}
+                                          className={`h-6 px-2 rounded-sm border text-[11px] font-medium cursor-pointer transition-colors ${
+                                            qualityFilter === "all"
+                                              ? "border-teal-600/80 bg-teal-50 text-teal-800 dark:border-teal-400/80 dark:bg-teal-950/60 dark:text-teal-200 font-semibold"
+                                              : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
+                                          }`}
+                                        >
+                                          All ({project.subtitles.length})
+                                        </button>
+                                        {(qualitySummary.overlapCount > 0 ||
+                                          qualityFilter === "overlap") && (
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              setQualityFilter((cur) =>
+                                                cur === "overlap" ? "all" : "overlap"
+                                              )
+                                            }
+                                            className={`h-6 px-2 rounded-sm border text-[11px] font-medium inline-flex items-center gap-1 cursor-pointer transition-colors ${
+                                              qualityFilter === "overlap"
+                                                ? "border-rose-500 bg-rose-50 text-rose-800 dark:border-rose-400 dark:bg-rose-950/60 dark:text-rose-200 font-semibold"
+                                                : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#0c1026] dark:text-[#f3f5fc]"
+                                            }`}
+                                          >
+                                            <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
+                                            <span>Overlap ({qualitySummary.overlapCount})</span>
+                                          </button>
+                                        )}
+                                        {(qualitySummary.tooFastCount > 0 ||
+                                          qualityFilter === "too_fast") && (
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              setQualityFilter((cur) =>
+                                                cur === "too_fast" ? "all" : "too_fast"
+                                              )
+                                            }
+                                            className={`h-6 px-2 rounded-sm border text-[11px] font-medium inline-flex items-center gap-1 cursor-pointer transition-colors ${
+                                              qualityFilter === "too_fast"
+                                                ? "border-amber-500 bg-amber-50 text-amber-900 dark:border-amber-400 dark:bg-amber-950/60 dark:text-amber-200 font-semibold"
+                                                : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#0c1026] dark:text-[#f3f5fc]"
+                                            }`}
+                                          >
+                                            <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                                            <span>Too Fast ({qualitySummary.tooFastCount})</span>
+                                          </button>
+                                        )}
+                                        {(qualitySummary.silentMismatchCount > 0 ||
+                                          qualityFilter === "silent_mismatch") && (
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              setQualityFilter((cur) =>
+                                                cur === "silent_mismatch" ? "all" : "silent_mismatch"
+                                              )
+                                            }
+                                            className={`h-6 px-2 rounded-sm border text-[11px] font-medium inline-flex items-center gap-1 cursor-pointer transition-colors ${
+                                              qualityFilter === "silent_mismatch"
+                                                ? "border-orange-500 bg-orange-50 text-orange-900 dark:border-orange-400 dark:bg-orange-950/60 dark:text-orange-200 font-semibold"
+                                                : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#0c1026] dark:text-[#f3f5fc]"
+                                            }`}
+                                          >
+                                            <span className="w-1.5 h-1.5 rounded-full bg-orange-500" />
+                                            <span>Silent ({qualitySummary.silentMismatchCount})</span>
+                                          </button>
+                                        )}
+                                        {(qualitySummary.missingGlossCount > 0 ||
+                                          qualityFilter === "missing_gloss") && (
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              setQualityFilter((cur) =>
+                                                cur === "missing_gloss" ? "all" : "missing_gloss"
+                                              )
+                                            }
+                                            className={`h-6 px-2 rounded-sm border text-[11px] font-medium inline-flex items-center gap-1 cursor-pointer transition-colors ${
+                                              qualityFilter === "missing_gloss"
+                                                ? "border-sky-500 bg-sky-50 text-sky-900 dark:border-sky-400 dark:bg-sky-950/60 dark:text-sky-200 font-semibold"
+                                                : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#0c1026] dark:text-[#f3f5fc]"
+                                            }`}
+                                          >
+                                            <span className="w-1.5 h-1.5 rounded-full bg-sky-500" />
+                                            <span>No Gloss ({qualitySummary.missingGlossCount})</span>
+                                          </button>
+                                        )}
+                                      </div>
+
+                                      <div className="flex flex-wrap items-center gap-1">
+                                        {qualitySummary.overlapCount > 0 && onAutoFixSubtitleTimings && (
+                                          <button
+                                            type="button"
+                                            disabled={isResyncingTimings || isRetranslatingAll}
+                                            onClick={onAutoFixSubtitleTimings}
+                                            className="h-6 px-2 rounded-sm border border-rose-300 dark:border-rose-700 bg-rose-50/90 dark:bg-rose-950/50 hover:bg-rose-100 dark:hover:bg-rose-900/60 text-[11px] font-semibold text-rose-800 dark:text-rose-200 inline-flex items-center gap-1 cursor-pointer disabled:opacity-45"
+                                          >
+                                            <Wand2 className="w-3 h-3" />
+                                            <span>Fix Overlaps</span>
+                                          </button>
+                                        )}
+                                        {qualitySummary.silentMismatchCount > 0 && onAiResyncSubtitles && (
+                                          <button
+                                            type="button"
+                                            disabled={isResyncingTimings || isRetranslatingAll}
+                                            onClick={() =>
+                                              setConfirmQualityAction((cur) =>
+                                                cur === "resync" ? null : "resync"
+                                              )
+                                            }
+                                            className="h-6 px-2 rounded-sm border border-orange-300 dark:border-orange-700 bg-orange-50/90 dark:bg-orange-950/50 hover:bg-orange-100 dark:hover:bg-orange-900/60 text-[11px] font-semibold text-orange-800 dark:text-orange-200 inline-flex items-center gap-1 cursor-pointer disabled:opacity-45"
+                                          >
+                                            <RefreshCw
+                                              className={`w-3 h-3 ${isResyncingTimings ? "animate-spin" : ""}`}
+                                            />
+                                            <span>AI Resync</span>
+                                          </button>
+                                        )}
+                                        {qualitySummary.missingGlossCount > 0 && onFillMissingGlosses && (
+                                          <button
+                                            type="button"
+                                            disabled={isResyncingTimings || isRetranslatingAll}
+                                            onClick={() =>
+                                              setConfirmQualityAction((cur) =>
+                                                cur === "gloss" ? null : "gloss"
+                                              )
+                                            }
+                                            className="h-6 px-2 rounded-sm border border-sky-300 dark:border-sky-700 bg-sky-50/90 dark:bg-sky-950/50 hover:bg-sky-100 dark:hover:bg-sky-900/60 text-[11px] font-semibold text-sky-800 dark:text-sky-200 inline-flex items-center gap-1 cursor-pointer disabled:opacity-45"
+                                          >
+                                            <Sparkles className="w-3 h-3" />
+                                            <span>Fill Gloss (AI)</span>
+                                          </button>
+                                        )}
+                                      </div>
+                                    </div>
+
+                                    {confirmQualityAction === "resync" && onAiResyncSubtitles && (
+                                      <div className="p-2 rounded-sm border border-orange-300/80 dark:border-orange-600/50 bg-orange-50/85 dark:bg-orange-950/40 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                                        <span className="text-orange-950 dark:text-orange-100">
+                                          Re-align subtitle timings to spoken audio via AI ({qualitySummary.silentMismatchCount} mismatch{qualitySummary.silentMismatchCount === 1 ? "" : "es"})?
+                                        </span>
+                                        <div className="flex items-center gap-1.5">
+                                          <button
+                                            type="button"
+                                            onClick={() => setConfirmQualityAction(null)}
+                                            className="h-6 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#4d597d] dark:text-[#919ec4] cursor-pointer"
+                                          >
+                                            Cancel
+                                          </button>
+                                          <button
+                                            type="button"
+                                            disabled={isResyncingTimings || isRetranslatingAll}
+                                            onClick={() => {
+                                              setConfirmQualityAction(null);
+                                              onAiResyncSubtitles();
+                                            }}
+                                            className="h-6 px-2.5 rounded-sm bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:text-[#060918] font-semibold cursor-pointer"
+                                          >
+                                            Confirm AI Resync
+                                          </button>
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    {confirmQualityAction === "gloss" && onFillMissingGlosses && (
+                                      <div className="p-2 rounded-sm border border-sky-300/80 dark:border-sky-600/50 bg-sky-50/85 dark:bg-sky-950/40 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                                        <span className="text-sky-950 dark:text-sky-100">
+                                          Fill missing word glosses via AI for {qualitySummary.missingGlossCount}{" "}
+                                          {qualitySummary.missingGlossCount === 1 ? "line" : "lines"}?
+                                        </span>
+                                        <div className="flex items-center gap-1.5">
+                                          <button
+                                            type="button"
+                                            onClick={() => setConfirmQualityAction(null)}
+                                            className="h-6 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#4d597d] dark:text-[#919ec4] cursor-pointer"
+                                          >
+                                            Cancel
+                                          </button>
+                                          <button
+                                            type="button"
+                                            disabled={isRetranslatingAll || isResyncingTimings}
+                                            onClick={() => {
+                                              setConfirmQualityAction(null);
+                                              onFillMissingGlosses(qualitySummary.missingGlossSubIds);
+                                            }}
+                                            className="h-6 px-2.5 rounded-sm bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:text-[#060918] font-semibold cursor-pointer"
+                                          >
+                                            Confirm Fill Gloss
+                                          </button>
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+
+                                {unmatchedSpeechGaps.length > 0 && onTranscribeRange && (
+                                  <div className="flex flex-wrap items-center gap-1.5 pt-1 border-t border-[#d2dcf0]/60 dark:border-[#21284c]/60">
+                                    <span className="text-[11px] font-medium text-amber-900 dark:text-amber-200 inline-flex items-center gap-1 shrink-0">
+                                      <Sparkles className="w-3 h-3" />
+                                      <span>Missed speech:</span>
+                                    </span>
+                                    {unmatchedSpeechGaps.slice(0, 6).map((gap) => {
+                                      const isBusy =
+                                        Boolean(transcribingRange) &&
+                                        Math.abs(transcribingRange!.startSec - gap.startSec) < 0.15 &&
+                                        Math.abs(transcribingRange!.endSec - gap.endSec) < 0.15;
+                                      return (
+                                        <button
+                                          key={`gap-${gap.startSec}-${gap.endSec}`}
+                                          type="button"
+                                          disabled={Boolean(transcribingRange) || isResyncingTimings}
+                                          onClick={() => {
+                                            onSeek(gap.startSec);
+                                            void triggerRangeTranscription(gap.startSec, gap.endSec);
+                                          }}
+                                          title={`AI transcribe missed speech from ${gap.startSec.toFixed(1)}s to ${gap.endSec.toFixed(1)}s`}
+                                          className="h-6 px-2 rounded-sm border border-amber-400/70 dark:border-amber-500/40 bg-white dark:bg-[#0d1022] hover:bg-amber-50 dark:hover:bg-amber-900/40 text-[11px] font-mono-tabular font-medium text-amber-950 dark:text-amber-100 inline-flex items-center gap-1 cursor-pointer disabled:opacity-50 transition-colors"
+                                        >
+                                          {isBusy ? (
+                                            <Loader2 className="w-3 h-3 animate-spin text-teal-700 dark:text-teal-400" />
+                                          ) : (
+                                            <Sparkles className="w-3 h-3 text-teal-700 dark:text-teal-400" />
+                                          )}
+                                          <span>
+                                            {gap.startSec.toFixed(1)}–{gap.endSec.toFixed(1)}s
+                                          </span>
+                                          <span className="font-sans font-semibold text-teal-700 dark:text-teal-400">
+                                            {isBusy ? "Filling…" : "AI Fill"}
+                                          </span>
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+                                )}
                               </div>
                             )}
                           </div>
@@ -2196,52 +2588,7 @@ export function WorkspaceSidebar({
                         </div>
                       )}
 
-                      {/* Missed Speech Gaps Quick AI Fill Bar */}
-                      {unmatchedSpeechGaps.length > 0 && onTranscribeRange && (
-                        <div className="shrink-0 px-3.5 py-1.5 border-b border-[#d2dcf0] dark:border-[#21284c] bg-amber-50/70 dark:bg-amber-950/25 flex flex-wrap items-center gap-1.5">
-                          <span className="text-[11px] font-semibold text-amber-900 dark:text-amber-200 inline-flex items-center gap-1 shrink-0">
-                            <Sparkles className="w-3 h-3" />
-                            <span>
-                              Missed Speech ({unmatchedSpeechGaps.length}):
-                            </span>
-                          </span>
-                          <div className="flex flex-wrap items-center gap-1">
-                            {unmatchedSpeechGaps.slice(0, 6).map((gap) => {
-                              const isBusy =
-                                Boolean(transcribingRange) &&
-                                Math.abs(transcribingRange!.startSec - gap.startSec) < 0.15 &&
-                                Math.abs(transcribingRange!.endSec - gap.endSec) < 0.15;
-                              return (
-                                <button
-                                  key={`gap-${gap.startSec}-${gap.endSec}`}
-                                  type="button"
-                                  disabled={Boolean(transcribingRange) || isResyncingTimings}
-                                  onClick={() => {
-                                    onSeek(gap.startSec);
-                                    void triggerRangeTranscription(gap.startSec, gap.endSec);
-                                  }}
-                                  title={`AI transcribe missed speech from ${gap.startSec.toFixed(1)}s to ${gap.endSec.toFixed(1)}s`}
-                                  className="h-6 px-2 rounded-sm border border-amber-400/80 dark:border-amber-500/50 bg-white/95 dark:bg-[#0d1022] hover:bg-amber-100/80 dark:hover:bg-amber-900/40 text-[11px] font-mono-tabular font-medium text-amber-950 dark:text-amber-100 inline-flex items-center gap-1 cursor-pointer disabled:opacity-50 transition-colors"
-                                >
-                                  {isBusy ? (
-                                    <Loader2 className="w-3 h-3 animate-spin text-teal-700 dark:text-teal-400" />
-                                  ) : (
-                                    <Sparkles className="w-3 h-3 text-teal-700 dark:text-teal-400" />
-                                  )}
-                                  <span>
-                                    {gap.startSec.toFixed(1)}–{gap.endSec.toFixed(1)}s
-                                  </span>
-                                  <span className="font-sans font-semibold text-teal-700 dark:text-teal-400">
-                                    {isBusy ? "Filling..." : "AI Fill"}
-                                  </span>
-                                </button>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Inline Add Subtitle / AI Transcribe Range Form */}
+                      {/* Inline Manual Add Subtitle Form (AI Range Transcribe lives canonically on Timeline) */}
                       {showAddSub && (
                         <form
                           onSubmit={(e) => {
@@ -2259,11 +2606,11 @@ export function WorkspaceSidebar({
                             setNewSubPhonetic("");
                             setNewSubBurmese("");
                           }}
-                          className="shrink-0 px-3.5 py-3 border-b border-[#d2dcf0] dark:border-[#21284c] bg-[#e7ecf8]/60 dark:bg-[#141933] space-y-2.5"
+                          className="shrink-0 px-3.5 py-2.5 border-b border-[#d2dcf0] dark:border-[#21284c] bg-[#e7ecf8]/60 dark:bg-[#141933] space-y-2"
                         >
                           <div className="flex flex-wrap items-center justify-between gap-2">
                             <span className="font-display text-xs font-semibold text-[#0c1026] dark:text-[#f3f5fc]">
-                              Add / AI Transcribe Range
+                              Add Manual Subtitle
                             </span>
                             <div className="flex flex-wrap items-center gap-1.5 text-xs">
                               <label className="flex items-center gap-1 text-[#4d597d] dark:text-[#919ec4]">
@@ -2302,79 +2649,10 @@ export function WorkspaceSidebar({
                               >
                                 Use playhead
                               </button>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  const maxDur = Math.max(0.5, project.targetDurationSec || 10);
-                                  const suggested = suggestTranscribeRange(
-                                    project.subtitles,
-                                    cutSpeechRegions,
-                                    cutTime,
-                                    maxDur
-                                  );
-                                  setNewSubStart(suggested.startSec.toFixed(1));
-                                  setNewSubEnd(suggested.endSec.toFixed(1));
-                                }}
-                                className="h-6 px-2 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[11px] font-medium text-[#0c1026] dark:text-[#f3f5fc] cursor-pointer whitespace-nowrap transition-colors"
-                              >
-                                Nearest gap
-                              </button>
                             </div>
                           </div>
 
-                          {onTranscribeRange && (
-                            <div className="p-2 rounded-sm border border-teal-300/70 dark:border-teal-500/35 bg-teal-50/75 dark:bg-teal-950/30 flex flex-wrap items-center justify-between gap-2">
-                              <span className="text-[11px] text-[#0c1026] dark:text-[#f3f5fc]">
-                                Generate Thai & Burmese subtitles directly from audio for this range.
-                              </span>
-                              <button
-                                type="button"
-                                disabled={Boolean(transcribingRange) || isResyncingTimings}
-                                onClick={() => {
-                                  const s = parseFloat(newSubStart);
-                                  const en = parseFloat(newSubEnd);
-                                  if (!Number.isFinite(s) || !Number.isFinite(en) || en <= s + 0.2) {
-                                    setRangeFeedback({
-                                      type: "error",
-                                      text: "Enter a valid start and end range (at least 0.25s).",
-                                    });
-                                    return;
-                                  }
-                                  void triggerRangeTranscription(s, en);
-                                }}
-                                className="h-7 px-3 rounded-sm bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] text-xs font-semibold inline-flex items-center gap-1.5 disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer transition-colors"
-                              >
-                                {transcribingRange ? (
-                                  <>
-                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                    <span>Transcribing...</span>
-                                  </>
-                                ) : (
-                                  <>
-                                    <Sparkles className="w-3.5 h-3.5" />
-                                    <span>AI Transcribe Range</span>
-                                  </>
-                                )}
-                              </button>
-                            </div>
-                          )}
-
-                          {rangeFeedback && (
-                            <p
-                              className={`text-[11px] px-2 py-1 rounded-sm ${
-                                rangeFeedback.type === "error"
-                                  ? "bg-red-50 text-red-700 dark:bg-red-950/40 dark:text-red-300"
-                                  : "bg-amber-50 text-amber-900 dark:bg-amber-950/40 dark:text-amber-200"
-                              }`}
-                            >
-                              {rangeFeedback.text}
-                            </p>
-                          )}
-
-                          <div className="space-y-1.5 pt-0.5">
-                            <span className="block text-[10px] font-medium uppercase tracking-wide text-[#4d597d] dark:text-[#919ec4]">
-                              Or Type Manually
-                            </span>
+                          <div className="space-y-1.5">
                             <input
                               type="text"
                               value={newSubPhonetic}
@@ -2394,23 +2672,46 @@ export function WorkspaceSidebar({
                             />
                           </div>
 
-                          <div className="flex items-center justify-end gap-1.5 pt-0.5">
-                            <button
-                              type="button"
-                              onClick={() => setShowAddSub(false)}
-                              className="h-7 px-2.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] cursor-pointer transition-colors"
-                            >
-                              Cancel
-                            </button>
-                            <button
-                              type="submit"
-                              disabled={!newSubPhonetic.trim() && !newSubBurmese.trim()}
-                              className="h-7 px-3 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-xs font-semibold text-[#0c1026] dark:text-[#f3f5fc] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
-                            >
-                              Add Manual Line
-                            </button>
+                          <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
+                            {onTranscribeRange ? (
+                              <span className="text-[11px] text-[#4d597d] dark:text-[#919ec4]">
+                                For AI audio transcription, use <span className="font-medium text-[#0c1026] dark:text-[#f3f5fc]">AI Fill</span> on the Timeline.
+                              </span>
+                            ) : (
+                              <span />
+                            )}
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => setShowAddSub(false)}
+                                className="h-7 px-2.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] cursor-pointer transition-colors"
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                type="submit"
+                                disabled={!newSubPhonetic.trim() && !newSubBurmese.trim()}
+                                className="h-7 px-3 rounded-sm bg-teal-700 hover:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 text-white dark:text-[#060918] text-xs font-semibold disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
+                              >
+                                Add Line
+                              </button>
+                            </div>
                           </div>
                         </form>
+                      )}
+
+                      {rangeFeedback && (
+                        <div className="shrink-0 px-3.5 py-1.5 border-b border-[#d2dcf0] dark:border-[#21284c] bg-amber-50/80 dark:bg-amber-950/35 flex items-center justify-between gap-2 text-[11px] text-amber-900 dark:text-amber-200">
+                          <span>{rangeFeedback.text}</span>
+                          <button
+                            type="button"
+                            onClick={() => setRangeFeedback(null)}
+                            aria-label="Dismiss notice"
+                            className="p-0.5 cursor-pointer"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
                       )}
 
                       {subtitleRegenError && (
@@ -2434,6 +2735,7 @@ export function WorkspaceSidebar({
                         playingSubtitleId={livePlayingSubId}
                         autoFollowState={autoFollowState}
                         onChangeAutoFollowState={setAutoFollowState}
+                        className="touch-pan-y"
                       >
                         {/* Sticky Floating Find & Replace Bar */}
                         {isSearchOpen && (
@@ -2544,37 +2846,7 @@ export function WorkspaceSidebar({
                           </div>
                         )}
 
-                        {/* Compact Scenes Jump Strip */}
-                        {project.scenes.length > 1 && (
-                          <div className="px-3.5 py-1.5 border-b border-[#d2dcf0] dark:border-[#21284c] flex flex-wrap items-center gap-1">
-                            {project.scenes.map((sc, idx) => {
-                              let sceneCutStart = 0;
-                              for (let i = 0; i < idx; i++) {
-                                sceneCutStart += getSceneDurationSec(project.scenes[i]);
-                              }
-                              const sceneDur = getSceneDurationSec(sc);
-                              const isSceneActive =
-                                cutTime >= sceneCutStart && cutTime < sceneCutStart + sceneDur;
-
-                              return (
-                                <button
-                                  key={sc.index}
-                                  type="button"
-                                  onClick={() => onSeek(sceneCutStart)}
-                                  className={`px-2 py-0.5 rounded-sm text-[11px] font-mono-tabular border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
-                                    isSceneActive
-                                      ? "bg-teal-700 text-white border-teal-700 dark:bg-teal-400 dark:text-[#060918] dark:border-teal-400 font-semibold"
-                                      : "bg-[#f3f5fc] dark:bg-[#141933] text-[#0c1026] dark:text-[#f3f5fc] border-[#d2dcf0] dark:border-[#21284c] hover:border-[#b4c2e3] dark:hover:border-[#2f3866]"
-                                  }`}
-                                >
-                                  {idx + 1}. {formatRangeSec(sc.startSec)}–{formatRangeSec(sc.endSec)}
-                                </button>
-                              );
-                            })}
-                          </div>
-                        )}
-
-                      {/* Full-Bleed Hairline Subtitle Rows */}
+                        {/* Full-Bleed Hairline Subtitle Rows */}
                       {project.subtitles.length === 0 ? (
                         <div className="p-6 text-center space-y-2.5">
                           <p className="text-xs text-[#4d597d] dark:text-[#919ec4]">
@@ -3654,13 +3926,13 @@ export function WorkspaceSidebar({
                         )}
                       </div>
 
-                      {/* Coarse Offset Shift */}
+                      {/* Shift All Subtitles */}
                       <div className="pt-3 border-t border-[#d2dcf0] dark:border-[#21284c] space-y-2">
                         <span className="block text-[11px] font-semibold uppercase tracking-wider text-[#4d597d] dark:text-[#919ec4]">
-                          Coarse Global Shift
+                          Shift All Subtitles
                         </span>
                         <p className="text-xs text-[#4d597d] dark:text-[#919ec4]">
-                          Shift all subtitle timestamps by half a second. Fine ±0.1s nudge controls are available on the Timeline toolbar.
+                          Shift all subtitle timestamps by half a second. Fine Nudge ±0.1s controls are available on the Timeline toolbar.
                         </p>
                         <div className="flex items-center gap-2">
                           {[-0.5, 0.5].map((delta) => (
@@ -3750,40 +4022,6 @@ export function WorkspaceSidebar({
               );
             })()}
 
-            {studioSection === "timeline" && showMobileTimelineTab && (
-              <div className="p-3">
-                <ProjectTimelineEditor
-                  project={project}
-                  cutTime={cutTime}
-                  subscribeCutTime={subscribeCutTime}
-                  isPlaying={isPlaying}
-                  isActive={isWorkspaceVisible && activeTab === "studio" && studioSection === "timeline"}
-                  onTogglePlay={onTogglePlay}
-                  onPause={onPause}
-                  onSeek={onSeek}
-                  onPlayFromTime={onPlayFromTime}
-                  onUpdateScenes={onUpdateProjectScenes}
-                  onUpdateSubtitleTiming={onUpdateSubtitleTiming}
-                  onShiftAllSubtitles={onShiftAllSubtitles}
-                  onUndo={onUndoProp ?? onUndoSubtitles}
-                  onRedo={onRedoProp ?? onRedoSubtitles}
-                  canUndo={canUndoProp ?? canUndoSubtitles}
-                  canRedo={canRedoProp ?? canRedoSubtitles}
-                  onResetTimeline={onResetTimeline}
-                  onGoToScenes={() => onChangeStudioSection("clips")}
-                  cutSpeechRegions={cutSpeechRegions}
-                  onTranscribeRange={onTranscribeRange}
-                  transcribingRange={transcribingRange}
-                  clipSubtitleCounts={clipSubtitleCounts}
-                  regeneratingClipId={regeneratingClipId}
-                  regeneratingClipPercent={regeneratingClipPercent}
-                  onGenerateSingleClip={onGenerateSingleClip}
-                  isBusy={isProcessing}
-                  onPreviewSourceSeek={onPreviewSourceSeek}
-                />
-              </div>
-            )}
-
             {(studioSection === "visual" || studioSection === "audio") && (
               <div className="px-3.5 py-3">
                 <VideoEditPanel
@@ -3817,13 +4055,69 @@ export function WorkspaceSidebar({
                   onUpdateSubtitleTiming={onUpdateSubtitleTiming}
                   onRestoreProjectSnapshot={onRestoreProjectSnapshot ?? NOOP_RESTORE_SNAPSHOT}
                   onResetTimeline={onResetTimeline}
-                  onGoToScenes={() => onChangeStudioSection("clips")}
+                  onGoToScenes={() => onChangeStudioSection("edit")}
                 />
               </div>
             )}
+
+            {studioSection === "subtitle" && (
+              <div
+                aria-label="Subtitle settings"
+                className="px-3.5 py-4 min-h-full"
+              />
+            )}
           </div>
+          )}
+
+          {/* Mobile Persistent Bottom Timeline Dock (fills Edit tab directly, stays compact on Visual/Audio tabs) */}
+          {isMobileStudio && hideCaptions && (
+            <div className={mobileDirectTimeline ? "flex-1 min-h-0 flex flex-col" : "shrink-0"}>
+              <ProjectTimelineEditor
+                dockMode
+                fillHeight={mobileDirectTimeline}
+                compactDock={!mobileDirectTimeline}
+                isCollapsed={false}
+                project={project}
+                cutTime={cutTime}
+                subscribeCutTime={subscribeCutTime}
+                isPlaying={isPlaying}
+                isActive={isWorkspaceVisible && isStudioView}
+                onTogglePlay={onTogglePlay}
+                onPause={onPause}
+                onSeek={onSeek}
+                onPlayFromTime={onPlayFromTime}
+                onUpdateScenes={onUpdateProjectScenes}
+                onUpdateSubtitleTiming={onUpdateSubtitleTiming}
+                onShiftAllSubtitles={onShiftAllSubtitles}
+                onUndo={onUndoProp ?? onUndoSubtitles}
+                onRedo={onRedoProp ?? onRedoSubtitles}
+                canUndo={canUndoProp ?? canUndoSubtitles}
+                canRedo={canRedoProp ?? canRedoSubtitles}
+                onResetTimeline={onResetTimeline}
+                onGoToScenes={() => onChangeStudioSection("edit")}
+                cutSpeechRegions={cutSpeechRegions}
+                onTranscribeRange={onTranscribeRange}
+                transcribingRange={transcribingRange}
+                clipSubtitleCounts={clipSubtitleCounts}
+                regeneratingClipId={regeneratingClipId}
+                regeneratingClipPercent={regeneratingClipPercent}
+                onGenerateSingleClip={onGenerateSingleClip}
+                onGenerateSubtitles={onGenerateSubtitles}
+                generationProgress={generationProgress}
+                isBusy={isProcessing}
+                onPreviewSourceSeek={onPreviewSourceSeek}
+                selectedSubtitleId={selectedSubtitleId}
+                onSelectSubtitle={onSelectTimelineSubtitle ?? setSelectedSubtitleId}
+                hideUndoRedo
+                hideHeader
+                hideTransport
+                hideCaptions={hideCaptions}
+                showSubtitleTrack
+              />
+            </div>
+          )}
         </div>
-        {hasGeneratedProject(project) && onApplyPasteTranscriptSync && (
+        {!hideCaptions && hasGeneratedProject(project) && onApplyPasteTranscriptSync && (
           <PasteTranscriptModal
             isOpen={showPasteSyncModal}
             projectTitle={project.title}

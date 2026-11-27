@@ -37,6 +37,7 @@ import {
   type WorkspaceTab,
 } from "./components/WorkspaceSidebar";
 import { ProjectTimelineEditor } from "./components/ProjectTimelineEditor";
+import { EmptyStudioUpload } from "./components/EmptyStudioUpload";
 import { ExportSheet } from "./components/ExportSheet";
 import {
   exportProjectToMp4,
@@ -100,6 +101,9 @@ import {
   type AutoFollowState,
 } from "./utils/subtitleState";
 
+// Temporarily hide all caption-related UI while keeping underlying caption logic intact
+const SHOW_CAPTIONS_UI = false;
+
 export default function App() {
   const [darkMode, setDarkMode] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
@@ -117,7 +121,7 @@ export default function App() {
   const [searchError, setSearchError] = useState<string | null>(null);
 
   const [activeTab, setActiveTab] = useState<WorkspaceTab>("youtube");
-  const [studioSection, setStudioSection] = useState<StudioSectionId>("clips");
+  const [studioSection, setStudioSection] = useState<StudioSectionId>("edit");
   const [timelineCollapsed, setTimelineCollapsed] = useState<boolean>(false);
   const [localMedia, setLocalMedia] = useState<LocalStudioMedia | null>(null);
   const [sourcePreview, setSourcePreview] = useState<YouTubeSourcePreview | null>(null);
@@ -152,6 +156,7 @@ export default function App() {
   const [stageSelectRequest, setStageSelectRequest] = useState<{
     id: string;
     focusPhonetic?: boolean;
+    source?: "stage" | "timeline" | "keyboard";
     nonce: number;
   } | null>(null);
   const [shortcutToast, setShortcutToast] = useState<string | null>(null);
@@ -207,6 +212,8 @@ export default function App() {
   loopingSubIdRef.current = loopingSubId;
   const selectedSubtitleIdRef = useRef<string | null>(null);
   selectedSubtitleIdRef.current = selectedSubtitleId;
+  const autoFollowStateRef = useRef<AutoFollowState>(autoFollowState);
+  autoFollowStateRef.current = autoFollowState;
   const isSubtitleSearchOpenRef = useRef(false);
   isSubtitleSearchOpenRef.current = isSubtitleSearchOpen;
   const exportSheetOpenRef = useRef(false);
@@ -515,8 +522,8 @@ export default function App() {
   }, [project?.subtitles]);
 
   useEffect(() => {
-    if (!localMedia && !hasProjectMedia(project) && studioSection !== "clips") {
-      setStudioSection("clips");
+    if (!localMedia && !hasProjectMedia(project) && studioSection !== "edit") {
+      setStudioSection("edit");
     }
   }, [localMedia, project, studioSection]);
 
@@ -527,12 +534,6 @@ export default function App() {
     mql.addEventListener("change", onChange);
     return () => mql.removeEventListener("change", onChange);
   }, []);
-
-  useEffect(() => {
-    if (isDesktop && studioSection === "timeline") {
-      setStudioSection(hasGeneratedProject(projectRef.current) ? "captions" : "clips");
-    }
-  }, [isDesktop, studioSection]);
 
   const registerBlobUrl = useCallback((blob: Blob): string => {
     const url = URL.createObjectURL(blob);
@@ -853,7 +854,7 @@ export default function App() {
     setProject(draftProj);
     setBaselineFromProject(draftProj);
     setActiveTab("studio");
-    setStudioSection("clips");
+    setStudioSection("edit");
   };
 
   const handleDetectedLocalDuration = useCallback((rawDur: number) => {
@@ -930,7 +931,7 @@ export default function App() {
       return prev;
     });
     setActiveTab("studio");
-    setStudioSection("clips");
+    setStudioSection("edit");
   };
 
   const handleCancelGenerateSubtitles = useCallback(() => {
@@ -1133,7 +1134,21 @@ export default function App() {
       });
       const scenes = ensureSceneIds(scenesWithPreservedIds);
       const subtitles = (Array.isArray(serverData.subtitles) ? serverData.subtitles : []).map(
-        (sub) => withSceneId(sub, scenes)
+        (sub) =>
+          withSceneId(
+            {
+              ...sub,
+              aiSourceStartSec:
+                typeof sub.aiSourceStartSec === "number" && Number.isFinite(sub.aiSourceStartSec)
+                  ? sub.aiSourceStartSec
+                  : sub.sourceStartSec,
+              aiSourceEndSec:
+                typeof sub.aiSourceEndSec === "number" && Number.isFinite(sub.aiSourceEndSec)
+                  ? sub.aiSourceEndSec
+                  : sub.sourceEndSec,
+            },
+            scenes
+          )
       );
       return {
         ...serverData,
@@ -1319,7 +1334,7 @@ export default function App() {
         setProject(nextProj);
         setBaselineFromProject(nextProj);
         setActiveTab("studio");
-        setStudioSection("captions");
+        setStudioSection("edit");
       }
     } catch (err) {
       if (
@@ -2097,6 +2112,14 @@ export default function App() {
           return withSceneId(
             {
               ...sub,
+              aiSourceStartSec:
+                typeof sub.aiSourceStartSec === "number" && Number.isFinite(sub.aiSourceStartSec)
+                  ? sub.aiSourceStartSec
+                  : sub.sourceStartSec,
+              aiSourceEndSec:
+                typeof sub.aiSourceEndSec === "number" && Number.isFinite(sub.aiSourceEndSec)
+                  ? sub.aiSourceEndSec
+                  : sub.sourceEndSec,
               sceneIndex: mappedStart.sceneIndex,
               startTime,
               endTime,
@@ -2136,6 +2159,14 @@ export default function App() {
           return withSceneId(
             {
               ...sub,
+              aiSourceStartSec:
+                typeof sub.aiSourceStartSec === "number" && Number.isFinite(sub.aiSourceStartSec)
+                  ? sub.aiSourceStartSec
+                  : sub.sourceStartSec,
+              aiSourceEndSec:
+                typeof sub.aiSourceEndSec === "number" && Number.isFinite(sub.aiSourceEndSec)
+                  ? sub.aiSourceEndSec
+                  : sub.sourceEndSec,
               sceneIndex: mappedStart.sceneIndex,
               startTime: nextStart,
               endTime: nextEnd,
@@ -3541,11 +3572,26 @@ export default function App() {
     handleSeekRef.current(startTime);
     setSelectedSubtitleId(id);
     setActiveTab("studio");
-    setStudioSection("captions");
+    setStudioSection("edit");
     setCaptionTab("script");
     setAutoFollowState("following");
-    setStageSelectRequest({ id, focusPhonetic: true, nonce: Date.now() });
+    setStageSelectRequest({ id, focusPhonetic: true, source: "stage", nonce: Date.now() });
   }, []);
+
+  const handleSelectTimelineSubtitle = useCallback(
+    (id: string | null, opts?: { scrollList?: boolean }) => {
+      setSelectedSubtitleId(id);
+      if (id && opts?.scrollList && autoFollowStateRef.current === "following") {
+        setStageSelectRequest({
+          id,
+          focusPhonetic: false,
+          source: "timeline",
+          nonce: Date.now(),
+        });
+      }
+    },
+    []
+  );
 
   // Global keyboard shortcuts with IME guard, focus guard, and safe modifier handling
   useEffect(() => {
@@ -3592,9 +3638,14 @@ export default function App() {
         if (nextTarget) {
           setSelectedSubtitleId(nextTarget.id);
           handleSeekRef.current(nextTarget.startTime);
-          setStudioSection("captions");
+          setStudioSection("edit");
           setCaptionTab("script");
-          setStageSelectRequest({ id: nextTarget.id, focusPhonetic: false, nonce: Date.now() });
+          setStageSelectRequest({
+            id: nextTarget.id,
+            focusPhonetic: false,
+            source: "keyboard",
+            nonce: Date.now(),
+          });
         }
         return;
       }
@@ -3821,15 +3872,10 @@ export default function App() {
     setProject(openedProj);
     setBaselineFromProject(openedProj);
 
-    if (openedProj.isDraft) {
-      setActiveTab("studio");
-      setStudioSection("clips");
-    } else if (record.subtitles.length > 0 || record.scenes.length > 0) {
-      setActiveTab("studio");
-      setStudioSection("captions");
-    } else {
-      setActiveTab("studio");
-      setStudioSection("clips");
+    setActiveTab("studio");
+    setStudioSection("edit");
+    if (!openedProj.isDraft && record.subtitles.length > 0) {
+      setCaptionTab("script");
     }
   };
 
@@ -4266,7 +4312,8 @@ export default function App() {
 
         {/* Main Workspace Body */}
         {(() => {
-          const showStage = activeTab === "studio";
+          const isEmptyStudio = activeTab === "studio" && !hasProjectMedia(project);
+          const showStage = activeTab === "studio" && !isEmptyStudio;
           const useDesktopStudio = showStage && isDesktop;
           const renderInlineStageInSidebar = showStage && !isDesktop;
           const stageWidthPct = Math.min(58, Math.max(24, 30 + stagePreviewScale * 14));
@@ -4299,10 +4346,14 @@ export default function App() {
                   videoHeightPct: Math.max(26, Math.min(52, Math.round(pct))),
                 }))
               }
+              onChangeAspectRatio={(aspectRatio) =>
+                setVideoEdit((prev) => ({ ...prev, aspectRatio }))
+              }
               selectedSubtitleId={selectedSubtitleId}
               onSelectSubtitle={handleSelectStageSubtitle}
               onUploadVideo={handleUploadLocalVideo}
               onDetectedDuration={handleDetectedLocalDuration}
+              hideCaptions={false}
             />
           ) : null;
 
@@ -4419,9 +4470,9 @@ export default function App() {
               }}
               studioSection={studioSection}
               onChangeStudioSection={setStudioSection}
-              showMobileTimelineTab={!isDesktop}
               selectedSubtitleId={selectedSubtitleId}
               onSelectSubtitle={setSelectedSubtitleId}
+              onSelectTimelineSubtitle={handleSelectTimelineSubtitle}
               captionTab={captionTab}
               onChangeCaptionTab={setCaptionTab}
               isSubtitleSearchOpen={isSubtitleSearchOpen}
@@ -4438,6 +4489,7 @@ export default function App() {
               transcribingRange={transcribingRange}
               onApplyPasteTranscriptSync={handleApplyPasteTranscriptSync}
               onPreviewSourceSeek={handlePreviewSourceSeek}
+              hideCaptions={!SHOW_CAPTIONS_UI}
             />
           );
 
@@ -4493,6 +4545,15 @@ export default function App() {
             </div>
           ) : null;
 
+          if (isEmptyStudio) {
+            return (
+              <main className="flex-1 min-h-0 w-full flex flex-col overflow-hidden">
+                {alertsNode}
+                <EmptyStudioUpload onUploadVideo={handleUploadLocalVideo} />
+              </main>
+            );
+          }
+
           if (useDesktopStudio) {
             return (
               <main className="flex-1 min-h-0 flex flex-col overflow-hidden">
@@ -4511,43 +4572,48 @@ export default function App() {
                   </section>
                 </div>
 
-                {/* Lower Studio Area: Edge-to-Edge Bottom Timeline Dock */}
-                {(hasProjectMedia(project) || studioSection !== "clips") && (
-                  <div className="shrink-0">
-                    <ProjectTimelineEditor
-                      dockMode
-                      isCollapsed={timelineCollapsed}
-                      onToggleCollapse={() => setTimelineCollapsed((c) => !c)}
-                      project={project}
-                      cutTime={cutTime}
-                      subscribeCutTime={subscribeCutTime}
-                      isPlaying={isPlaying}
-                      isActive={activeTab === "studio" && !timelineCollapsed}
-                      onTogglePlay={handleTogglePlay}
-                      onPause={handlePause}
-                      onSeek={handleSeek}
-                      onPlayFromTime={handlePlayFromTime}
-                      onUpdateScenes={handleUpdateProjectScenes}
-                      onUpdateSubtitleTiming={handleUpdateSubtitleTiming}
-                      onShiftAllSubtitles={handleShiftAllSubtitles}
-                      onUndo={handleUndo}
-                      onRedo={handleRedo}
-                      canUndo={undoStack.length > 0}
-                      canRedo={redoStack.length > 0}
-                      onResetTimeline={handleResetTimeline}
-                      onGoToScenes={() => setStudioSection("clips")}
-                      cutSpeechRegions={cutSpeechRegions}
-                      onTranscribeRange={handleTranscribeRange}
-                      transcribingRange={transcribingRange}
-                      clipSubtitleCounts={clipSubtitleCounts}
-                      regeneratingClipId={regeneratingClipId}
-                      regeneratingClipPercent={regeneratingClipPercent}
-                      onGenerateSingleClip={handleGenerateSingleClip}
-                      isBusy={isProcessing}
-                      onPreviewSourceSeek={handlePreviewSourceSeek}
-                    />
-                  </div>
-                )}
+                {/* Lower Studio Area: Edge-to-Edge Bottom Timeline Dock (always visible across all Studio tabs) */}
+                <div className="shrink-0">
+                  <ProjectTimelineEditor
+                    dockMode
+                    isCollapsed={false}
+                    project={project}
+                    cutTime={cutTime}
+                    subscribeCutTime={subscribeCutTime}
+                    isPlaying={isPlaying}
+                    isActive={activeTab === "studio"}
+                    hideTransport
+                    hideCaptions={!SHOW_CAPTIONS_UI}
+                    showSubtitleTrack
+                    onTogglePlay={handleTogglePlay}
+                    onPause={handlePause}
+                    onSeek={handleSeek}
+                    onPlayFromTime={handlePlayFromTime}
+                    onUpdateScenes={handleUpdateProjectScenes}
+                    onUpdateSubtitleTiming={handleUpdateSubtitleTiming}
+                    onShiftAllSubtitles={handleShiftAllSubtitles}
+                    onUndo={handleUndo}
+                    onRedo={handleRedo}
+                    canUndo={undoStack.length > 0}
+                    canRedo={redoStack.length > 0}
+                    onResetTimeline={handleResetTimeline}
+                    onGoToScenes={() => setStudioSection("edit")}
+                    cutSpeechRegions={cutSpeechRegions}
+                    onTranscribeRange={handleTranscribeRange}
+                    transcribingRange={transcribingRange}
+                    clipSubtitleCounts={clipSubtitleCounts}
+                    regeneratingClipId={regeneratingClipId}
+                    regeneratingClipPercent={regeneratingClipPercent}
+                    onGenerateSingleClip={handleGenerateSingleClip}
+                    onGenerateSubtitles={handleGenerateSubtitles}
+                    generationProgress={generationProgress}
+                    isBusy={isProcessing}
+                    onPreviewSourceSeek={handlePreviewSourceSeek}
+                    selectedSubtitleId={selectedSubtitleId}
+                    onSelectSubtitle={handleSelectTimelineSubtitle}
+                    hideUndoRedo
+                  />
+                </div>
               </main>
             );
           }

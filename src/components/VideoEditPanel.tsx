@@ -21,7 +21,11 @@ import type {
   VideoProject,
   VoiceSettings,
 } from "../types";
-import { DEFAULT_VIDEO_EDIT, VIDEO_FILTER_PRESETS } from "../utils/videoFilters";
+import {
+  DEFAULT_VIDEO_EDIT,
+  VIDEO_ASPECT_RATIO_OPTIONS,
+  VIDEO_FILTER_PRESETS,
+} from "../utils/videoFilters";
 import { DEFAULT_VOICE_SETTINGS, getEffectivePlaybackSpeed } from "../utils/voicePresets";
 import { VoiceChangerPanel } from "./VoiceChangerPanel";
 import { ProjectTimelineEditor } from "./ProjectTimelineEditor";
@@ -74,6 +78,7 @@ export function getVideoEditDirtyMap(
 
   const speedDirty = Math.abs(settings.playbackSpeed - DEFAULT_VIDEO_EDIT.playbackSpeed) > 0.01;
   const framingDirty =
+    (settings.aspectRatio || DEFAULT_VIDEO_EDIT.aspectRatio) !== DEFAULT_VIDEO_EDIT.aspectRatio ||
     settings.zoom !== DEFAULT_VIDEO_EDIT.zoom ||
     settings.rotateDeg !== DEFAULT_VIDEO_EDIT.rotateDeg ||
     settings.flipH !== DEFAULT_VIDEO_EDIT.flipH ||
@@ -375,6 +380,32 @@ export function VideoEditPanel({
                   <Minimize2 className="w-2.5 h-2.5" />
                   <span>Fit</span>
                 </button>
+              </div>
+            </div>
+
+            {/* Aspect Ratio Selector */}
+            <div className="space-y-1.5">
+              <span className="block text-[11px] font-medium text-[#4d597d] dark:text-[#919ec4]">
+                Aspect Ratio
+              </span>
+              <div className="grid grid-cols-5 gap-1">
+                {VIDEO_ASPECT_RATIO_OPTIONS.map((opt) => {
+                  const active = (settings.aspectRatio || "original") === opt.id;
+                  return (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => updateField("aspectRatio", opt.id)}
+                      className={`h-7 px-1 rounded-sm border text-[11px] font-medium flex items-center justify-center cursor-pointer whitespace-nowrap transition-colors ${
+                        active
+                          ? "bg-teal-700 text-white border-teal-700 dark:bg-teal-400 dark:text-[#060918] dark:border-teal-400 font-semibold"
+                          : "border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142]"
+                      }`}
+                    >
+                      {opt.shortLabel}
+                    </button>
+                  );
+                })}
               </div>
             </div>
 

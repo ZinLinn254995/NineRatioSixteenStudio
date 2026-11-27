@@ -127,3 +127,20 @@
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Disable browser long-press context menus, text selection, image callouts, and tap flashes in Timeline */
+.timeline-no-callout,
+.timeline-no-callout * {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-user-drag: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.timeline-no-callout input,
+.timeline-no-callout textarea {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
