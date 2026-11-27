@@ -40,6 +40,7 @@ import {
 import { ProjectTimelineEditor } from "./components/ProjectTimelineEditor";
 import { EmptyStudioUpload } from "./components/EmptyStudioUpload";
 import { ExportSheet } from "./components/ExportSheet";
+import { OfflineIndicator, PWAInstallButton } from "./components/PWAInstallButton";
 import {
   exportProjectToMp4,
   type ExportedVideoResult,
@@ -4290,6 +4291,8 @@ export default function App() {
               </span>
             )}
 
+            <PWAInstallButton />
+
             <button
               type="button"
               onClick={() => handleSaveProject(false)}
@@ -4814,6 +4817,8 @@ export default function App() {
           {shortcutToast}
         </div>
       )}
+
+      <OfflineIndicator />
     </div>
   );
 }

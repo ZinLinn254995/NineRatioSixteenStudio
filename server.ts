@@ -22,7 +22,7 @@ const execFileAsync = promisify(execFile);
 const FFMPEG_EXEC_OPTS = { maxBuffer: 16 * 1024 * 1024 };
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 app.use(express.json({ limit: "100mb" }));
 
