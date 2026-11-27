@@ -47,7 +47,7 @@ interface ProjectTimelineEditorProps {
   isActive?: boolean;
   onTogglePlay: () => void;
   onPause: () => void;
-  onSeek: (sec: number) => void;
+  onSeek: (sec: number, opts?: { live?: boolean }) => void;
   onPlayFromTime: (sec: number) => void;
   onUpdateScenes: (nextScenes: SpeakingScene[]) => void;
   onUpdateSubtitleTiming?: (id: string, startTime: number, endTime: number) => void;
@@ -113,10 +113,12 @@ type DragMode =
       type: "scrub";
       pointerType: string;
       startClientX: number;
+      scrubAnchorClientX: number;
       startClientY: number;
       lastClientY: number;
       startCutTime: number;
       axis: "x" | "y" | "pending";
+      wasPlayingBeforeScrub: boolean;
     }
   | {
       type: "trim-start";
@@ -241,6 +243,7 @@ export function ProjectTimelineEditor({
   onTogglePlay,
   onPause,
   onSeek,
+  onPlayFromTime,
   onUpdateScenes,
   onUpdateSubtitleTiming,
   onEditSubtitle,
@@ -341,6 +344,7 @@ export function ProjectTimelineEditor({
   const frozenTrackTimeRef = useRef<number | null>(null);
   const wheelTargetCutRef = useRef<{ cutTime: number; expiresAt: number } | null>(null);
   const wheelClearTimerRef = useRef<number | null>(null);
+  const wheelWasPlayingRef = useRef<boolean>(false);
   const dragSubPreviewRef = useRef<{
     id: string;
     startTime: number;
@@ -455,6 +459,8 @@ export function ProjectTimelineEditor({
   isPlayingRef.current = isPlaying;
   const onPauseRef = useRef(onPause);
   onPauseRef.current = onPause;
+  const onPlayFromTimeRef = useRef(onPlayFromTime);
+  onPlayFromTimeRef.current = onPlayFromTime;
 
   const cancelClipLongPress = useCallback(() => {
     if (longPressTimerRef.current !== null) {
@@ -969,10 +975,10 @@ export function ProjectTimelineEditor({
 
   // Smoothly throttle rapid drag seeks on Stage9x16 so local video playback stays fluid
   const dispatchSeek = useCallback(
-    (targetCut: number, immediate = false) => {
+    (targetCut: number, immediate = false, live = false) => {
       const maxCut = totalCutDurationRef.current;
       const clamped = Math.max(0, Math.min(maxCut, targetCut));
-      const minIntervalMs = 28;
+      const minIntervalMs = live ? 16 : 28;
       const now = performance.now();
 
       if (immediate || now - lastSeekDispatchAtRef.current >= minIntervalMs) {
@@ -982,7 +988,7 @@ export function ProjectTimelineEditor({
         }
         queuedSeekSecRef.current = null;
         lastSeekDispatchAtRef.current = now;
-        onSeek(clamped);
+        onSeek(clamped, live ? { live: true } : undefined);
         return clamped;
       }
 
@@ -995,7 +1001,7 @@ export function ProjectTimelineEditor({
             const next = queuedSeekSecRef.current;
             queuedSeekSecRef.current = null;
             lastSeekDispatchAtRef.current = performance.now();
-            onSeek(next);
+            onSeek(next, live ? { live: true } : undefined);
           }
         }, wait);
       }
@@ -1626,10 +1632,12 @@ export function ProjectTimelineEditor({
         type: "scrub",
         pointerType: e.pointerType || "mouse",
         startClientX: e.clientX,
+        scrubAnchorClientX: e.clientX,
         startClientY: e.clientY,
         lastClientY: e.clientY,
         startCutTime: startTime,
         axis: "pending",
+        wasPlayingBeforeScrub: isPlayingRef.current,
       };
       updateDragState(nextDrag);
     }
@@ -1816,7 +1824,14 @@ export function ProjectTimelineEditor({
           return;
         } else {
           activeDrag.axis = "x";
-          if (isPlaying) onPause();
+          const wasPlayingNow = activeDrag.wasPlayingBeforeScrub || isPlayingRef.current;
+          activeDrag.wasPlayingBeforeScrub = wasPlayingNow;
+          if (isPlayingRef.current) {
+            onPauseRef.current();
+          }
+          // Anchor drag start to exact paused playhead position so horizontal scrubbing starts without a jump
+          activeDrag.startCutTime = liveScrubCutRef.current ?? cutTimeRef.current;
+          activeDrag.scrubAnchorClientX = e.clientX;
         }
       }
 
@@ -1834,14 +1849,15 @@ export function ProjectTimelineEditor({
         tappedSubRef.current.moved = true;
       }
 
-      const dt = dx / pxPerSec;
+      const scrubDx = e.clientX - activeDrag.scrubAnchorClientX;
+      const dt = scrubDx / pxPerSec;
       const nextCut = Math.max(
         0,
         Math.min(totalCutDurationRef.current, activeDrag.startCutTime - dt)
       );
       liveScrubCutRef.current = nextCut;
       setLiveScrubCutTime(nextCut);
-      dispatchSeek(nextCut);
+      dispatchSeek(nextCut, false, true);
       return;
     }
 
@@ -2066,15 +2082,32 @@ export function ProjectTimelineEditor({
         const finalScrubCut = liveScrubCutRef.current;
         liveScrubCutRef.current = null;
         setLiveScrubCutTime(null);
+        const shouldResumePlayback =
+          activeDrag.axis === "x" &&
+          activeDrag.wasPlayingBeforeScrub &&
+          subTapSeekTarget === null;
+
+        if (seekThrottleTimerRef.current !== null) {
+          window.clearTimeout(seekThrottleTimerRef.current);
+          seekThrottleTimerRef.current = null;
+        }
+        const pendingQueued = queuedSeekSecRef.current;
+        queuedSeekSecRef.current = null;
 
         if (subTapSeekTarget !== null) {
-          queuedSeekSecRef.current = null;
           dispatchSeek(subTapSeekTarget, true);
-        } else if (activeDrag.axis === "x" && finalScrubCut !== null) {
-          queuedSeekSecRef.current = null;
-          dispatchSeek(finalScrubCut, true);
-        } else if (queuedSeekSecRef.current !== null) {
-          dispatchSeek(queuedSeekSecRef.current, true);
+        } else if (activeDrag.axis === "x") {
+          const targetCut = finalScrubCut ?? pendingQueued ?? cutTimeRef.current;
+          if (
+            shouldResumePlayback &&
+            targetCut < Math.max(0, totalCutDurationRef.current - 0.05)
+          ) {
+            onPlayFromTimeRef.current(targetCut);
+          } else {
+            dispatchSeek(targetCut, true);
+          }
+        } else if (pendingQueued !== null) {
+          dispatchSeek(pendingQueued, true);
         }
       } else if (
         activeDrag.type === "sub-move" ||
@@ -2180,8 +2213,24 @@ export function ProjectTimelineEditor({
       }
 
       if (activeDrag?.type === "scrub") {
+        const finalScrubCut = liveScrubCutRef.current;
         liveScrubCutRef.current = null;
         setLiveScrubCutTime(null);
+        if (seekThrottleTimerRef.current !== null) {
+          window.clearTimeout(seekThrottleTimerRef.current);
+          seekThrottleTimerRef.current = null;
+        }
+        queuedSeekSecRef.current = null;
+        if (activeDrag.axis === "x" && finalScrubCut !== null) {
+          if (
+            activeDrag.wasPlayingBeforeScrub &&
+            finalScrubCut < Math.max(0, totalCutDurationRef.current - 0.05)
+          ) {
+            onPlayFromTimeRef.current(finalScrubCut);
+          } else {
+            dispatchSeek(finalScrubCut, true);
+          }
+        }
       } else if (
         activeDrag?.type === "sub-move" ||
         activeDrag?.type === "sub-trim-start" ||
@@ -2242,10 +2291,12 @@ export function ProjectTimelineEditor({
       const {
         pxPerSec: pps,
         dispatchSeek: seek,
-        isPlaying: playing,
         onPause: pause,
       } = wheelStateRef.current;
-      if (playing) pause();
+      if (wheelClearTimerRef.current === null) {
+        wheelWasPlayingRef.current = isPlayingRef.current;
+      }
+      if (isPlayingRef.current) pause();
 
       const now = performance.now();
       const baseCut =
@@ -2253,19 +2304,29 @@ export function ProjectTimelineEditor({
           ? wheelTargetCutRef.current.cutTime
           : liveScrubCutRef.current ?? cutTimeRef.current;
       const next = Math.max(0, Math.min(totalCutDurationRef.current, baseCut + delta / pps));
-      wheelTargetCutRef.current = { cutTime: next, expiresAt: now + 240 };
+      wheelTargetCutRef.current = { cutTime: next, expiresAt: now + 260 };
       liveScrubCutRef.current = next;
       setLiveScrubCutTime(next);
-      seek(next);
+      seek(next, false, true);
 
       if (wheelClearTimerRef.current !== null) {
         window.clearTimeout(wheelClearTimerRef.current);
       }
       wheelClearTimerRef.current = window.setTimeout(() => {
         wheelClearTimerRef.current = null;
+        const finalWheelCut = liveScrubCutRef.current;
+        const shouldResume = wheelWasPlayingRef.current;
+        wheelWasPlayingRef.current = false;
         liveScrubCutRef.current = null;
         setLiveScrubCutTime(null);
-      }, 220);
+        if (finalWheelCut !== null) {
+          if (shouldResume && finalWheelCut < Math.max(0, totalCutDurationRef.current - 0.05)) {
+            onPlayFromTimeRef.current(finalWheelCut);
+          } else {
+            seek(finalWheelCut, true);
+          }
+        }
+      }, 240);
     };
     const onTouchMove = (e: TouchEvent) => {
       if (e.cancelable) e.preventDefault();

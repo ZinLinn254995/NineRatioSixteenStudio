@@ -107,6 +107,9 @@ function formatSec(sec: number): string {
 }
 
 export interface Stage9x16Handle {
+  play: () => void;
+  pause: () => void;
+  seekCutTime: (cutSec: number, opts?: { force?: boolean }) => void;
   previewSourceTime: (sourceSec: number | null, opts?: { skipResync?: boolean }) => void;
 }
 
@@ -250,6 +253,15 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
   useImperativeHandle(
     ref,
     () => ({
+      play: () => {
+        playerRef.current?.play();
+      },
+      pause: () => {
+        playerRef.current?.pause();
+      },
+      seekCutTime: (cutSec: number, opts?: { force?: boolean }) => {
+        playerRef.current?.seekCutTime(cutSec, opts);
+      },
       previewSourceTime: (sourceSec: number | null, opts?: { skipResync?: boolean }) => {
         if (!activeProject?.localUrl) {
           if (subPanelRef.current) subPanelRef.current.style.visibility = "";

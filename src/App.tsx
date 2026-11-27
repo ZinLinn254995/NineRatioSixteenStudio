@@ -299,6 +299,8 @@ export default function App() {
 
   const getLiveCutTime = useCallback(() => liveCutTimeRef.current, []);
 
+  const lastLiveSeekAtRef = useRef<number>(0);
+
   const publishCutTime = useCallback((sec: number, syncReactNow = true) => {
     const safeSec = typeof sec === "number" && Number.isFinite(sec) ? Math.max(0, sec) : 0;
     liveCutTimeRef.current = safeSec;
@@ -310,7 +312,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!isPlaying) {
+    if (!isPlaying && performance.now() - lastLiveSeekAtRef.current > 400) {
       liveCutTimeRef.current = cutTime;
       cutTimeListenersRef.current.forEach((fn) => fn(cutTime));
     }
@@ -1674,7 +1676,7 @@ export default function App() {
     }
   };
 
-  const handleSeek = (sec: number) => {
+  const handleSeek = (sec: number, opts?: { live?: boolean }) => {
     const activeLoopId = loopingSubIdRef.current;
     if (activeLoopId) {
       const loopSub = projectRef.current?.subtitles.find((s) => s.id === activeLoopId);
@@ -1682,7 +1684,14 @@ export default function App() {
         setLoopingSubId(null);
       }
     }
+    if (opts?.live) {
+      lastLiveSeekAtRef.current = performance.now();
+      publishCutTime(sec, false);
+      stageRef.current?.seekCutTime(sec);
+      return;
+    }
     publishCutTime(sec, true);
+    stageRef.current?.seekCutTime(sec, { force: true });
     setSeekNonce((n) => n + 1);
   };
 
@@ -1763,6 +1772,7 @@ export default function App() {
 
   const handlePause = useCallback(() => {
     setLoopingSubId(null);
+    stageRef.current?.pause();
     setIsPlaying(false);
     setCutTime(liveCutTimeRef.current);
   }, []);
@@ -1774,6 +1784,7 @@ export default function App() {
       resumeAllVoiceContexts();
       setLoopingSubId(null);
       publishCutTime(sec, true);
+      stageRef.current?.play();
       setSeekNonce((n) => n + 1);
       setIsPlaying(true);
     },

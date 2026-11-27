@@ -153,7 +153,7 @@ interface WorkspaceSidebarProps {
   onChangeEditSettings: (next: VideoEditSettings) => void;
   onUploadLocalVideo: (file: File) => void;
   onClearLocalVideo: () => void;
-  onSeek: (sec: number) => void;
+  onSeek: (sec: number, opts?: { live?: boolean }) => void;
   onTogglePlay: () => void;
   onPause: () => void;
   onPlayFromTime: (sec: number) => void;

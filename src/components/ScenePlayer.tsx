@@ -78,6 +78,7 @@ export interface ScenePlayerHandle {
   play: () => void;
   pause: () => void;
   togglePlay: () => void;
+  seekCutTime: (cutSec: number, opts?: { force?: boolean }) => void;
   previewSourceTime: (sourceSec: number | null, opts?: { skipResync?: boolean }) => void;
 }
 
@@ -122,6 +123,7 @@ export const ScenePlayer = memo(
     const voiceAttachedRef = useRef<boolean>(false);
     const autoMutedFallbackRef = useRef<boolean>(false);
     const lastSeekFixAtRef = useRef<number>(0);
+    const lastLocalSeekIssuedAtRef = useRef<number>(0);
     const seekSettleUntilRef = useRef<number>(0);
     const playAttemptPendingRef = useRef<boolean>(false);
     const sourcePreviewOverrideRef = useRef<number | null>(null);
@@ -310,7 +312,8 @@ export const ScenePlayer = memo(
         const actualDur =
           Number.isFinite(vid.duration) && vid.duration > 0 ? vid.duration : sourceSec + 10;
         const clamped = Math.max(0, Math.min(Math.max(0, actualDur - 0.05), sourceSec));
-        if (Math.abs(vid.currentTime - clamped) > 0.08) {
+        if (Math.abs(vid.currentTime - clamped) > 0.08 || vid.seeking) {
+          lastLocalSeekIssuedAtRef.current = performance.now();
           seekSettleUntilRef.current = performance.now() + 650;
           try {
             vid.currentTime = clamped;
@@ -429,6 +432,52 @@ export const ScenePlayer = memo(
       onPlayingChangeRef.current(false);
     }, []);
 
+    const seekLocalToCutTime = useCallback(
+      (targetCut: number, opts?: { force?: boolean }) => {
+        if (sourcePreviewOverrideRef.current !== null) return;
+        const curScenes = scenesRef.current;
+        const { sceneIndex, sourceSec } = mapCutTimeToSource(curScenes, targetCut);
+        activeSceneIdxRef.current = sceneIndex;
+
+        const vid = localVideoRef.current;
+        if (!vid) return;
+
+        if (vid.readyState < 1) {
+          pendingLocalSeekRef.current = sourceSec;
+          return;
+        }
+
+        const actualDur =
+          Number.isFinite(vid.duration) && vid.duration > 0 ? vid.duration : sourceSec + 10;
+        const clamped = Math.max(0, Math.min(Math.max(0, actualDur - 0.02), sourceSec));
+        const threshold = isPlayingRef.current && !opts?.force ? 0.12 : 0.015;
+
+        if (Math.abs(vid.currentTime - clamped) <= threshold && !vid.seeking) {
+          pendingLocalSeekRef.current = null;
+          return;
+        }
+
+        const now = performance.now();
+        // While hardware decoder is busy with an active seek, queue only the latest target
+        // so the in-progress frame finishes decoding & painting live on screen, then immediately
+        // jumps to the newest target inside onSeeked.
+        if (vid.seeking && !opts?.force && now - lastLocalSeekIssuedAtRef.current < 260) {
+          pendingLocalSeekRef.current = clamped;
+          return;
+        }
+
+        pendingLocalSeekRef.current = null;
+        lastLocalSeekIssuedAtRef.current = now;
+        seekSettleUntilRef.current = now + 650;
+        try {
+          vid.currentTime = clamped;
+        } catch {
+          // ignore invalid media seek state
+        }
+      },
+      []
+    );
+
     useImperativeHandle(
       ref,
       () => ({
@@ -445,6 +494,9 @@ export const ScenePlayer = memo(
           } else {
             pauseLocalPlayback();
           }
+        },
+        seekCutTime: (cutSec: number, opts?: { force?: boolean }) => {
+          seekLocalToCutTime(cutSec, opts);
         },
         previewSourceTime: (sourceSec: number | null, opts?: { skipResync?: boolean }) => {
           const vid = localVideoRef.current;
@@ -501,6 +553,7 @@ export const ScenePlayer = memo(
       [
         startLocalPlayback,
         pauseLocalPlayback,
+        seekLocalToCutTime,
         cancelPreviewSeekRaf,
         flushLocalPreviewSeek,
         readCurrentCutTime,
@@ -533,26 +586,8 @@ export const ScenePlayer = memo(
     // Explicit user seek (scrubber drag, clicking subtitle card, or clicking scene chip)
     useEffect(() => {
       if (seekNonce === 0) return;
-      if (sourcePreviewOverrideRef.current !== null) return;
-      const { sceneIndex, sourceSec } = mapCutTimeToSource(scenesRef.current, readCurrentCutTime());
-      activeSceneIdxRef.current = sceneIndex;
-
-      const vid = localVideoRef.current;
-      if (vid) {
-        if (vid.readyState >= 1) {
-          const actualDur =
-            Number.isFinite(vid.duration) && vid.duration > 0 ? vid.duration : sourceSec + 10;
-          const clamped = Math.max(0, Math.min(Math.max(0, actualDur - 0.05), sourceSec));
-          if (Math.abs(vid.currentTime - clamped) > 0.04) {
-            seekSettleUntilRef.current = performance.now() + 650;
-            vid.currentTime = clamped;
-          }
-          pendingLocalSeekRef.current = null;
-        } else {
-          pendingLocalSeekRef.current = sourceSec;
-        }
-      }
-    }, [seekNonce, readCurrentCutTime]);
+      seekLocalToCutTime(readCurrentCutTime());
+    }, [seekNonce, readCurrentCutTime, seekLocalToCutTime]);
 
     // Sync local HTML5 video settings & attach WebAudio ONLY when voice effects are active
     useEffect(() => {
@@ -684,14 +719,20 @@ export const ScenePlayer = memo(
           return;
         }
         const target = pendingLocalSeekRef.current;
-        if (target !== null) {
+        if (target !== null && vid.readyState >= 1) {
           const actualDur =
             Number.isFinite(vid.duration) && vid.duration > 0 ? vid.duration : target + 1;
-          const clamped = Math.max(0, Math.min(Math.max(0, actualDur - 0.05), target));
+          const clamped = Math.max(0, Math.min(Math.max(0, actualDur - 0.02), target));
           pendingLocalSeekRef.current = null;
-          if (Math.abs(vid.currentTime - clamped) > 0.04) {
-            seekSettleUntilRef.current = performance.now() + 650;
-            vid.currentTime = clamped;
+          if (Math.abs(vid.currentTime - clamped) > 0.015) {
+            const now = performance.now();
+            lastLocalSeekIssuedAtRef.current = now;
+            seekSettleUntilRef.current = now + 650;
+            try {
+              vid.currentTime = clamped;
+            } catch {
+              // ignore invalid media seek state
+            }
           }
         }
         const targetRate = getEffectivePlaybackSpeed(
@@ -821,6 +862,7 @@ export const ScenePlayer = memo(
               applyPendingLocalSeekAndPlay(v);
             }}
             onSeeked={(e) => {
+              lastLocalSeekIssuedAtRef.current = 0;
               seekSettleUntilRef.current = 0;
               if (sourcePreviewOverrideRef.current !== null) {
                 flushLocalPreviewSeek(e.currentTarget);

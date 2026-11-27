@@ -55,7 +55,7 @@ interface VideoEditPanelProps {
   onChangeVoiceSettings: (next: VoiceSettings) => void;
   onTogglePlay: () => void;
   onPause: () => void;
-  onSeek: (sec: number) => void;
+  onSeek: (sec: number, opts?: { live?: boolean }) => void;
   onPlayFromTime: (sec: number) => void;
   onUpdateProjectScenes: (nextScenes: SpeakingScene[]) => void;
   onUpdateSubtitleTiming?: (id: string, startTime: number, endTime: number) => void;
