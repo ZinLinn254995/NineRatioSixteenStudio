@@ -144,10 +144,85 @@ export type VideoFilterPresetId =
   | "soft";
 
 export type TranslationTone = "casual" | "formal" | "dramatic" | "literal";
+export type SubtitleGenTone = TranslationTone | "concise" | "poetic";
+export type SubtitleSourceLanguage =
+  | "auto"
+  | "th"
+  | "my"
+  | "en"
+  | "zh"
+  | "ja"
+  | "ko"
+  | "vi"
+  | "lo"
+  | "km"
+  | "id"
+  | "hi"
+  | "es"
+  | "fr";
+export type SubtitleTargetLanguage =
+  | "my"
+  | "en"
+  | "th"
+  | "zh"
+  | "ja"
+  | "ko"
+  | "vi"
+  | "id"
+  | "hi"
+  | "es"
+  | "fr"
+  | "none";
+export type SubtitleOutputFormat =
+  | "bilingual_phonetic"
+  | "bilingual_native"
+  | "translation_only"
+  | "original_only";
+export type SubtitlePhoneticStyle =
+  | "latin"
+  | "burmese_phonetic"
+  | "ipa_tones"
+  | "native_only";
+export type SubtitleContentGenre =
+  | "general"
+  | "movie_drama"
+  | "vlog_social"
+  | "education"
+  | "news_doc"
+  | "music_lyrics";
+export type SubtitlePacingMode = "balanced" | "short_reels" | "full_sentence";
+
+export interface SubtitleGenerationConfig {
+  sourceLanguage: SubtitleSourceLanguage;
+  targetLanguage: SubtitleTargetLanguage;
+  subtitleFormat: SubtitleOutputFormat;
+  phoneticStyle: SubtitlePhoneticStyle;
+  translationTone: SubtitleGenTone;
+  contentGenre: SubtitleContentGenre;
+  pacingMode: SubtitlePacingMode;
+  includeWordGloss: boolean;
+  includeNativeScript: boolean;
+  includeNonSpeech: boolean;
+  customInstructions: string;
+}
+
 export type SubtitleFontScale = "sm" | "md" | "lg";
 export type SubtitleTheme = "auto" | "light" | "dark" | "warm";
 export type SubtitleHighlightColor = "amber" | "emerald" | "indigo" | "rose";
-export type VideoAspectRatio = "original" | "9:16" | "16:9" | "1:1" | "4:5";
+export type SubtitleCardStyle = "card" | "minimal" | "outline" | "glass";
+export type SubtitleWordStyle = "fill" | "underline" | "glow" | "text";
+export type SubtitleFontFamily = "sans" | "display" | "serif" | "mono";
+export type SubtitleAlign = "left" | "center";
+export type SubtitleTextWeight = "normal" | "semibold" | "bold";
+export type SubtitleLineSpacing = "compact" | "normal" | "relaxed";
+export type VideoAspectRatio =
+  | "original"
+  | "9:16"
+  | "9:16-overlay"
+  | "4:5"
+  | "4:5-overlay"
+  | "1:1"
+  | "16:9";
 
 export interface VideoEditSettings {
   filterPreset: VideoFilterPresetId | "custom";
@@ -178,6 +253,14 @@ export interface VideoEditSettings {
   subtitleHighlightColor: SubtitleHighlightColor;
   showWordGloss: boolean;
   showBurmeseLine: boolean;
+  subtitleCardStyle?: SubtitleCardStyle;
+  subtitleWordStyle?: SubtitleWordStyle;
+  subtitleFontFamily?: SubtitleFontFamily;
+  subtitleAlign?: SubtitleAlign;
+  subtitleSizePct?: number;
+  subtitleCardRadius?: number;
+  subtitleTextWeight?: SubtitleTextWeight;
+  subtitleLineSpacing?: SubtitleLineSpacing;
 }
 
 export interface SavedProjectRecord {

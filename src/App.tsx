@@ -18,6 +18,7 @@ import type {
   SceneSelection,
   SpeechRegion,
   SpeakingScene,
+  SubtitleGenerationConfig,
   SubtitleGenerationProgress,
   SubtitleItem,
   SubtitleWord,
@@ -46,6 +47,10 @@ import {
 } from "./utils/exportVideo";
 import { DEFAULT_VOICE_SETTINGS } from "./utils/voicePresets";
 import { DEFAULT_VIDEO_EDIT } from "./utils/videoFilters";
+import {
+  loadSavedSubtitleGenConfig,
+  saveSubtitleGenConfig,
+} from "./utils/subtitleGenerationConfig";
 import { resumeAllVoiceContexts } from "./utils/webAudioVoice";
 import {
   formatReadableApiError,
@@ -150,6 +155,11 @@ export default function App() {
   const [subtitleRegenError, setSubtitleRegenError] = useState<string | null>(null);
   const [loopingSubId, setLoopingSubId] = useState<string | null>(null);
   const [selectedSubtitleId, setSelectedSubtitleId] = useState<string | null>(null);
+  const [editingSubtitleId, setEditingSubtitleId] = useState<string | null>(null);
+  const [showSubtitleGenSettings, setShowSubtitleGenSettings] = useState(false);
+  const [subtitleGenConfig, setSubtitleGenConfig] = useState<SubtitleGenerationConfig>(
+    () => loadSavedSubtitleGenConfig()
+  );
   const [captionTab, setCaptionTab] = useState<"script" | "style" | "sync">("script");
   const [isSubtitleSearchOpen, setIsSubtitleSearchOpen] = useState(false);
   const [autoFollowState, setAutoFollowState] = useState<AutoFollowState>("following");
@@ -248,6 +258,35 @@ export default function App() {
         clearTimeout(shortcutToastTimerRef.current);
       }
     };
+  }, []);
+
+  useEffect(() => {
+    if (!editingSubtitleId) return;
+    if (studioSection !== "edit") {
+      setEditingSubtitleId(null);
+      return;
+    }
+    if (!project || !project.subtitles.some((s) => s.id === editingSubtitleId)) {
+      setEditingSubtitleId(null);
+    }
+  }, [editingSubtitleId, studioSection, project]);
+
+  useEffect(() => {
+    if (showSubtitleGenSettings && studioSection !== "edit") {
+      setShowSubtitleGenSettings(false);
+    }
+  }, [showSubtitleGenSettings, studioSection]);
+
+  const handleChangeSubtitleGenConfig = useCallback((next: SubtitleGenerationConfig) => {
+    setSubtitleGenConfig(next);
+    saveSubtitleGenConfig(next);
+  }, []);
+
+  const handleOpenSubtitleGenSettings = useCallback(() => {
+    setEditingSubtitleId(null);
+    setProcessError(null);
+    setStudioSection("edit");
+    setShowSubtitleGenSettings(true);
   }, []);
 
   const subscribeCutTime = useCallback((listener: (sec: number) => void) => {
@@ -1159,10 +1198,22 @@ export default function App() {
     []
   );
 
-  // Triggered explicitly by the user after uploading a local video and selecting clips
-  const handleGenerateSubtitles = async () => {
+  // Triggered explicitly by the user after configuring Advanced Settings for Generate/Regenerate Subtitle
+  const handleGenerateSubtitles = async (configOverride?: SubtitleGenerationConfig) => {
     const targetMedia = localMedia;
     if (!targetMedia || !targetMedia.localFile || selectedScenes.length === 0) return;
+
+    const activeGenConfig = configOverride ?? subtitleGenConfig;
+    if (configOverride) {
+      handleChangeSubtitleGenConfig(configOverride);
+    }
+
+    const legacyTone: TranslationTone =
+      activeGenConfig.translationTone === "formal" ||
+      activeGenConfig.translationTone === "dramatic" ||
+      activeGenConfig.translationTone === "literal"
+        ? activeGenConfig.translationTone
+        : "casual";
 
     lastGenActionRef.current = { type: "all" };
     const runId = ++activeRunIdRef.current;
@@ -1213,7 +1264,8 @@ export default function App() {
                 title: targetMedia.title,
                 durationSec: targetMedia.durationSec,
                 clips: fastClips,
-                translationTone: videoEdit.translationTone,
+                translationTone: legacyTone,
+                generationConfig: activeGenConfig,
                 stream: true,
               }),
               signal: controller.signal,
@@ -1251,7 +1303,8 @@ export default function App() {
               title: targetMedia.title,
               durationSec: targetMedia.durationSec,
               selectedScenes: scenePayload,
-              translationTone: videoEdit.translationTone,
+              translationTone: legacyTone,
+              generationConfig: activeGenConfig,
               stream: true,
             }),
             signal: controller.signal,
@@ -1273,7 +1326,8 @@ export default function App() {
                   title: targetMedia.title,
                   durationSec: targetMedia.durationSec,
                   clips: fastClips,
-                  translationTone: videoEdit.translationTone,
+                  translationTone: legacyTone,
+                  generationConfig: activeGenConfig,
                   stream: true,
                 }),
                 signal: controller.signal,
@@ -1307,7 +1361,8 @@ export default function App() {
                   title: targetMedia.title,
                   durationSec: targetMedia.durationSec,
                   selectedScenes: scenePayload,
-                  translationTone: videoEdit.translationTone,
+                  translationTone: legacyTone,
+                  generationConfig: activeGenConfig,
                   stream: true,
                 }),
                 signal: controller.signal,
@@ -1325,6 +1380,10 @@ export default function App() {
         );
         if (activeRunIdRef.current !== runId) return;
 
+        if (project && project.subtitles.length > 0) {
+          pushSubtitleUndo();
+        }
+
         const normalizedServerProj = attachSceneIdsFromServerProject(data, selectedScenes);
         const nextProj: VideoProject = {
           ...normalizedServerProj,
@@ -1333,6 +1392,26 @@ export default function App() {
         };
         setProject(nextProj);
         setBaselineFromProject(nextProj);
+
+        // Sync subtitle display toggles to match chosen generation format cleanly
+        const hasTranslationLine =
+          activeGenConfig.subtitleFormat !== "translation_only" &&
+          activeGenConfig.subtitleFormat !== "original_only" &&
+          activeGenConfig.targetLanguage !== "none";
+        setVideoEdit((prev) => ({
+          ...prev,
+          translationTone: legacyTone,
+          showBurmeseLine: hasTranslationLine,
+          showWordGloss: hasTranslationLine && activeGenConfig.includeWordGloss,
+          showThaiScript:
+            activeGenConfig.subtitleFormat === "bilingual_phonetic"
+              ? activeGenConfig.includeNativeScript && prev.showThaiScript
+              : activeGenConfig.subtitleFormat === "bilingual_native"
+                ? activeGenConfig.includeNativeScript
+                : false,
+        }));
+
+        setShowSubtitleGenSettings(false);
         setActiveTab("studio");
         setStudioSection("edit");
       }
@@ -1416,6 +1495,7 @@ export default function App() {
                 durationSec: targetMedia.durationSec,
                 clips: fastClips,
                 translationTone: videoEdit.translationTone,
+                generationConfig: subtitleGenConfig,
                 stream: true,
               }),
               signal: controller.signal,
@@ -1457,6 +1537,7 @@ export default function App() {
               durationSec: targetMedia.durationSec,
               selectedScenes: singleScenePayload,
               translationTone: videoEdit.translationTone,
+              generationConfig: subtitleGenConfig,
               stream: true,
             }),
             signal: controller.signal,
@@ -1479,6 +1560,7 @@ export default function App() {
                   durationSec: targetMedia.durationSec,
                   clips: fastClips,
                   translationTone: videoEdit.translationTone,
+                  generationConfig: subtitleGenConfig,
                   stream: true,
                 }),
                 signal: controller.signal,
@@ -2337,10 +2419,15 @@ export default function App() {
 
       const mergedStart = Math.min(cur.startTime, nxt.startTime);
       const mergedEnd = Math.max(cur.endTime, nxt.endTime);
+      const curShift = Math.max(0, cur.startTime - mergedStart);
       const offsetShift = Math.max(0, nxt.startTime - mergedStart);
 
       const mergedWords: SubtitleWord[] = [
-        ...cur.words.map((w) => ({ ...w })),
+        ...cur.words.map((w) => ({
+          ...w,
+          startOffsetSec: Number((w.startOffsetSec + curShift).toFixed(2)),
+          endOffsetSec: Number((w.endOffsetSec + curShift).toFixed(2)),
+        })),
         ...nxt.words.map((w) => ({
           ...w,
           startOffsetSec: Number((w.startOffsetSec + offsetShift).toFixed(2)),
@@ -2389,7 +2476,15 @@ export default function App() {
 
     const mergeIdx = project.subtitles.findIndex((s) => s.id === id);
     if (mergeIdx !== -1 && mergeIdx + 1 < project.subtitles.length) {
+      const curSub = project.subtitles[mergeIdx];
+      const nxtSub = project.subtitles[mergeIdx + 1];
       pushSubtitleUndo();
+      if (selectedSubtitleId === nxtSub.id) {
+        setSelectedSubtitleId(curSub.id);
+      }
+      if (editingSubtitleId === nxtSub.id) {
+        setEditingSubtitleId(curSub.id);
+      }
     }
 
     if (timelineBaselineRef.current) {
@@ -4398,7 +4493,13 @@ export default function App() {
               onDetectedYouTubeDuration={(dur) =>
                 setSourcePreview((prev) => (prev ? { ...prev, durationSec: dur } : prev))
               }
-              onGenerateSubtitles={handleGenerateSubtitles}
+              onGenerateSubtitles={handleOpenSubtitleGenSettings}
+              onConfirmGenerateSubtitles={handleGenerateSubtitles}
+              showSubtitleGenSettings={showSubtitleGenSettings}
+              subtitleGenConfig={subtitleGenConfig}
+              onChangeSubtitleGenConfig={handleChangeSubtitleGenConfig}
+              onCloseSubtitleGenSettings={() => setShowSubtitleGenSettings(false)}
+              processError={processError}
               onGenerateSingleClip={handleGenerateSingleClip}
               onCancelGenerateSubtitles={handleCancelGenerateSubtitles}
               onChangeVoiceSettings={setVoiceSettings}
@@ -4473,6 +4574,18 @@ export default function App() {
               selectedSubtitleId={selectedSubtitleId}
               onSelectSubtitle={setSelectedSubtitleId}
               onSelectTimelineSubtitle={handleSelectTimelineSubtitle}
+              editingSubtitleId={editingSubtitleId}
+              onEditSubtitle={(id) => {
+                setShowSubtitleGenSettings(false);
+                setSelectedSubtitleId(id);
+                setEditingSubtitleId(id);
+                setStudioSection("edit");
+                const target = project?.subtitles.find((s) => s.id === id);
+                if (target) {
+                  handleSeek(target.startTime);
+                }
+              }}
+              onCloseEditSubtitle={() => setEditingSubtitleId(null)}
               captionTab={captionTab}
               onChangeCaptionTab={setCaptionTab}
               isSubtitleSearchOpen={isSubtitleSearchOpen}
@@ -4572,48 +4685,63 @@ export default function App() {
                   </section>
                 </div>
 
-                {/* Lower Studio Area: Edge-to-Edge Bottom Timeline Dock (always visible across all Studio tabs) */}
-                <div className="shrink-0">
-                  <ProjectTimelineEditor
-                    dockMode
-                    isCollapsed={false}
-                    project={project}
-                    cutTime={cutTime}
-                    subscribeCutTime={subscribeCutTime}
-                    isPlaying={isPlaying}
-                    isActive={activeTab === "studio"}
-                    hideTransport
-                    hideCaptions={!SHOW_CAPTIONS_UI}
-                    showSubtitleTrack
-                    onTogglePlay={handleTogglePlay}
-                    onPause={handlePause}
-                    onSeek={handleSeek}
-                    onPlayFromTime={handlePlayFromTime}
-                    onUpdateScenes={handleUpdateProjectScenes}
-                    onUpdateSubtitleTiming={handleUpdateSubtitleTiming}
-                    onShiftAllSubtitles={handleShiftAllSubtitles}
-                    onUndo={handleUndo}
-                    onRedo={handleRedo}
-                    canUndo={undoStack.length > 0}
-                    canRedo={redoStack.length > 0}
-                    onResetTimeline={handleResetTimeline}
-                    onGoToScenes={() => setStudioSection("edit")}
-                    cutSpeechRegions={cutSpeechRegions}
-                    onTranscribeRange={handleTranscribeRange}
-                    transcribingRange={transcribingRange}
-                    clipSubtitleCounts={clipSubtitleCounts}
-                    regeneratingClipId={regeneratingClipId}
-                    regeneratingClipPercent={regeneratingClipPercent}
-                    onGenerateSingleClip={handleGenerateSingleClip}
-                    onGenerateSubtitles={handleGenerateSubtitles}
-                    generationProgress={generationProgress}
-                    isBusy={isProcessing}
-                    onPreviewSourceSeek={handlePreviewSourceSeek}
-                    selectedSubtitleId={selectedSubtitleId}
-                    onSelectSubtitle={handleSelectTimelineSubtitle}
-                    hideUndoRedo
-                  />
-                </div>
+                {/* Lower Studio Area: Edge-to-Edge Bottom Timeline Dock (visible only in Edit tab when not editing a single subtitle clip or configuring generation settings) */}
+                {studioSection === "edit" && !editingSubtitleId && !showSubtitleGenSettings && (
+                  <div className="shrink-0">
+                    <ProjectTimelineEditor
+                      dockMode
+                      isCollapsed={false}
+                      project={project}
+                      cutTime={cutTime}
+                      subscribeCutTime={subscribeCutTime}
+                      isPlaying={isPlaying}
+                      isActive={activeTab === "studio" && studioSection === "edit"}
+                      hideTransport
+                      hideCaptions={!SHOW_CAPTIONS_UI}
+                      showSubtitleTrack
+                      onTogglePlay={handleTogglePlay}
+                      onPause={handlePause}
+                      onSeek={handleSeek}
+                      onPlayFromTime={handlePlayFromTime}
+                      onUpdateScenes={handleUpdateProjectScenes}
+                      onUpdateSubtitleTiming={handleUpdateSubtitleTiming}
+                      onEditSubtitle={(id) => {
+                        setShowSubtitleGenSettings(false);
+                        setSelectedSubtitleId(id);
+                        setEditingSubtitleId(id);
+                        setStudioSection("edit");
+                        const target = project?.subtitles.find((s) => s.id === id);
+                        if (target) {
+                          handleSeek(target.startTime);
+                        }
+                      }}
+                      onDeleteSubtitle={handleDeleteSubtitle}
+                      onSplitSubtitle={handleSplitSubtitle}
+                      onMergeSubtitleWithNext={handleMergeSubtitleWithNext}
+                      onShiftAllSubtitles={handleShiftAllSubtitles}
+                      onUndo={handleUndo}
+                      onRedo={handleRedo}
+                      canUndo={undoStack.length > 0}
+                      canRedo={redoStack.length > 0}
+                      onResetTimeline={handleResetTimeline}
+                      onGoToScenes={() => setStudioSection("edit")}
+                      cutSpeechRegions={cutSpeechRegions}
+                      onTranscribeRange={handleTranscribeRange}
+                      transcribingRange={transcribingRange}
+                      clipSubtitleCounts={clipSubtitleCounts}
+                      regeneratingClipId={regeneratingClipId}
+                      regeneratingClipPercent={regeneratingClipPercent}
+                      onGenerateSingleClip={handleGenerateSingleClip}
+                      onGenerateSubtitles={handleOpenSubtitleGenSettings}
+                      generationProgress={generationProgress}
+                      isBusy={isProcessing}
+                      onPreviewSourceSeek={handlePreviewSourceSeek}
+                      selectedSubtitleId={selectedSubtitleId}
+                      onSelectSubtitle={handleSelectTimelineSubtitle}
+                      hideUndoRedo
+                    />
+                  </div>
+                )}
               </main>
             );
           }

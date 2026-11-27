@@ -15,6 +15,8 @@ import { hasGeneratedProject, hasProjectMedia } from "../utils/projectState";
 import {
   VIDEO_ASPECT_RATIO_OPTIONS,
   resolveStageCanvasGeometry,
+  resolveSubtitleFontMultiplier,
+  resolveSubtitleFontStack,
 } from "../utils/videoFilters";
 import {
   clampAndSnapVideoHeightPct,
@@ -1012,115 +1014,232 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
               </AppErrorBoundary>
             </div>
 
-            {/* Lower-Third Cinematic Subtitle Overlay for Landscape / Square Canvas Ratios */}
+            {/* Lower-Third Cinematic Subtitle Overlay (Scaled 1:1 with Logical Export Canvas) */}
             {useOverlaySubtitleLayout && activeSub && (() => {
-              const fontMultiplier =
-                editSettings.subtitleFontScale === "sm"
-                  ? 0.88
-                  : editSettings.subtitleFontScale === "lg"
-                    ? 1.15
-                    : 1;
+              const fontMultiplier = resolveSubtitleFontMultiplier(editSettings);
+              const fontStack = resolveSubtitleFontStack(editSettings.subtitleFontFamily);
               const theme = editSettings.subtitleTheme || "auto";
               const hl = editSettings.subtitleHighlightColor || "indigo";
+              const cardStyle = editSettings.subtitleCardStyle || "card";
+              const wordStyle = editSettings.subtitleWordStyle || "fill";
+              const align = editSettings.subtitleAlign || "center";
+              const lineSpacing = editSettings.subtitleLineSpacing || "normal";
+              const cardRadius = Math.max(0, Math.min(28, editSettings.subtitleCardRadius ?? 18));
+              const weightClass =
+                editSettings.subtitleTextWeight === "bold"
+                  ? "font-bold"
+                  : editSettings.subtitleTextWeight === "normal"
+                    ? "font-normal"
+                    : "font-semibold";
               const showGloss = editSettings.showWordGloss !== false;
               const showBurmese = editSettings.showBurmeseLine !== false;
               const localElapsed = Math.max(0, highlightTime - activeSub.startTime);
 
-              const activeWordBadgeClass =
-                hl === "amber"
+              const activeWordBadgeClass = (() => {
+                if (wordStyle === "underline") {
+                  if (hl === "amber") return "text-amber-300 border-b-[3px] border-amber-400 rounded-none";
+                  if (hl === "emerald") return "text-emerald-300 border-b-[3px] border-emerald-400 rounded-none";
+                  if (hl === "rose") return "text-rose-300 border-b-[3px] border-rose-400 rounded-none";
+                  return "text-teal-300 border-b-[3px] border-teal-400 rounded-none";
+                }
+                if (wordStyle === "glow") {
+                  if (hl === "amber") return "bg-amber-400/28 text-amber-200 shadow-[0_0_16px_rgba(251,191,36,0.5)]";
+                  if (hl === "emerald") return "bg-emerald-400/28 text-emerald-200 shadow-[0_0_16px_rgba(52,211,153,0.5)]";
+                  if (hl === "rose") return "bg-rose-500/32 text-rose-100 shadow-[0_0_16px_rgba(244,63,94,0.55)]";
+                  return "bg-teal-400/28 text-teal-100 shadow-[0_0_16px_rgba(78,126,247,0.55)]";
+                }
+                if (wordStyle === "text") {
+                  if (hl === "amber") return "text-amber-400";
+                  if (hl === "emerald") return "text-emerald-400";
+                  if (hl === "rose") return "text-rose-400";
+                  return "text-teal-300";
+                }
+                return hl === "amber"
                   ? "bg-amber-400 text-[#1c1917]"
                   : hl === "emerald"
                     ? "bg-emerald-400 text-[#052e16]"
                     : hl === "rose"
                       ? "bg-rose-500 text-white"
                       : "bg-teal-400 text-[#060918]";
+              })();
 
-              const isLightBox = theme === "light" || theme === "warm";
-              const boxClass =
-                theme === "light"
-                  ? "bg-white/92 text-[#0c1026] border border-[#d2dcf0]/90"
+              const isLightBox =
+                (theme === "light" || theme === "warm") && cardStyle !== "minimal";
+              const boxClass = (() => {
+                if (cardStyle === "minimal") {
+                  return "bg-transparent text-white drop-shadow-[0_3px_10px_rgba(0,0,0,0.92)]";
+                }
+                if (cardStyle === "outline") {
+                  if (theme === "light") return "bg-white/95 text-[#0c1026] border-[3px] border-[#0c1026]";
+                  if (theme === "warm") return "bg-[#fbf7ef]/95 text-[#1c1917] border-[3px] border-[#92400e]";
+                  return "bg-[#070914]/90 text-white border-[3px] border-white/78";
+                }
+                if (cardStyle === "glass") {
+                  if (theme === "light") return "bg-white/72 text-[#0c1026] border-[1.5px] border-white/75 backdrop-blur-md";
+                  if (theme === "warm") return "bg-[#fbf7ef]/76 text-[#1c1917] border-[1.5px] border-[#e7dcc8]/85 backdrop-blur-md";
+                  return "bg-[#090d22]/64 text-white border-[1.5px] border-white/28 backdrop-blur-md";
+                }
+                return theme === "light"
+                  ? "bg-white/92 text-[#0c1026] border-[1.5px] border-[#d2dcf0]/90"
                   : theme === "warm"
-                    ? "bg-[#fbf7ef]/94 text-[#1c1917] border border-[#e7dcc8]/90"
-                    : "bg-[#070914]/82 text-white border border-white/15";
+                    ? "bg-[#fbf7ef]/94 text-[#1c1917] border-[1.5px] border-[#e7dcc8]/90"
+                    : "bg-[#070914]/84 text-white border-[1.5px] border-white/16";
+              })();
 
-              const scaleFactor = Math.max(0.65, Math.min(1.15, renderedStageWidthPx / 480));
-              const phoneticPx = Math.round(14 * fontMultiplier * scaleFactor);
-              const glossPx = Math.round(9.5 * fontMultiplier * scaleFactor);
-              const thaiPx = Math.round(11 * fontMultiplier * scaleFactor);
-              const burmesePx = Math.round(12 * fontMultiplier * scaleFactor);
+              const isPortraitOverlay = stageGeometry.aspect <= 0.85;
+              const logicalBaseScale = Math.max(
+                0.85,
+                Math.min(1.2, stageGeometry.logicalWidth / (isPortraitOverlay ? 720 : 960))
+              );
+              const phoneticPx = Math.round(27 * fontMultiplier * logicalBaseScale);
+              const glossPx = Math.round(18 * fontMultiplier * logicalBaseScale);
+              const thaiPx = Math.round(21 * fontMultiplier * logicalBaseScale);
+              const burmesePx = Math.round(23 * fontMultiplier * logicalBaseScale);
+              const overlayRadius = Math.round(cardRadius * 0.9);
+              const boxPadX = Math.round(22 * logicalBaseScale);
+              const boxPadY = Math.round(
+                (lineSpacing === "compact" ? 11 : lineSpacing === "relaxed" ? 18 : 14) *
+                  logicalBaseScale
+              );
+              const wordGapX = Math.round(10 * logicalBaseScale);
+              const wordGapY = Math.round(
+                (lineSpacing === "compact" ? 6 : lineSpacing === "relaxed" ? 11 : 8) *
+                  logicalBaseScale
+              );
+              const wordPadX = Math.round(8 * logicalBaseScale);
+              const wordPadY = Math.round(3 * logicalBaseScale);
+              const sectionGapY = Math.round(
+                (lineSpacing === "compact" ? 6 : lineSpacing === "relaxed" ? 11 : 8) *
+                  logicalBaseScale
+              );
+              const bottomMarginPx = Math.round(
+                stageGeometry.logicalHeight * (isPortraitOverlay ? 0.055 : 0.04)
+              );
+              const scrimTopPadPx = Math.round(stageGeometry.logicalHeight * 0.1);
 
               return (
-                <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 px-3 pb-2.5 pt-8 bg-gradient-to-t from-black/75 via-black/30 to-transparent flex justify-center">
-                  <button
-                    type="button"
-                    onClick={() => onSelectSubtitle?.(activeSub.id, activeSub.startTime)}
-                    className={`pointer-events-auto max-w-[94%] rounded-lg px-3 py-1.5 shadow-lg backdrop-blur-xs text-center cursor-pointer transition-colors ${boxClass}`}
+                <div className="pointer-events-none absolute inset-0 z-10 overflow-hidden">
+                  <div
+                    style={{
+                      width: `${stageGeometry.logicalWidth}px`,
+                      height: `${stageGeometry.logicalHeight}px`,
+                      transform: `scale(${stageScale}) translateZ(0)`,
+                      transformOrigin: "top left",
+                    }}
+                    className="absolute top-0 left-0 flex flex-col justify-end items-center"
                   >
-                    <div className="flex flex-wrap items-start justify-center gap-x-1.5 gap-y-1">
-                      {activeSub.words.map((word, wi) => {
-                        const isLastWord = wi === activeSub.words.length - 1;
-                        const isWordSpoken =
-                          localElapsed >= word.startOffsetSec &&
-                          (isLastWord
-                            ? localElapsed <= word.endOffsetSec
-                            : localElapsed < word.endOffsetSec);
-                        return (
-                          <span
-                            key={`${activeSub.id}-ov-${wi}`}
-                            className="inline-flex flex-col items-center"
-                          >
-                            <span
-                              style={{ fontSize: `${phoneticPx}px`, lineHeight: 1.2 }}
-                              className={`font-semibold px-1 py-0.5 rounded ${
-                                isWordSpoken
-                                  ? activeWordBadgeClass
-                                  : isLightBox
-                                    ? "text-[#0c1026]"
-                                    : "text-white"
-                              }`}
-                            >
-                              {word.phonetic}
-                            </span>
-                            {showGloss && word.burmeseGloss && (
+                    <div
+                      style={{
+                        paddingLeft: "28px",
+                        paddingRight: "28px",
+                        paddingTop: `${scrimTopPadPx}px`,
+                        paddingBottom: `${bottomMarginPx}px`,
+                      }}
+                      className="w-full bg-gradient-to-t from-black/75 via-black/32 to-transparent flex justify-center"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => onSelectSubtitle?.(activeSub.id, activeSub.startTime)}
+                        style={{
+                          fontFamily: fontStack,
+                          borderRadius: cardStyle === "minimal" ? "0px" : `${overlayRadius}px`,
+                          padding: `${boxPadY}px ${boxPadX}px`,
+                          maxWidth: "92%",
+                        }}
+                        className={`pointer-events-auto shadow-xl cursor-pointer transition-colors ${
+                          align === "left" ? "text-left" : "text-center"
+                        } ${boxClass}`}
+                      >
+                        <div
+                          style={{
+                            columnGap: `${wordGapX}px`,
+                            rowGap: `${wordGapY}px`,
+                          }}
+                          className={`flex flex-wrap items-start ${
+                            align === "left" ? "justify-start" : "justify-center"
+                          }`}
+                        >
+                          {activeSub.words.map((word, wi) => {
+                            const isLastWord = wi === activeSub.words.length - 1;
+                            const isWordSpoken =
+                              localElapsed >= word.startOffsetSec &&
+                              (isLastWord
+                                ? localElapsed <= word.endOffsetSec
+                                : localElapsed < word.endOffsetSec);
+                            return (
                               <span
-                                style={{ fontSize: `${glossPx}px`, lineHeight: 1.2 }}
-                                className={`font-myanmar mt-0.5 ${
-                                  isLightBox ? "text-[#4d597d]" : "text-white/75"
+                                key={`${activeSub.id}-ov-${wi}`}
+                                className={`inline-flex flex-col ${
+                                  align === "left" ? "items-start" : "items-center"
                                 }`}
                               >
-                                {word.burmeseGloss}
+                                <span
+                                  style={{
+                                    fontSize: `${phoneticPx}px`,
+                                    lineHeight: 1.24,
+                                    padding: `${wordPadY}px ${wordPadX}px`,
+                                    borderRadius: wordStyle === "underline" ? "0px" : "7px",
+                                  }}
+                                  className={`${weightClass} ${
+                                    isWordSpoken
+                                      ? activeWordBadgeClass
+                                      : isLightBox
+                                        ? "text-[#0c1026]"
+                                        : "text-white"
+                                  }`}
+                                >
+                                  {word.phonetic}
+                                </span>
+                                {showGloss && word.burmeseGloss && (
+                                  <span
+                                    style={{
+                                      fontSize: `${glossPx}px`,
+                                      lineHeight: 1.25,
+                                      marginTop: "4px",
+                                    }}
+                                    className={`font-myanmar ${
+                                      isLightBox ? "text-[#4d597d]" : "text-white/78"
+                                    }`}
+                                  >
+                                    {word.burmeseGloss}
+                                  </span>
+                                )}
                               </span>
-                            )}
-                          </span>
-                        );
-                      })}
+                            );
+                          })}
+                        </div>
+
+                        {editSettings.showThaiScript && activeSub.thaiScript && (
+                          <p
+                            style={{
+                              fontSize: `${thaiPx}px`,
+                              lineHeight: 1.35,
+                              marginTop: `${sectionGapY}px`,
+                              fontFamily: "'Noto Sans Thai', 'DM Sans', sans-serif",
+                            }}
+                            className={isLightBox ? "text-[#4d597d]" : "text-white/84"}
+                          >
+                            {activeSub.thaiScript}
+                          </p>
+                        )}
+
+                        {showBurmese && activeSub.burmese && (
+                          <p
+                            style={{
+                              fontSize: `${burmesePx}px`,
+                              lineHeight: 1.4,
+                              marginTop: `${sectionGapY}px`,
+                            }}
+                            className={`font-myanmar font-medium ${
+                              isLightBox ? "text-[#1e293b]" : "text-white/96"
+                            }`}
+                          >
+                            {activeSub.burmese}
+                          </p>
+                        )}
+                      </button>
                     </div>
-
-                    {editSettings.showThaiScript && activeSub.thaiScript && (
-                      <p
-                        style={{
-                          fontSize: `${thaiPx}px`,
-                          fontFamily: "'Noto Sans Thai', 'DM Sans', sans-serif",
-                        }}
-                        className={`mt-1 leading-snug ${
-                          isLightBox ? "text-[#4d597d]" : "text-white/80"
-                        }`}
-                      >
-                        {activeSub.thaiScript}
-                      </p>
-                    )}
-
-                    {showBurmese && activeSub.burmese && (
-                      <p
-                        style={{ fontSize: `${burmesePx}px` }}
-                        className={`font-myanmar mt-1 leading-snug font-medium ${
-                          isLightBox ? "text-[#1e293b]" : "text-white/95"
-                        }`}
-                      >
-                        {activeSub.burmese}
-                      </p>
-                    )}
-                  </button>
+                  </div>
                 </div>
               );
             })()}
@@ -1183,14 +1302,24 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
 
             {/* Bottom Scrolling List Item View — portrait split-screen subtitle layout */}
             {useSplitSubtitleLayout && (() => {
-              const fontMultiplier =
-                editSettings.subtitleFontScale === "sm"
-                  ? 0.86
-                  : editSettings.subtitleFontScale === "lg"
-                    ? 1.16
-                    : 1;
+              const fontMultiplier = resolveSubtitleFontMultiplier(editSettings);
+              const fontStack = resolveSubtitleFontStack(editSettings.subtitleFontFamily);
               const theme = editSettings.subtitleTheme || "auto";
               const hl = editSettings.subtitleHighlightColor || "indigo";
+              const cardStyle = editSettings.subtitleCardStyle || "card";
+              const wordStyle = editSettings.subtitleWordStyle || "fill";
+              const align = editSettings.subtitleAlign || "left";
+              const isCentered = align === "center";
+              const cardRadius = Math.max(0, Math.min(28, editSettings.subtitleCardRadius ?? 18));
+              const spacingMode = editSettings.subtitleLineSpacing || "normal";
+              const cardGapPx = spacingMode === "compact" ? 10 : spacingMode === "relaxed" ? 26 : 18;
+              const cardPadY = spacingMode === "compact" ? 11 : spacingMode === "relaxed" ? 24 : 18;
+              const weightClass =
+                editSettings.subtitleTextWeight === "bold"
+                  ? "font-bold"
+                  : editSettings.subtitleTextWeight === "normal"
+                    ? "font-normal"
+                    : "font-semibold";
               const showGloss = editSettings.showWordGloss !== false;
               const showBurmese = editSettings.showBurmeseLine !== false;
 
@@ -1213,6 +1342,60 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
                       : "border-t border-[#d2dcf0] dark:border-[#21284c]";
 
               const getCardThemeClass = (isActive: boolean) => {
+                if (cardStyle === "minimal") {
+                  if (theme === "light") {
+                    return isActive ? "bg-transparent border-b border-[#8da2ea]/55" : "bg-transparent opacity-60";
+                  }
+                  if (theme === "dark") {
+                    return isActive ? "bg-transparent border-b border-[#4e7ef7]/45" : "bg-transparent opacity-55";
+                  }
+                  if (theme === "warm") {
+                    return isActive ? "bg-transparent border-b border-[#dfae52]/60" : "bg-transparent opacity-60";
+                  }
+                  return isActive
+                    ? "bg-transparent border-b border-[#8da2ea]/55 dark:border-[#4e7ef7]/45"
+                    : "bg-transparent opacity-60";
+                }
+                if (cardStyle === "outline") {
+                  if (theme === "light") {
+                    return isActive
+                      ? "bg-white border-[3px] border-[#0c1026]"
+                      : "bg-white/60 border-2 border-[#bcc9e6]";
+                  }
+                  if (theme === "dark") {
+                    return isActive
+                      ? "bg-[#0c112b] border-[3px] border-white/85"
+                      : "bg-[#0a0f24]/60 border-2 border-[#2f3a6e]";
+                  }
+                  if (theme === "warm") {
+                    return isActive
+                      ? "bg-[#fffdf8] border-[3px] border-[#92400e]"
+                      : "bg-[#f4ede0]/60 border-2 border-[#d6c5a7]";
+                  }
+                  return isActive
+                    ? "bg-white dark:bg-[#0c112b] border-[3px] border-[#0c1026] dark:border-white/85"
+                    : "bg-white/60 dark:bg-[#0a0f24]/60 border-2 border-[#bcc9e6] dark:border-[#2f3a6e]";
+                }
+                if (cardStyle === "glass") {
+                  if (theme === "light") {
+                    return isActive
+                      ? "bg-white/75 backdrop-blur-md border border-white shadow-[0_6px_22px_rgba(28,61,184,0.12)]"
+                      : "bg-white/45 backdrop-blur-xs border border-[#dce4f5]";
+                  }
+                  if (theme === "dark") {
+                    return isActive
+                      ? "bg-[#17214d]/72 backdrop-blur-md border border-[#6e96ff]/40 shadow-[0_8px_26px_rgba(0,0,0,0.45)]"
+                      : "bg-[#0e1430]/50 backdrop-blur-xs border border-white/10";
+                  }
+                  if (theme === "warm") {
+                    return isActive
+                      ? "bg-[#fffaf0]/80 backdrop-blur-md border border-[#dfae52]/65 shadow-[0_6px_20px_rgba(180,83,9,0.12)]"
+                      : "bg-[#f4ede0]/55 backdrop-blur-xs border border-[#e5dac6]";
+                  }
+                  return isActive
+                    ? "bg-white/75 dark:bg-[#17214d]/72 backdrop-blur-md border border-white dark:border-[#6e96ff]/40 shadow-[0_6px_22px_rgba(28,61,184,0.12)] dark:shadow-[0_8px_26px_rgba(0,0,0,0.45)]"
+                    : "bg-white/45 dark:bg-[#0e1430]/50 backdrop-blur-xs border border-[#dce4f5] dark:border-white/10";
+                }
                 if (theme === "light") {
                   return isActive
                     ? "bg-white border-2 border-[#8da2ea]"
@@ -1249,6 +1432,58 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
               };
 
               const spokenPillClass = (() => {
+                if (wordStyle === "underline") {
+                  if (hl === "emerald") {
+                    if (theme === "dark") return "text-[#43b892] border-b-[3px] border-[#43b892] rounded-none";
+                    if (theme === "light" || theme === "warm") return "text-[#0d7456] border-b-[3px] border-[#0d7456] rounded-none";
+                    return "text-[#0d7456] dark:text-[#43b892] border-b-[3px] border-[#0d7456] dark:border-[#43b892] rounded-none";
+                  }
+                  if (hl === "indigo") {
+                    if (theme === "dark") return "text-[#7ca3fb] border-b-[3px] border-[#5b85f7] rounded-none";
+                    if (theme === "light" || theme === "warm") return "text-[#1c3db8] border-b-[3px] border-[#1c3db8] rounded-none";
+                    return "text-[#1c3db8] dark:text-[#7ca3fb] border-b-[3px] border-[#1c3db8] dark:border-[#5b85f7] rounded-none";
+                  }
+                  if (hl === "rose") {
+                    if (theme === "dark") return "text-[#f472b6] border-b-[3px] border-[#e879f9] rounded-none";
+                    if (theme === "light" || theme === "warm") return "text-[#9d174d] border-b-[3px] border-[#be185d] rounded-none";
+                    return "text-[#9d174d] dark:text-[#f472b6] border-b-[3px] border-[#be185d] dark:border-[#e879f9] rounded-none";
+                  }
+                  if (theme === "dark") return "text-[#fbbf24] border-b-[3px] border-[#fbbf24] rounded-none";
+                  if (theme === "light" || theme === "warm") return "text-[#b45309] border-b-[3px] border-[#d97706] rounded-none";
+                  return "text-[#b45309] dark:text-[#fbbf24] border-b-[3px] border-[#d97706] dark:border-[#fbbf24] rounded-none";
+                }
+                if (wordStyle === "glow") {
+                  if (hl === "emerald") {
+                    return "bg-emerald-500/22 text-emerald-700 dark:text-emerald-200 ring-1 ring-emerald-500/45 shadow-[0_0_14px_rgba(16,185,129,0.4)]";
+                  }
+                  if (hl === "indigo") {
+                    return "bg-[#355feb]/22 text-[#1c3db8] dark:text-[#a8c3fa] ring-1 ring-[#4e7ef7]/50 shadow-[0_0_14px_rgba(78,126,247,0.45)]";
+                  }
+                  if (hl === "rose") {
+                    return "bg-rose-500/22 text-rose-700 dark:text-rose-200 ring-1 ring-rose-500/45 shadow-[0_0_14px_rgba(244,63,94,0.42)]";
+                  }
+                  return "bg-amber-500/22 text-amber-800 dark:text-amber-200 ring-1 ring-amber-500/45 shadow-[0_0_14px_rgba(245,158,11,0.42)]";
+                }
+                if (wordStyle === "text") {
+                  if (hl === "emerald") {
+                    if (theme === "dark") return "text-[#34d399]";
+                    if (theme === "light" || theme === "warm") return "text-[#059669]";
+                    return "text-[#059669] dark:text-[#34d399]";
+                  }
+                  if (hl === "indigo") {
+                    if (theme === "dark") return "text-[#7ca3fb]";
+                    if (theme === "light" || theme === "warm") return "text-[#1c3db8]";
+                    return "text-[#1c3db8] dark:text-[#7ca3fb]";
+                  }
+                  if (hl === "rose") {
+                    if (theme === "dark") return "text-[#fb7185]";
+                    if (theme === "light" || theme === "warm") return "text-[#be123c]";
+                    return "text-[#be123c] dark:text-[#fb7185]";
+                  }
+                  if (theme === "dark") return "text-[#fbbf24]";
+                  if (theme === "light" || theme === "warm") return "text-[#b45309]";
+                  return "text-[#b45309] dark:text-[#fbbf24]";
+                }
                 if (hl === "emerald") {
                   if (theme === "dark") return "bg-[#127d5c] text-[#ffffff]";
                   if (theme === "light" || theme === "warm") return "bg-[#0d7456] text-[#ffffff]";
@@ -1388,7 +1623,8 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
                       transform: `scale(${stageScale}) translateZ(0)`,
                       transformOrigin: "top left",
                       padding: "34px 22px 0 22px",
-                      gap: "18px",
+                      gap: `${cardGapPx}px`,
+                      fontFamily: fontStack,
                     }}
                     className={`absolute top-0 left-0 flex flex-col overflow-y-auto overflow-x-hidden no-scrollbar ${containerThemeClass}`}
                   >
@@ -1448,10 +1684,17 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
                             }
                           }}
                           style={{
-                            borderRadius: "18px",
-                            padding: "16px 26px 20px 32px",
+                            borderRadius: cardStyle === "minimal" ? "0px" : `${cardRadius}px`,
+                            padding:
+                              cardStyle === "minimal"
+                                ? `${cardPadY}px 18px`
+                                : isCentered
+                                  ? `${cardPadY}px 26px`
+                                  : `${cardPadY}px 26px ${cardPadY + 2}px 32px`,
                           }}
-                          className={`relative w-full text-left shrink-0 overflow-hidden focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1c3db8] dark:focus-visible:ring-[#4e7ef7] ${getCardThemeClass(
+                          className={`relative w-full shrink-0 overflow-hidden focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1c3db8] dark:focus-visible:ring-[#4e7ef7] ${
+                            isCentered ? "text-center" : "text-left"
+                          } ${getCardThemeClass(
                             isActive
                           )} ${
                             isStageSelected
@@ -1459,18 +1702,20 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
                               : ""
                           }`}
                         >
-                          {/* Educational Left Accent Bar matching exportVideo.ts (x=32, w=5) */}
-                          <span
-                            aria-hidden="true"
-                            style={{
-                              left: "10px",
-                              top: "18px",
-                              bottom: "18px",
-                              width: "5px",
-                              borderRadius: "3px",
-                            }}
-                            className={`absolute ${getAccentBarClass(isActive)}`}
-                          />
+                          {/* Accent Bar (shown in default card style when left-aligned) */}
+                          {cardStyle === "card" && !isCentered && (
+                            <span
+                              aria-hidden="true"
+                              style={{
+                                left: "10px",
+                                top: "18px",
+                                bottom: "18px",
+                                width: "5px",
+                                borderRadius: "3px",
+                              }}
+                              className={`absolute ${getAccentBarClass(isActive)}`}
+                            />
+                          )}
 
                           {/* Line 1: Thai in English phonetics with word-by-word sync */}
                           <div
@@ -1478,7 +1723,9 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
                               columnGap: "8px",
                               rowGap: `${Math.round(10 * fontMultiplier)}px`,
                             }}
-                            className="flex flex-wrap items-start"
+                            className={`flex flex-wrap items-start ${
+                              isCentered ? "justify-center" : "justify-start"
+                            }`}
                           >
                             {(Array.isArray(sub.words) ? sub.words : []).map((word, wi, wordsArr) => {
                               const isLastWord = wi === wordsArr.length - 1;
@@ -1497,7 +1744,9 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
                               return (
                                 <span
                                   key={`${sub.id}-w-${wi}`}
-                                  className="inline-flex flex-col items-start max-w-full"
+                                  className={`inline-flex flex-col max-w-full ${
+                                    isCentered ? "items-center" : "items-start"
+                                  }`}
                                 >
                                   <span
                                     style={{
@@ -1505,10 +1754,10 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
                                       padding: `${Math.round(4 * fontMultiplier)}px ${Math.round(
                                         9 * fontMultiplier
                                       )}px`,
-                                      borderRadius: "9px",
+                                      borderRadius: wordStyle === "underline" ? "0px" : "9px",
                                       lineHeight: 1.2,
                                     }}
-                                    className={`font-semibold tracking-tight max-w-full break-words ${getWordClass(
+                                    className={`${weightClass} tracking-tight max-w-full break-words ${getWordClass(
                                       isWordSpoken,
                                       isActive,
                                       wasWordSpoken
@@ -1521,7 +1770,7 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
                                       style={{
                                         fontSize: `${glossPx}px`,
                                         marginTop: `${Math.round(4 * fontMultiplier)}px`,
-                                        paddingLeft: `${Math.round(9 * fontMultiplier)}px`,
+                                        paddingLeft: isCentered ? "0px" : `${Math.round(9 * fontMultiplier)}px`,
                                         lineHeight: 1.25,
                                       }}
                                       className={`font-myanmar max-w-full break-words ${getGlossClass(
@@ -1542,7 +1791,7 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
                             <p
                               style={{
                                 marginTop: `${Math.round(12 * fontMultiplier)}px`,
-                                paddingLeft: "4px",
+                                paddingLeft: isCentered ? "0px" : "4px",
                                 fontSize: `${thaiPx}px`,
                                 fontFamily: "'Noto Sans Thai', 'DM Sans', sans-serif",
                                 lineHeight: 1.4,
@@ -1561,19 +1810,23 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
                                 paddingTop: `${Math.round(14 * fontMultiplier)}px`,
                                 gap: "12px",
                               }}
-                              className={`border-t flex items-baseline ${getDividerClass(isActive)}`}
+                              className={`border-t flex items-baseline ${
+                                isCentered ? "justify-center" : "justify-start"
+                              } ${getDividerClass(isActive)}`}
                             >
-                              <span
-                                style={{
-                                  fontSize: `${indexPx}px`,
-                                  minWidth: "20px",
-                                }}
-                                className={`font-mono-tabular font-semibold shrink-0 ${getIndexClass(
-                                  isActive
-                                )}`}
-                              >
-                                {String(subIdx + 1).padStart(2, "0")}
-                              </span>
+                              {!isCentered && (
+                                <span
+                                  style={{
+                                    fontSize: `${indexPx}px`,
+                                    minWidth: "20px",
+                                  }}
+                                  className={`font-mono-tabular font-semibold shrink-0 ${getIndexClass(
+                                    isActive
+                                  )}`}
+                                >
+                                  {String(subIdx + 1).padStart(2, "0")}
+                                </span>
+                              )}
                               <p
                                 style={{
                                   fontSize: `${burmesePx}px`,
@@ -1664,25 +1917,29 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
                 <div
                   role="menu"
                   aria-label="Aspect ratio presets"
-                  className="absolute bottom-full left-0 mb-1.5 p-1 rounded-lg border border-[#d2dcf0] dark:border-[#21284c] bg-white/98 dark:bg-[#0d1022]/98 shadow-lg backdrop-blur-sm flex flex-wrap items-center gap-1 w-max max-w-[calc(100vw-24px)] sm:max-w-[360px] z-40"
+                  className="absolute bottom-full left-0 mb-1.5 p-1.5 rounded-lg border border-[#d2dcf0] dark:border-[#21284c] bg-white/98 dark:bg-[#0d1022]/98 shadow-lg backdrop-blur-sm flex flex-wrap items-center gap-1 w-max max-w-[calc(100vw-24px)] sm:max-w-[390px] z-40"
                 >
                   {VIDEO_ASPECT_RATIO_OPTIONS.map((opt) => {
                     const active = (editSettings.aspectRatio || "original") === opt.id;
                     const optGeom = resolveStageCanvasGeometry(opt.id, detectedVideoDims);
-                    const iconStyle =
-                      opt.id === "9:16"
-                        ? "w-2 h-3.5"
-                        : opt.id === "16:9"
-                          ? "w-3.5 h-2"
-                          : opt.id === "1:1"
-                            ? "w-2.5 h-2.5"
-                            : opt.id === "4:5"
-                              ? "w-2.5 h-3"
-                              : optGeom.aspect > 1.1
-                                ? "w-3.5 h-2"
-                                : optGeom.aspect < 0.9
-                                  ? "w-2 h-3.5"
-                                  : "w-2.5 h-2.5";
+                    const isTall916 = opt.id === "9:16" || opt.id === "9:16-overlay";
+                    const isTall45 = opt.id === "4:5" || opt.id === "4:5-overlay";
+                    const isPortraitVariant = isTall916 || isTall45;
+                    const iconStyle = isTall916
+                      ? "w-2.5 h-4"
+                      : opt.id === "16:9"
+                        ? "w-4 h-2.5"
+                        : opt.id === "1:1"
+                          ? "w-3 h-3"
+                          : isTall45
+                            ? "w-3 h-3.5"
+                            : optGeom.aspect > 1.1
+                              ? "w-4 h-2.5"
+                              : optGeom.aspect < 0.9
+                                ? "w-2.5 h-4"
+                                : "w-3 h-3";
+                    const showModeBadge = isPortraitVariant || hasSubtitles;
+                    const modeBadgeText = optGeom.isPortraitSplitFriendly ? "Scroll" : "Overlay";
 
                     return (
                       <button
@@ -1702,16 +1959,23 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
                       >
                         <span
                           aria-hidden="true"
-                          className={`rounded-[2px] border border-current shrink-0 ${iconStyle}`}
-                        />
+                          className={`relative rounded-[2px] border border-current shrink-0 overflow-hidden ${iconStyle}`}
+                        >
+                          {isPortraitVariant && optGeom.isPortraitSplitFriendly && (
+                            <span className="absolute inset-x-0 top-[40%] h-[1px] bg-current opacity-80" />
+                          )}
+                          {isPortraitVariant && !optGeom.isPortraitSplitFriendly && (
+                            <span className="absolute inset-x-[1.5px] bottom-[2px] h-[2px] rounded-[0.5px] bg-current opacity-85" />
+                          )}
+                        </span>
                         <span>
                           {opt.id === "original" && stageGeometry.detectedRatioLabel
                             ? `Original · ${stageGeometry.detectedRatioLabel}`
                             : opt.label}
                         </span>
-                        {hasSubtitles && (
-                          <span className="text-[9px] opacity-70">
-                            {optGeom.isPortraitSplitFriendly ? "Split" : "Overlay"}
+                        {showModeBadge && (
+                          <span className="text-[9px] opacity-75">
+                            {modeBadgeText}
                           </span>
                         )}
                       </button>

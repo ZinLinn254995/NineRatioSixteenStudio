@@ -221,9 +221,11 @@ export function sanitizeEditSettings(raw: unknown): VideoEditSettings {
     aspectRatio:
       rec.aspectRatio === "original" ||
       rec.aspectRatio === "9:16" ||
+      rec.aspectRatio === "9:16-overlay" ||
       rec.aspectRatio === "16:9" ||
       rec.aspectRatio === "1:1" ||
-      rec.aspectRatio === "4:5"
+      rec.aspectRatio === "4:5" ||
+      rec.aspectRatio === "4:5-overlay"
         ? rec.aspectRatio
         : DEFAULT_VIDEO_EDIT.aspectRatio,
     zoom: clampFinite(rec.zoom, 0.5, 3, DEFAULT_VIDEO_EDIT.zoom),
@@ -291,6 +293,45 @@ export function sanitizeEditSettings(raw: unknown): VideoEditSettings {
       typeof rec.showBurmeseLine === "boolean"
         ? rec.showBurmeseLine
         : DEFAULT_VIDEO_EDIT.showBurmeseLine,
+    subtitleCardStyle:
+      rec.subtitleCardStyle === "card" ||
+      rec.subtitleCardStyle === "minimal" ||
+      rec.subtitleCardStyle === "outline" ||
+      rec.subtitleCardStyle === "glass"
+        ? rec.subtitleCardStyle
+        : DEFAULT_VIDEO_EDIT.subtitleCardStyle,
+    subtitleWordStyle:
+      rec.subtitleWordStyle === "fill" ||
+      rec.subtitleWordStyle === "underline" ||
+      rec.subtitleWordStyle === "glow" ||
+      rec.subtitleWordStyle === "text"
+        ? rec.subtitleWordStyle
+        : DEFAULT_VIDEO_EDIT.subtitleWordStyle,
+    subtitleFontFamily:
+      rec.subtitleFontFamily === "sans" ||
+      rec.subtitleFontFamily === "display" ||
+      rec.subtitleFontFamily === "serif" ||
+      rec.subtitleFontFamily === "mono"
+        ? rec.subtitleFontFamily
+        : DEFAULT_VIDEO_EDIT.subtitleFontFamily,
+    subtitleAlign:
+      rec.subtitleAlign === "left" || rec.subtitleAlign === "center"
+        ? rec.subtitleAlign
+        : DEFAULT_VIDEO_EDIT.subtitleAlign,
+    subtitleSizePct: clampFinite(rec.subtitleSizePct, 75, 140, DEFAULT_VIDEO_EDIT.subtitleSizePct ?? 100),
+    subtitleCardRadius: clampFinite(rec.subtitleCardRadius, 0, 28, DEFAULT_VIDEO_EDIT.subtitleCardRadius ?? 18),
+    subtitleTextWeight:
+      rec.subtitleTextWeight === "normal" ||
+      rec.subtitleTextWeight === "semibold" ||
+      rec.subtitleTextWeight === "bold"
+        ? rec.subtitleTextWeight
+        : DEFAULT_VIDEO_EDIT.subtitleTextWeight,
+    subtitleLineSpacing:
+      rec.subtitleLineSpacing === "compact" ||
+      rec.subtitleLineSpacing === "normal" ||
+      rec.subtitleLineSpacing === "relaxed"
+        ? rec.subtitleLineSpacing
+        : DEFAULT_VIDEO_EDIT.subtitleLineSpacing,
   };
 }
 

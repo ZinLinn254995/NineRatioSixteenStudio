@@ -9,6 +9,7 @@ import { promisify } from "util";
 import { GoogleGenAI, Type, ThinkingLevel } from "@google/genai";
 import type {
   SpeakingScene,
+  SubtitleGenerationConfig,
   SubtitleItem,
   TranslationTone,
   VideoEditSettings,
@@ -1336,26 +1337,287 @@ function normalizeTranslationTone(raw?: unknown): TranslationTone {
   return "casual";
 }
 
-function getTranslationToneInstruction(tone: TranslationTone): string {
+const LANGUAGE_NAME_MAP: Record<string, string> = {
+  auto: "Auto-Detected Spoken Language",
+  th: "Thai (ไทย)",
+  my: "Burmese (မြန်မာ)",
+  en: "English",
+  zh: "Chinese / Mandarin (中文)",
+  ja: "Japanese (日本語)",
+  ko: "Korean (한국어)",
+  vi: "Vietnamese (Tiếng Việt)",
+  lo: "Lao (ລາວ)",
+  km: "Khmer (ខ្មែរ)",
+  id: "Indonesian / Malay (Bahasa)",
+  hi: "Hindi (हिन्दी)",
+  es: "Spanish (Español)",
+  fr: "French (Français)",
+  none: "None (Transcribe Only)",
+};
+
+function normalizeSubtitleGenerationConfig(
+  raw?: unknown,
+  fallbackTone: TranslationTone = "casual"
+): SubtitleGenerationConfig {
+  const obj = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const validSources = new Set([
+    "auto",
+    "th",
+    "my",
+    "en",
+    "zh",
+    "ja",
+    "ko",
+    "vi",
+    "lo",
+    "km",
+    "id",
+    "hi",
+    "es",
+    "fr",
+  ]);
+  const validTargets = new Set([
+    "my",
+    "en",
+    "th",
+    "zh",
+    "ja",
+    "ko",
+    "vi",
+    "id",
+    "hi",
+    "es",
+    "fr",
+    "none",
+  ]);
+  const validFormats = new Set([
+    "bilingual_phonetic",
+    "bilingual_native",
+    "translation_only",
+    "original_only",
+  ]);
+  const validPhonetics = new Set([
+    "latin",
+    "burmese_phonetic",
+    "ipa_tones",
+    "native_only",
+  ]);
+  const validTones = new Set([
+    "casual",
+    "formal",
+    "dramatic",
+    "literal",
+    "concise",
+    "poetic",
+  ]);
+  const validGenres = new Set([
+    "general",
+    "movie_drama",
+    "vlog_social",
+    "education",
+    "news_doc",
+    "music_lyrics",
+  ]);
+  const validPacing = new Set(["balanced", "short_reels", "full_sentence"]);
+
+  const sourceLanguage = (
+    typeof obj.sourceLanguage === "string" && validSources.has(obj.sourceLanguage)
+      ? obj.sourceLanguage
+      : "th"
+  ) as SubtitleGenerationConfig["sourceLanguage"];
+  const targetLanguage = (
+    typeof obj.targetLanguage === "string" && validTargets.has(obj.targetLanguage)
+      ? obj.targetLanguage
+      : "my"
+  ) as SubtitleGenerationConfig["targetLanguage"];
+  const subtitleFormat = (
+    typeof obj.subtitleFormat === "string" && validFormats.has(obj.subtitleFormat)
+      ? obj.subtitleFormat
+      : "bilingual_phonetic"
+  ) as SubtitleGenerationConfig["subtitleFormat"];
+  const phoneticStyle = (
+    typeof obj.phoneticStyle === "string" && validPhonetics.has(obj.phoneticStyle)
+      ? obj.phoneticStyle
+      : "latin"
+  ) as SubtitleGenerationConfig["phoneticStyle"];
+  const translationTone = (
+    typeof obj.translationTone === "string" && validTones.has(obj.translationTone)
+      ? obj.translationTone
+      : fallbackTone
+  ) as SubtitleGenerationConfig["translationTone"];
+  const contentGenre = (
+    typeof obj.contentGenre === "string" && validGenres.has(obj.contentGenre)
+      ? obj.contentGenre
+      : "general"
+  ) as SubtitleGenerationConfig["contentGenre"];
+  const pacingMode = (
+    typeof obj.pacingMode === "string" && validPacing.has(obj.pacingMode)
+      ? obj.pacingMode
+      : "balanced"
+  ) as SubtitleGenerationConfig["pacingMode"];
+
+  return {
+    sourceLanguage,
+    targetLanguage,
+    subtitleFormat,
+    phoneticStyle,
+    translationTone,
+    contentGenre,
+    pacingMode,
+    includeWordGloss:
+      typeof obj.includeWordGloss === "boolean" ? obj.includeWordGloss : true,
+    includeNativeScript:
+      typeof obj.includeNativeScript === "boolean" ? obj.includeNativeScript : true,
+    includeNonSpeech:
+      typeof obj.includeNonSpeech === "boolean" ? obj.includeNonSpeech : false,
+    customInstructions:
+      typeof obj.customInstructions === "string"
+        ? obj.customInstructions.trim().slice(0, 600)
+        : "",
+  };
+}
+
+function getTranslationToneInstruction(
+  tone: SubtitleGenerationConfig["translationTone"],
+  targetLangCode = "my"
+): string {
+  const targetName = LANGUAGE_NAME_MAP[targetLangCode] || "Burmese (မြန်မာ)";
+  const isBurmese = targetLangCode === "my";
+
   switch (tone) {
     case "formal":
-      return `TRANSLATION TONE (Polite / Educational Burmese):
+      return isBurmese
+        ? `TRANSLATION TONE (Polite / Educational Burmese):
 - Use polite, clear, courteous spoken/teaching Burmese (e.g. ကျွန်တော်/ကျွန်မ, ခင်ဗျား/ရှင်, ပါတယ်/ပါ, ခင်ဗျာ/ရှင့် when appropriate).
-- Avoid overly rough slang while remaining natural and easy to follow for learners.`;
+- Avoid overly rough slang while remaining natural and easy to follow for learners.`
+        : `TRANSLATION TONE (Polite / Educational ${targetName}):
+- Use polite, clear, well-structured ${targetName} suitable for learners and formal contexts.
+- Avoid harsh slang while remaining natural and easy to understand.`;
     case "dramatic":
-      return `TRANSLATION TONE (Expressive / Drama & Comedy Burmese):
+      return isBurmese
+        ? `TRANSLATION TONE (Expressive / Drama & Comedy Burmese):
 - Use vivid, expressive, emotionally punchy Burmese that captures excitement, teasing, surprise, or dramatic flair (e.g. ဟာ, တကယ်ကြီးလား, ဖြစ်ရလေ, အမလေး, etc. when matching the speaker's energy).
-- Match the speaker's emotional emphasis naturally.`;
+- Match the speaker's emotional emphasis naturally.`
+        : `TRANSLATION TONE (Expressive / Drama & Comedy ${targetName}):
+- Use vivid, emotionally punchy ${targetName} that preserves the speaker's excitement, humor, tension, or surprise.
+- Match the speaker's emotional energy naturally.`;
     case "literal":
-      return `TRANSLATION TONE (Literal / Learner Accuracy Burmese):
-- Translate faithfully and closely to the exact Thai words and grammatical structure so Thai learners can clearly see how each phrase maps to Burmese.
-- Keep "burmeseGloss" extra accurate and explicit for key content words.`;
+      return `TRANSLATION TONE (Literal / Learner Accuracy in ${targetName}):
+- Translate faithfully and closely to the exact spoken words and grammatical structure so learners can clearly see how each phrase maps to ${targetName}.
+- Keep per-word glosses extra accurate and explicit for key content words.`;
+    case "concise":
+      return `TRANSLATION TONE (Short & Punchy for Reels / Shorts in ${targetName}):
+- Keep translations crisp, concise, and fast to read on mobile screens without losing core meaning.
+- Trim unnecessary filler words while preserving natural spoken flow.`;
+    case "poetic":
+      return `TRANSLATION TONE (Lyrical / Emotional Storytelling in ${targetName}):
+- Translate with warmth, smooth rhythm, and emotional resonance suited to songs, stories, or heartfelt narration.
+- Preserve figurative meaning rather than stiff word-by-word phrasing.`;
     case "casual":
     default:
-      return `TRANSLATION TONE (Natural Spoken Burmese):
+      return isBurmese
+        ? `TRANSLATION TONE (Natural Spoken Burmese):
 - Use natural, everyday conversational Burmese (e.g. တယ်, လေ, နော်, ပေါ့, ငါ/မင်း/သူ where matching speaker familiarity) just like real people speak in daily life.
+- Prefer idiomatic spoken phrasing over stiff textbook prose.`
+        : `TRANSLATION TONE (Natural Spoken ${targetName}):
+- Use natural, everyday conversational ${targetName} as native speakers actually talk in daily life.
 - Prefer idiomatic spoken phrasing over stiff textbook prose.`;
   }
+}
+
+function getAdvancedStylePromptBlock(cfg: SubtitleGenerationConfig): string {
+  const sourceName =
+    cfg.sourceLanguage === "auto"
+      ? "auto-detected spoken language (identify whatever language is actually spoken in the audio)"
+      : LANGUAGE_NAME_MAP[cfg.sourceLanguage] || cfg.sourceLanguage;
+  const targetName =
+    cfg.targetLanguage === "none"
+      ? "None (transcription only)"
+      : LANGUAGE_NAME_MAP[cfg.targetLanguage] || cfg.targetLanguage;
+
+  const genreHint: Record<SubtitleGenerationConfig["contentGenre"], string> = {
+    general: "General conversation / everyday video.",
+    movie_drama: "Movie or drama dialogue — preserve character attitude, relationships, and emotional nuance.",
+    vlog_social: "Vlog / TikTok / social media — keep phrasing lively, modern, and relatable.",
+    education: "Educational / language-learning lesson — prioritize clarity, pronunciation precision, and helpful glosses.",
+    news_doc: "News / documentary — maintain factual accuracy, proper nouns, and clear formal clarity.",
+    music_lyrics: "Song / music lyrics — respect lyrical phrasing, rhythm, and poetic imagery.",
+  };
+
+  const pacingHint: Record<SubtitleGenerationConfig["pacingMode"], string> = {
+    balanced: "Segment utterances into natural spoken phrases (typically 4–10 words).",
+    short_reels: "Split dialogue into SHORT, punchy cards (typically 2–6 words per utterance) optimized for fast-paced Reels/Shorts reading.",
+    full_sentence: "Group speech into complete, coherent sentences where natural pauses occur so learners see full sentence structure.",
+  };
+
+  const nonSpeechRule = cfg.includeNonSpeech
+    ? "- When a clear, meaningful non-speech sound occurs (e.g. [laughter], [sigh], [applause]), you may include a brief bracketed tag."
+    : "- Skip pure music, silence, or background sound effects (do NOT add [music] or [laughter] tags).";
+
+  const customRule = cfg.customInstructions.trim()
+    ? `\nCUSTOM USER INSTRUCTIONS (follow carefully while staying grounded in the actual audio):\n${cfg.customInstructions.trim()}\n`
+    : "";
+
+  const phoneticDesc = (() => {
+    switch (cfg.phoneticStyle) {
+      case "burmese_phonetic":
+        return "easy-to-read Burmese script phonetic pronunciation guide (မြန်မာအသံထွက်, e.g. 'ဆဝါဒီ ခပ်') so Burmese readers can pronounce the spoken words directly";
+      case "ipa_tones":
+        return "romanized phonetic spelling WITH clear tone marks / diacritics (e.g. 'sà-wàt-dii khráp')";
+      case "native_only":
+        return "exact native script of the spoken language (no romanization)";
+      case "latin":
+      default:
+        return "clear, easy-to-read English/Latin phonetic pronunciation (e.g. 'Sa-wat-dee khrap', or verbatim text if already Latin-script English/Spanish/French)";
+    }
+  })();
+
+  let fieldMapping = "";
+  if (cfg.subtitleFormat === "translation_only" && cfg.targetLanguage !== "none") {
+    fieldMapping = `OUTPUT FIELD MAPPING (Translation-Only Mode — ${sourceName} → ${targetName}):
+- "originalSpokenText": Exact verbatim words spoken in the audio.
+- "thaiScript": ${cfg.includeNativeScript ? "Exact verbatim native script of what was spoken." : 'Empty string "" (or brief original spoken text).'}
+- "thaiPhonetic": Accurate, natural ${targetName} translation of what was spoken (this field is rendered as the primary subtitle line).
+- "burmese": Empty string "" (leave blank in Translation-Only mode to avoid duplicate lines).
+- "words": Split "thaiPhonetic" into space-separated tokens in exact reading order (each item's "phonetic" must match each token in "thaiPhonetic"), "thai" set to the matching token, "burmeseGloss" set to empty string "", AND exact "startSec"/"endSec" timestamps matching when that part is spoken.`;
+  } else if (cfg.subtitleFormat === "original_only" || cfg.targetLanguage === "none") {
+    const primaryDesc =
+      cfg.phoneticStyle === "native_only"
+        ? "Exact verbatim native script of what was spoken."
+        : `Clear ${phoneticDesc} of what was spoken.`;
+    fieldMapping = `OUTPUT FIELD MAPPING (Original Transcription Only — ${sourceName}):
+- "originalSpokenText": Exact verbatim words spoken in the audio.
+- "thaiScript": Exact verbatim native script of what was spoken.
+- "thaiPhonetic": ${primaryDesc} (rendered as the primary subtitle line).
+- "burmese": Empty string "" (no translation requested).
+- "words": Split "thaiPhonetic" into space-separated word tokens in exact spoken order (each item's "phonetic" matches each token in "thaiPhonetic"), "thai" set to the matching native word, "burmeseGloss" set to empty string "", AND exact "startSec"/"endSec" timestamps.`;
+  } else if (cfg.subtitleFormat === "bilingual_native") {
+    fieldMapping = `OUTPUT FIELD MAPPING (Native Script + Translation Mode — ${sourceName} → ${targetName}):
+- "originalSpokenText": Exact verbatim words spoken in the audio.
+- "thaiPhonetic": Exact verbatim spoken text in its NATIVE script (this is rendered as the primary synced top line).
+- "thaiScript": ${cfg.includeNativeScript ? `Optional romanized/phonetic reading (${phoneticDesc}) if helpful, otherwise empty string "".` : 'Empty string "".'}
+- "burmese": Accurate ${targetName} translation following the tone instructions above.
+- "words": Split "thaiPhonetic" into space-separated word tokens in exact spoken order (each item's "phonetic" matches each token in "thaiPhonetic"), "thai" set to the same native word token, "burmeseGloss" set to ${cfg.includeWordGloss ? `a concise 1–2 word ${targetName} meaning for key content words (empty string "" for small particles)` : 'empty string ""'}, AND exact "startSec"/"endSec" timestamps.`;
+  } else {
+    // bilingual_phonetic (default)
+    fieldMapping = `OUTPUT FIELD MAPPING (Phonetic + Translation Mode — ${sourceName} → ${targetName}):
+- "originalSpokenText": Exact verbatim words spoken in the audio.
+- "thaiScript": ${cfg.includeNativeScript ? `Exact verbatim native script of the spoken ${sourceName} words.` : 'Empty string "".'}
+- "thaiPhonetic": ${phoneticDesc} of the spoken utterance (rendered as the primary synced top line).
+- "burmese": Accurate ${targetName} translation matching what was spoken and following the translation tone above.
+- "words": Split "thaiPhonetic" into space-separated word tokens in exact spoken order (each item's "phonetic" must match each token in "thaiPhonetic"), "thai" set to the matching native spoken word, "burmeseGloss" set to ${cfg.includeWordGloss ? `a concise 1–2 word ${targetName} gloss for key content words (empty string "" for particles)` : 'empty string ""'}, AND exact "startSec"/"endSec" timestamps matching when each word is actually spoken.`;
+  }
+
+  return `LANGUAGE & STYLE CONFIGURATION:
+- Spoken Audio Language: ${sourceName}
+- Target Translation Language: ${targetName}
+- Content Context / Genre: ${genreHint[cfg.contentGenre]}
+- Pacing / Line Length: ${pacingHint[cfg.pacingMode]}
+${nonSpeechRule}
+${customRule}
+${getTranslationToneInstruction(cfg.translationTone, cfg.targetLanguage === "none" ? "en" : cfg.targetLanguage)}
+
+${fieldMapping}`;
 }
 
 function getClipPrompt(
@@ -1364,8 +1626,11 @@ function getClipPrompt(
   sourceEndSec: number,
   speechWindows?: { startSec: number; endSec: number }[],
   isSlicedLocalAudio = false,
-  translationTone: TranslationTone = "casual"
+  translationTone: TranslationTone = "casual",
+  genConfig?: SubtitleGenerationConfig
 ): string {
+  const effectiveCfg =
+    genConfig ?? normalizeSubtitleGenerationConfig(undefined, translationTone);
   const scopeDesc = isSlicedLocalAudio
     ? `this ${clipDurationSec.toFixed(1)}-second audio clip`
     : `this ${clipDurationSec.toFixed(1)}-second clip (from ${sourceStartSec.toFixed(1)}s to ${sourceEndSec.toFixed(1)}s of the video)`;
@@ -1387,14 +1652,7 @@ CRITICAL GROUNDING & TIMING RULES:
 - NEVER round timestamps to whole seconds, and NEVER include leading or trailing silent pauses inside an utterance's startSec/endSec. Start right when the voice begins and end right when the voice stops.
 - Utterances must be strictly chronological and non-overlapping.
 
-${getTranslationToneInstruction(translationTone)}
-
-For each spoken sentence/utterance in this clip:
-- "originalSpokenText": Exact verbatim words spoken in the audio.
-- "thaiScript": Verbatim Thai if spoken in Thai, otherwise accurate natural Thai translation of what was spoken.
-- "thaiPhonetic": Clear, easy-to-read English phonetic spelling of the Thai pronunciation (e.g. "Sa-wat-dee khrap").
-- "burmese": Accurate Burmese translation (မြန်မာဘာသာပြန်) matching what was spoken and following the translation tone above.
-- "words": Split "thaiPhonetic" into space-separated word tokens in exact spoken order (each item's "phonetic" must match each token in "thaiPhonetic"), with matching Thai word, a 1-2 word Burmese gloss for key content words (empty string for particles), AND exact "startSec" and "endSec" timestamps (relative to 0.0s clip start) matching when each word is actually spoken.`;
+${getAdvancedStylePromptBlock(effectiveCfg)}`;
 }
 
 function normalizeSelectedScenes(
@@ -2117,28 +2375,28 @@ async function extractEmbeddedSubtitles(
 function getEmbeddedSubtitlesPrompt(
   clipDurationSec: number,
   cues: EmbeddedCue[],
-  translationTone: TranslationTone = "casual"
+  translationTone: TranslationTone = "casual",
+  genConfig?: SubtitleGenerationConfig
 ): string {
+  const effectiveCfg =
+    genConfig ?? normalizeSubtitleGenerationConfig(undefined, translationTone);
   const cuePayload = cues.map((c, idx) => ({
     index: idx,
     startSec: c.startSec,
     endSec: c.endSec,
     text: c.text,
   }));
-  return `This ${clipDurationSec.toFixed(1)}-second video clip already has an EMBEDDED SUBTITLE track. Listen to the accompanying audio for speech cadence and translate/transliterate EVERY embedded subtitle cue below into Thai phonetics and Burmese.
+  return `This ${clipDurationSec.toFixed(1)}-second video clip already has an EMBEDDED SUBTITLE track. Listen to the accompanying audio for speech cadence and process EVERY embedded subtitle cue below according to the Language & Style Configuration.
 
 EMBEDDED SUBTITLE CUES (JSON):
 ${JSON.stringify(cuePayload)}
 
-${getTranslationToneInstruction(translationTone)}
-
 CRITICAL RULES FOR EMBEDDED SUBTITLES:
 - You MUST set "hasDialogue": true and return EXACTLY ${cues.length} items in "utterances", one for each embedded cue in the exact same order (index 0 to ${cues.length - 1}).
 - For each utterance, KEEP the exact "startSec", "endSec", and "originalSpokenText" from the corresponding embedded cue.
-- "thaiScript": Exact Thai script of the cue (keep verbatim if already Thai, or natural Thai translation if another language).
-- "thaiPhonetic": Clear English phonetic pronunciation of the Thai speech (e.g. "Sa-wat-dee khrap").
-- "burmese": Accurate Burmese translation (မြန်မာဘာသာပြန်) of the cue following the translation tone above.
-- "words": Split "thaiPhonetic" into space-separated word tokens in exact spoken order, with matching Thai word, 1-2 word Burmese gloss for key content words (empty string for particles), AND word-level "startSec" and "endSec" aligned within that cue's [startSec, endSec] range matching the audio.`;
+- Word-level "startSec" and "endSec" must stay aligned within that cue's [startSec, endSec] range matching the audio.
+
+${getAdvancedStylePromptBlock(effectiveCfg)}`;
 }
 
 function lockUtterancesToEmbeddedCues(
@@ -2235,7 +2493,8 @@ async function transcribePreparedExtractedScenes(
   scenes: SpeakingScene[],
   extractedData: PreparedExtractedScene[],
   translationTone: TranslationTone,
-  onProgress?: (ev: ProcessProgressEvent) => void
+  onProgress?: (ev: ProcessProgressEvent) => void,
+  genConfig?: SubtitleGenerationConfig
 ) {
   const ai = getGeminiClient();
   const totalClips = scenes.length;
@@ -2367,7 +2626,12 @@ async function transcribePreparedExtractedScenes(
         });
       }
       parts.push({
-        text: getEmbeddedSubtitlesPrompt(job.scene.durationSec, job.sceneCues, translationTone),
+        text: getEmbeddedSubtitlesPrompt(
+          job.scene.durationSec,
+          job.sceneCues,
+          translationTone,
+          genConfig
+        ),
       });
       const resp = await generateGroundedWithFailover(
         ai,
@@ -2413,7 +2677,8 @@ async function transcribePreparedExtractedScenes(
                 absStart + chDur,
                 chWindows,
                 true,
-                translationTone
+                translationTone,
+                genConfig
               ),
             },
           ],
@@ -2483,7 +2748,8 @@ async function processUploadedVideo(
   durationSec: number,
   parsedScenes: { startSec: number; endSec: number }[],
   translationTone: TranslationTone = "casual",
-  onProgress?: (ev: ProcessProgressEvent) => void
+  onProgress?: (ev: ProcessProgressEvent) => void,
+  genConfig?: SubtitleGenerationConfig
 ) {
   const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "upload-vid-"));
   try {
@@ -2621,7 +2887,8 @@ async function processUploadedVideo(
       scenes,
       extractedData,
       translationTone,
-      onProgress
+      onProgress,
+      genConfig
     );
     if (compiled.subtitles.length === 0) {
       return {
@@ -2878,6 +3145,7 @@ app.post("/api/process-clip-audio", async (req, res) => {
     durationSec = 120,
     clips = [],
     translationTone,
+    generationConfig,
     stream = false,
   } = (req.body || {}) as {
     title?: string;
@@ -2891,6 +3159,7 @@ app.post("/api/process-clip-audio", async (req, res) => {
       mimeType?: string;
     }>;
     translationTone?: TranslationTone;
+    generationConfig?: Partial<SubtitleGenerationConfig>;
     stream?: boolean;
   };
 
@@ -2930,6 +3199,10 @@ app.post("/api/process-clip-audio", async (req, res) => {
     }
 
     const tone = normalizeTranslationTone(translationTone);
+    const normalizedGenConfig = normalizeSubtitleGenerationConfig(
+      generationConfig,
+      tone
+    );
     const totalClips = scenes.length;
     emitProgress({
       stage: "extracting",
@@ -3004,7 +3277,8 @@ app.post("/api/process-clip-audio", async (req, res) => {
       scenes,
       extractedData,
       tone,
-      emitProgress
+      emitProgress,
+      normalizedGenConfig
     );
 
     if (compiled.subtitles.length === 0) {
@@ -3069,6 +3343,7 @@ app.post("/api/process-upload", async (req, res) => {
     durationSec = 120,
     selectedScenes = [],
     translationTone,
+    generationConfig,
     stream = false,
   } = req.body as {
     uploadId?: string;
@@ -3076,6 +3351,7 @@ app.post("/api/process-upload", async (req, res) => {
     durationSec?: number;
     selectedScenes?: { startSec: number; endSec: number }[];
     translationTone?: TranslationTone;
+    generationConfig?: Partial<SubtitleGenerationConfig>;
     stream?: boolean;
   };
 
@@ -3100,6 +3376,10 @@ app.post("/api/process-upload", async (req, res) => {
     }
 
     const tone = normalizeTranslationTone(translationTone);
+    const normalizedGenConfig = normalizeSubtitleGenerationConfig(
+      generationConfig,
+      tone
+    );
     const lockedResult = await withUploadSessionLock(
       uploadId,
       async (persistentPath) =>
@@ -3110,7 +3390,8 @@ app.post("/api/process-upload", async (req, res) => {
           Math.max(5, Number(durationSec) || 120),
           selectedScenes,
           tone,
-          wantStream ? (ev) => sendNdjson({ type: "progress", ...ev }) : undefined
+          wantStream ? (ev) => sendNdjson({ type: "progress", ...ev }) : undefined,
+          normalizedGenConfig
         ),
       { markFinalized: true }
     );
@@ -5294,7 +5575,7 @@ app.post("/api/export-fast-mp4", async (req, res) => {
       return;
     }
 
-    const outW = Math.max(360, Math.min(1080, Math.round((Number(width) || 720) / 2) * 2));
+    const outW = Math.max(360, Math.min(1280, Math.round((Number(width) || 720) / 2) * 2));
     const outH = Math.max(640, Math.min(1920, Math.round((Number(height) || 1280) / 2) * 2));
 
     let subtitlePath: string | null = null;

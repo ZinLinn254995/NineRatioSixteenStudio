@@ -27,6 +27,12 @@ import {
   VIDEO_FILTER_PRESETS,
 } from "../utils/videoFilters";
 import { DEFAULT_VOICE_SETTINGS, getEffectivePlaybackSpeed } from "../utils/voicePresets";
+import {
+  applyVisualPresetValues,
+  extractVisualPresetValues,
+  isVisualPresetMatch,
+} from "../utils/customPresets";
+import { CustomPresetsBar } from "./CustomPresetsBar";
 import { VoiceChangerPanel } from "./VoiceChangerPanel";
 import { ProjectTimelineEditor } from "./ProjectTimelineEditor";
 
@@ -248,13 +254,7 @@ export function VideoEditPanel({
               onClick={() => {
                 onChange({
                   ...DEFAULT_VIDEO_EDIT,
-                  showThaiScript: settings.showThaiScript,
                   translationTone: settings.translationTone,
-                  subtitleFontScale: settings.subtitleFontScale,
-                  subtitleTheme: settings.subtitleTheme,
-                  subtitleHighlightColor: settings.subtitleHighlightColor,
-                  showWordGloss: settings.showWordGloss,
-                  showBurmeseLine: settings.showBurmeseLine,
                 });
                 onChangeVoiceSettings({ ...DEFAULT_VOICE_SETTINGS });
               }}
@@ -288,9 +288,47 @@ export function VideoEditPanel({
 
       {/* Section: Unified Video & Look (Speed · Framing · Filters · Color · Pixel Shield) */}
       {section === "visual" && (
-        <div className="divide-y divide-[#d2dcf0] dark:divide-[#21284c]">
+        <div className="divide-y divide-[#d2dcf0] dark:divide-[#21284c] pb-5">
+          {/* Unified Tab Header with per-tab Reset */}
+          <div className="flex items-center justify-between gap-2 pb-2.5">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <SlidersHorizontal className="w-3.5 h-3.5 text-teal-700 dark:text-teal-400 shrink-0" />
+              <h3 className="text-xs font-semibold text-[#0c1026] dark:text-[#f3f5fc] truncate">
+                Video & Look
+              </h3>
+            </div>
+            <button
+              type="button"
+              disabled={!visualDirty}
+              onClick={() =>
+                onChange({
+                  ...DEFAULT_VIDEO_EDIT,
+                  showThaiScript: settings.showThaiScript,
+                  translationTone: settings.translationTone,
+                  subtitleFontScale: settings.subtitleFontScale,
+                  subtitleTheme: settings.subtitleTheme,
+                  subtitleHighlightColor: settings.subtitleHighlightColor,
+                  showWordGloss: settings.showWordGloss,
+                  showBurmeseLine: settings.showBurmeseLine,
+                  subtitleCardStyle: settings.subtitleCardStyle,
+                  subtitleWordStyle: settings.subtitleWordStyle,
+                  subtitleFontFamily: settings.subtitleFontFamily,
+                  subtitleAlign: settings.subtitleAlign,
+                  subtitleSizePct: settings.subtitleSizePct,
+                  subtitleCardRadius: settings.subtitleCardRadius,
+                  subtitleTextWeight: settings.subtitleTextWeight,
+                  subtitleLineSpacing: settings.subtitleLineSpacing,
+                })
+              }
+              className="h-7 px-2 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:border-teal-600/50 dark:hover:border-teal-400/50 hover:text-teal-700 dark:hover:text-teal-300 text-[11px] font-medium text-[#4d597d] dark:text-[#919ec4] inline-flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:border-[#d2dcf0] dark:disabled:hover:border-[#21284c] disabled:hover:text-[#4d597d] dark:disabled:hover:text-[#919ec4] transition-colors"
+            >
+              <RotateCcw className="w-3 h-3 shrink-0" />
+              <span>Reset Video</span>
+            </button>
+          </div>
+
           {/* 1. Playback Speed */}
-          <div className="pb-3 space-y-2">
+          <div className="py-3 space-y-2">
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-[#4d597d] dark:text-[#919ec4]">
                 <Gauge className="w-3.5 h-3.5 text-teal-700 dark:text-teal-400" />
@@ -388,21 +426,51 @@ export function VideoEditPanel({
               <span className="block text-[11px] font-medium text-[#4d597d] dark:text-[#919ec4]">
                 Aspect Ratio
               </span>
-              <div className="grid grid-cols-5 gap-1">
+              <div className="flex flex-wrap gap-1.5">
                 {VIDEO_ASPECT_RATIO_OPTIONS.map((opt) => {
                   const active = (settings.aspectRatio || "original") === opt.id;
+                  const isTall916 = opt.id === "9:16" || opt.id === "9:16-overlay";
+                  const isTall45 = opt.id === "4:5" || opt.id === "4:5-overlay";
+                  const isPortraitVariant = isTall916 || isTall45;
+                  const isScrollVariant = opt.subtitleLayout === "scroll";
+                  const iconStyle = isTall916
+                    ? "w-2 h-3.5"
+                    : opt.id === "16:9"
+                      ? "w-3.5 h-2"
+                      : opt.id === "1:1"
+                        ? "w-2.5 h-2.5"
+                        : isTall45
+                          ? "w-2.5 h-3"
+                          : "w-2.5 h-2.5";
+
                   return (
                     <button
                       key={opt.id}
                       type="button"
                       onClick={() => updateField("aspectRatio", opt.id)}
-                      className={`h-7 px-1 rounded-sm border text-[11px] font-medium flex items-center justify-center cursor-pointer whitespace-nowrap transition-colors ${
+                      className={`h-7 px-2 rounded-sm border text-[11px] font-medium inline-flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap transition-colors ${
                         active
                           ? "bg-teal-700 text-white border-teal-700 dark:bg-teal-400 dark:text-[#060918] dark:border-teal-400 font-semibold"
                           : "border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142]"
                       }`}
                     >
-                      {opt.shortLabel}
+                      <span
+                        aria-hidden="true"
+                        className={`relative rounded-[2px] border border-current shrink-0 overflow-hidden ${iconStyle}`}
+                      >
+                        {isPortraitVariant && isScrollVariant && (
+                          <span className="absolute inset-x-0 top-[40%] h-[1px] bg-current opacity-80" />
+                        )}
+                        {isPortraitVariant && !isScrollVariant && (
+                          <span className="absolute inset-x-[1px] bottom-[1.5px] h-[2px] rounded-[0.5px] bg-current opacity-85" />
+                        )}
+                      </span>
+                      <span>{opt.shortLabel}</span>
+                      {isPortraitVariant && (
+                        <span className="text-[9px] opacity-75">
+                          {isScrollVariant ? "Scroll" : "Overlay"}
+                        </span>
+                      )}
                     </button>
                   );
                 })}
@@ -749,7 +817,7 @@ export function VideoEditPanel({
           </div>
 
           {/* 5. Visual Shield / Pixel Perturbations */}
-          <div className="pt-3 space-y-2">
+          <div className="py-3 space-y-2">
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
                 <div className="flex items-center gap-1.5 text-xs font-semibold text-[#0c1026] dark:text-[#f3f5fc]">
@@ -801,6 +869,20 @@ export function VideoEditPanel({
                 />
               </div>
             )}
+          </div>
+
+          {/* 6. Manual Saved Presets (Bottom) */}
+          <div className="pt-3">
+            <CustomPresetsBar
+              category="visual"
+              currentValues={extractVisualPresetValues(settings)}
+              isMatch={(vals) => isVisualPresetMatch(settings, vals)}
+              onApply={(vals) => onChange(applyVisualPresetValues(settings, vals))}
+              getSummary={(vals) =>
+                `${vals.playbackSpeed.toFixed(2)}x · ${vals.aspectRatio} · ${vals.filterPreset}`
+              }
+              placeholder="e.g. Cinema Warm, Fast 1.2x..."
+            />
           </div>
         </div>
       )}

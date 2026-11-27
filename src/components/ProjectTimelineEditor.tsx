@@ -1,12 +1,17 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 const useIsomorphicLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
 import {
+  ArrowLeft,
+  ArrowRight,
   ChevronDown,
   ChevronUp,
   Film,
   GripHorizontal,
+  Link2,
   Loader2,
+  Merge,
   Pause,
+  Pencil,
   Play,
   Redo2,
   RefreshCw,
@@ -15,8 +20,6 @@ import {
   Sparkles,
   Trash2,
   Undo2,
-  ZoomIn,
-  ZoomOut,
 } from "lucide-react";
 import type {
   SpeechRegion,
@@ -46,6 +49,10 @@ interface ProjectTimelineEditorProps {
   onPlayFromTime: (sec: number) => void;
   onUpdateScenes: (nextScenes: SpeakingScene[]) => void;
   onUpdateSubtitleTiming?: (id: string, startTime: number, endTime: number) => void;
+  onEditSubtitle?: (id: string) => void;
+  onDeleteSubtitle?: (id: string) => void;
+  onSplitSubtitle?: (id: string) => void;
+  onMergeSubtitleWithNext?: (id: string) => void;
   onShiftAllSubtitles?: (deltaSec: number) => void;
   onTranscribeRange?: (
     startSec: number,
@@ -223,6 +230,10 @@ export function ProjectTimelineEditor({
   onSeek,
   onUpdateScenes,
   onUpdateSubtitleTiming,
+  onEditSubtitle,
+  onDeleteSubtitle,
+  onSplitSubtitle,
+  onMergeSubtitleWithNext,
   onShiftAllSubtitles,
   onTranscribeRange,
   transcribingRange = null,
@@ -253,6 +264,9 @@ export function ProjectTimelineEditor({
 }: ProjectTimelineEditorProps) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const trackSlideRef = useRef<HTMLDivElement | null>(null);
+  const rulerSlideRef = useRef<HTMLDivElement | null>(null);
+  const tracksScrollRef = useRef<HTMLDivElement | null>(null);
+  const userScrolledTracksYRef = useRef(false);
   const timeReadoutRef = useRef<HTMLSpanElement | null>(null);
   const [showRangeFill, setShowRangeFill] = useState(false);
   const [rangeStartVal, setRangeStartVal] = useState("0");
@@ -261,6 +275,7 @@ export function ProjectTimelineEditor({
 
   const [pxPerSec, setPxPerSec] = useState(32);
   const [viewportWidth, setViewportWidth] = useState(560);
+  const [viewportHeight, setViewportHeight] = useState(224);
   const [activeSceneId, setActiveSceneId] = useState<string | null>(null);
   const [localActiveSubId, setLocalActiveSubId] = useState<string | null>(null);
   const activeSubId =
@@ -272,6 +287,7 @@ export function ProjectTimelineEditor({
     },
     [onSelectSubtitle]
   );
+  const [showMergeChoice, setShowMergeChoice] = useState(false);
   const [dragSubPreview, setDragSubPreview] = useState<{
     id: string;
     startTime: number;
@@ -637,6 +653,7 @@ export function ProjectTimelineEditor({
     setDragBadge(null);
     setActiveSceneId(null);
     setLocalActiveSubId(null);
+    setShowMergeChoice(false);
     setShowRangeFill(false);
     setRangeNotice(null);
     setBaselineSubRegions(
@@ -681,20 +698,38 @@ export function ProjectTimelineEditor({
     }
   }, [project?.subtitles, localActiveSubId]);
 
-  // Measure timeline viewport width so center playhead stays exact
+  // Measure timeline viewport dimensions so center playhead and vertical free-scroll stay exact
   useEffect(() => {
     if (isCollapsed) return;
     const el = viewportRef.current;
     if (!el) return;
     const update = () => {
       const w = el.clientWidth;
+      const h = el.clientHeight;
       if (w > 0) setViewportWidth(w);
+      if (h > 0) setViewportHeight(h);
     };
     update();
     const ro = new ResizeObserver(update);
     ro.observe(el);
     return () => ro.disconnect();
   }, [projectIdentity, isCollapsed]);
+
+  const trackLaneViewportH = Math.max(140, viewportHeight - 24);
+  const trackTopBufferPx = Math.max(96, Math.round(trackLaneViewportH * 0.45));
+  const trackBottomBufferPx = Math.max(180, Math.round(trackLaneViewportH * 0.78));
+  const initialTrackScrollTop = Math.max(0, trackTopBufferPx - 14);
+
+  useEffect(() => {
+    userScrolledTracksYRef.current = false;
+  }, [projectIdentity]);
+
+  useIsomorphicLayoutEffect(() => {
+    if (isCollapsed || userScrolledTracksYRef.current) return;
+    const scroller = tracksScrollRef.current;
+    if (!scroller) return;
+    scroller.scrollTop = initialTrackScrollTop;
+  }, [isCollapsed, initialTrackScrollTop, projectIdentity]);
 
   // Stable rounded key for kept clip source intervals so thumbnails sample the actual kept clips
   const clipThumbSpanKey = useMemo(() => {
@@ -1000,64 +1035,121 @@ export function ProjectTimelineEditor({
     };
   }, [clearPreviewSourceSeekState]);
 
-  // Segment currently underneath the center playhead
-  const segmentAtPlayhead = useMemo(() => {
-    if (segments.length === 0) return null;
-    for (let i = 0; i < segments.length; i++) {
-      const seg = segments[i];
-      if (cutTime >= seg.cutStart && cutTime <= seg.cutEnd + 0.001) {
-        return seg;
-      }
-    }
-    return segments[segments.length - 1];
-  }, [segments, cutTime]);
+  // Explicitly selected Video Clip or Subtitle Clip (exclusive)
+  const selectedVideoSegment = useMemo(() => {
+    if (!activeSceneId) return null;
+    return segments.find((s) => s.sceneId === activeSceneId) ?? null;
+  }, [segments, activeSceneId]);
 
-  const canSplitAtPlayhead = Boolean(
-    segmentAtPlayhead &&
-      cutTime > segmentAtPlayhead.cutStart + 0.4 &&
-      cutTime < segmentAtPlayhead.cutEnd - 0.4
+  const selectedSubtitleItem = useMemo(() => {
+    if (selectedVideoSegment || !activeSubId || !activeTimelineProject) return null;
+    return activeTimelineProject.subtitles.find((s) => s.id === activeSubId) ?? null;
+  }, [selectedVideoSegment, activeSubId, activeTimelineProject]);
+
+  const selectedSubtitleIndex = useMemo(() => {
+    if (!selectedSubtitleItem || !activeTimelineProject) return -1;
+    return activeTimelineProject.subtitles.findIndex((s) => s.id === selectedSubtitleItem.id);
+  }, [selectedSubtitleItem, activeTimelineProject]);
+
+  const prevAdjacentSub =
+    selectedSubtitleIndex > 0 && activeTimelineProject
+      ? activeTimelineProject.subtitles[selectedSubtitleIndex - 1]
+      : null;
+
+  const nextAdjacentSub =
+    selectedSubtitleIndex >= 0 &&
+    activeTimelineProject &&
+    selectedSubtitleIndex < activeTimelineProject.subtitles.length - 1
+      ? activeTimelineProject.subtitles[selectedSubtitleIndex + 1]
+      : null;
+
+  const canMergeSelectedSubtitle = Boolean(
+    selectedSubtitleItem && onMergeSubtitleWithNext && (prevAdjacentSub || nextAdjacentSub)
   );
 
-  const handleSplitAtPlayhead = useCallback(() => {
-    if (!segmentAtPlayhead || !canSplitAtPlayhead) return;
-    if (isPlaying) onPause();
+  useEffect(() => {
+    setShowMergeChoice(false);
+  }, [selectedSubtitleItem?.id, activeSceneId, dragSubPreview, clipReorder]);
 
-    const localOffset = cutTime - segmentAtPlayhead.cutStart;
-    const splitSourceSec = roundTenth(segmentAtPlayhead.startSec + localOffset);
-    if (
-      splitSourceSec <= segmentAtPlayhead.startSec + 0.35 ||
-      splitSourceSec >= segmentAtPlayhead.endSec - 0.35
-    ) {
+  const hasSelectedClip = Boolean(selectedVideoSegment || selectedSubtitleItem);
+
+  const canSplitSelectedClip = useMemo(() => {
+    if (selectedVideoSegment) {
+      return (
+        cutTime > selectedVideoSegment.cutStart + 0.4 &&
+        cutTime < selectedVideoSegment.cutEnd - 0.4
+      );
+    }
+    if (selectedSubtitleItem) {
+      return (
+        Boolean(onSplitSubtitle) &&
+        selectedSubtitleItem.endTime - selectedSubtitleItem.startTime >= 0.45
+      );
+    }
+    return false;
+  }, [selectedVideoSegment, selectedSubtitleItem, cutTime, onSplitSubtitle]);
+
+  const canDeleteSelectedClip = useMemo(() => {
+    if (selectedVideoSegment) return true;
+    if (selectedSubtitleItem) return Boolean(onDeleteSubtitle);
+    return false;
+  }, [selectedVideoSegment, selectedSubtitleItem, onDeleteSubtitle]);
+
+  const handleSplitSelectedClip = useCallback(() => {
+    if (selectedVideoSegment) {
+      if (
+        cutTime <= selectedVideoSegment.cutStart + 0.4 ||
+        cutTime >= selectedVideoSegment.cutEnd - 0.4
+      ) {
+        return;
+      }
+      if (isPlaying) onPause();
+
+      const localOffset = cutTime - selectedVideoSegment.cutStart;
+      const splitSourceSec = roundTenth(selectedVideoSegment.startSec + localOffset);
+      if (
+        splitSourceSec <= selectedVideoSegment.startSec + 0.35 ||
+        splitSourceSec >= selectedVideoSegment.endSec - 0.35
+      ) {
+        return;
+      }
+
+      const leftClip: SpeakingScene = {
+        ...selectedVideoSegment.scene,
+        id: selectedVideoSegment.sceneId,
+        startSec: selectedVideoSegment.startSec,
+        endSec: splitSourceSec,
+        durationSec: roundTenth(splitSourceSec - selectedVideoSegment.startSec),
+      };
+      const rightId = `proj-sc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const rightClip: SpeakingScene = {
+        ...selectedVideoSegment.scene,
+        id: rightId,
+        startSec: splitSourceSec,
+        endSec: selectedVideoSegment.endSec,
+        durationSec: roundTenth(selectedVideoSegment.endSec - splitSourceSec),
+      };
+
+      const nextScenes = [
+        ...normalizedScenes.slice(0, selectedVideoSegment.index),
+        leftClip,
+        rightClip,
+        ...normalizedScenes.slice(selectedVideoSegment.index + 1),
+      ];
+      onUpdateScenes(nextScenes);
+      setActiveSceneId(rightId);
       return;
     }
 
-    const leftClip: SpeakingScene = {
-      ...segmentAtPlayhead.scene,
-      id: segmentAtPlayhead.sceneId,
-      startSec: segmentAtPlayhead.startSec,
-      endSec: splitSourceSec,
-      durationSec: roundTenth(splitSourceSec - segmentAtPlayhead.startSec),
-    };
-    const rightId = `proj-sc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-    const rightClip: SpeakingScene = {
-      ...segmentAtPlayhead.scene,
-      id: rightId,
-      startSec: splitSourceSec,
-      endSec: segmentAtPlayhead.endSec,
-      durationSec: roundTenth(segmentAtPlayhead.endSec - splitSourceSec),
-    };
-
-    const nextScenes = [
-      ...normalizedScenes.slice(0, segmentAtPlayhead.index),
-      leftClip,
-      rightClip,
-      ...normalizedScenes.slice(segmentAtPlayhead.index + 1),
-    ];
-    onUpdateScenes(nextScenes);
-    setActiveSceneId(rightId);
+    if (selectedSubtitleItem && onSplitSubtitle) {
+      if (selectedSubtitleItem.endTime - selectedSubtitleItem.startTime < 0.45) return;
+      if (isPlaying) onPause();
+      onSplitSubtitle(selectedSubtitleItem.id);
+    }
   }, [
-    segmentAtPlayhead,
-    canSplitAtPlayhead,
+    selectedVideoSegment,
+    selectedSubtitleItem,
+    onSplitSubtitle,
     isPlaying,
     onPause,
     cutTime,
@@ -1065,48 +1157,82 @@ export function ProjectTimelineEditor({
     onUpdateScenes,
   ]);
 
-  const targetClipForDelete = useMemo(() => {
-    if (segments.length === 0) return null;
-    return (
-      segments.find((s) => s.sceneId === activeSceneId) ??
-      segmentAtPlayhead ??
-      segments[0]
-    );
-  }, [segments, activeSceneId, segmentAtPlayhead]);
-
-  const handleDeleteClip = useCallback(
-    (targetId?: string) => {
-      const segToDelete = targetId
-        ? segments.find((s) => s.sceneId === targetId)
-        : targetClipForDelete;
-      if (!segToDelete) return;
-
+  const handleDeleteSelectedClip = useCallback(() => {
+    if (selectedVideoSegment) {
       if (isPlaying) onPause();
 
-      const nextScenes = normalizedScenes.filter((_, i) => i !== segToDelete.index);
+      const nextScenes = normalizedScenes.filter((_, i) => i !== selectedVideoSegment.index);
       onUpdateScenes(nextScenes);
-
-      const nextClip =
-        nextScenes[Math.min(segToDelete.index, Math.max(0, nextScenes.length - 1))] ?? null;
-      setActiveSceneId(nextClip?.id ?? null);
+      setActiveSceneId(null);
+      selectSub(null, { scrollList: false });
 
       const newMaxCut = nextScenes.reduce(
         (acc, sc) => acc + Math.max(0.1, sc.endSec - sc.startSec),
         0
       );
-      const nextCut = Math.max(0, Math.min(newMaxCut, segToDelete.cutStart));
+      const nextCut = Math.max(0, Math.min(newMaxCut, selectedVideoSegment.cutStart));
       dispatchSeek(nextCut, true);
+      return;
+    }
+
+    if (selectedSubtitleItem && onDeleteSubtitle) {
+      if (isPlaying) onPause();
+      onDeleteSubtitle(selectedSubtitleItem.id);
+      selectSub(null, { scrollList: false });
+    }
+  }, [
+    selectedVideoSegment,
+    selectedSubtitleItem,
+    onDeleteSubtitle,
+    isPlaying,
+    onPause,
+    normalizedScenes,
+    onUpdateScenes,
+    selectSub,
+    dispatchSeek,
+  ]);
+
+  const handleMergeSelectedSubtitle = useCallback(
+    (direction: "prev" | "next") => {
+      if (!selectedSubtitleItem || !onMergeSubtitleWithNext) return;
+      if (isPlaying) onPause();
+      setShowMergeChoice(false);
+      if (direction === "prev" && prevAdjacentSub) {
+        onMergeSubtitleWithNext(prevAdjacentSub.id);
+        selectSub(prevAdjacentSub.id, { scrollList: false });
+      } else if (direction === "next" && nextAdjacentSub) {
+        onMergeSubtitleWithNext(selectedSubtitleItem.id);
+        selectSub(selectedSubtitleItem.id, { scrollList: false });
+      }
     },
     [
-      segments,
-      targetClipForDelete,
+      selectedSubtitleItem,
+      onMergeSubtitleWithNext,
       isPlaying,
       onPause,
-      normalizedScenes,
-      onUpdateScenes,
-      dispatchSeek,
+      prevAdjacentSub,
+      nextAdjacentSub,
+      selectSub,
     ]
   );
+
+  const handleToolbarMergeClick = useCallback(() => {
+    if (!canMergeSelectedSubtitle) return;
+    if (prevAdjacentSub && nextAdjacentSub) {
+      setShowMergeChoice((prev) => !prev);
+      return;
+    }
+    if (nextAdjacentSub) {
+      handleMergeSelectedSubtitle("next");
+    } else if (prevAdjacentSub) {
+      handleMergeSelectedSubtitle("prev");
+    }
+  }, [
+    canMergeSelectedSubtitle,
+    prevAdjacentSub,
+    nextAdjacentSub,
+    handleMergeSelectedSubtitle,
+  ]);
 
   const handleUndo = useCallback(() => {
     if (!canUndo || !onUndo) return;
@@ -1122,9 +1248,11 @@ export function ProjectTimelineEditor({
 
   const handleRestoreOriginal = useCallback(() => {
     if (isPlaying) onPause();
+    setActiveSceneId(null);
+    selectSub(null, { scrollList: false });
     onResetTimeline();
     dispatchSeek(0, true);
-  }, [isPlaying, onPause, onResetTimeline, dispatchSeek]);
+  }, [isPlaying, onPause, selectSub, onResetTimeline, dispatchSeek]);
 
   // Keyboard shortcuts: Space to Play/Pause, Delete/Backspace to remove selected clip
   useEffect(() => {
@@ -1136,17 +1264,29 @@ export function ProjectTimelineEditor({
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target?.isContentEditable) {
         return;
       }
+      if (e.key === "Escape" && showMergeChoice) {
+        e.preventDefault();
+        setShowMergeChoice(false);
+        return;
+      }
       if (e.code === "Space") {
         e.preventDefault();
         onTogglePlay();
-      } else if ((e.key === "Delete" || e.key === "Backspace") && targetClipForDelete) {
+      } else if ((e.key === "Delete" || e.key === "Backspace") && canDeleteSelectedClip) {
         e.preventDefault();
-        handleDeleteClip(targetClipForDelete.sceneId);
+        handleDeleteSelectedClip();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [isActive, activeTimelineProject, onTogglePlay, targetClipForDelete, handleDeleteClip]);
+  }, [
+    isActive,
+    activeTimelineProject,
+    onTogglePlay,
+    canDeleteSelectedClip,
+    handleDeleteSelectedClip,
+    showMergeChoice,
+  ]);
 
   const trackCenterTime = frozenTrackTime ?? liveScrubCutTime ?? cutTime;
   const centerX = viewportWidth / 2;
@@ -1178,9 +1318,13 @@ export function ProjectTimelineEditor({
         typeof rawLiveSec === "number" && Number.isFinite(rawLiveSec) ? Math.max(0, rawLiveSec) : 0;
       const cfg = timelineTransformConfigRef.current;
       if (cfg.frozen || dragStateRef.current || liveScrubCutRef.current !== null) return;
+      const nextX = cfg.centerX - liveSec * cfg.pxPerSec;
+      const transformVal = `translate3d(${nextX}px, 0, 0)`;
+      if (rulerSlideRef.current) {
+        rulerSlideRef.current.style.transform = transformVal;
+      }
       if (trackSlideRef.current) {
-        const nextX = cfg.centerX - liveSec * cfg.pxPerSec;
-        trackSlideRef.current.style.transform = `translate3d(${nextX}px, 0, 0)`;
+        trackSlideRef.current.style.transform = transformVal;
       }
       if (timeReadoutRef.current) {
         timeReadoutRef.current.textContent = formatTimePrecise(liveSec);
@@ -1443,10 +1587,7 @@ export function ProjectTimelineEditor({
     }
 
     if (activePointersRef.current.size === 1) {
-      const isMouse = e.pointerType === "mouse";
-      if (isMouse && isPlaying) {
-        onPause();
-      }
+      setShowMergeChoice(false);
       pinchStartRef.current = null;
       const startTime = liveScrubCutRef.current ?? cutTimeRef.current;
       const nextDrag: DragMode = {
@@ -1456,7 +1597,7 @@ export function ProjectTimelineEditor({
         startClientY: e.clientY,
         lastClientY: e.clientY,
         startCutTime: startTime,
-        axis: isMouse ? "x" : "pending",
+        axis: "pending",
       };
       updateDragState(nextDrag);
     }
@@ -1483,6 +1624,7 @@ export function ProjectTimelineEditor({
     const freezeCut = liveScrubCutRef.current ?? cutTimeRef.current;
     frozenTrackTimeRef.current = freezeCut;
     setActiveSceneId(seg.sceneId);
+    selectSub(null, { scrollList: false });
     setFrozenTrackTime(freezeCut);
     const initTrim = {
       sceneId: seg.sceneId,
@@ -1526,6 +1668,7 @@ export function ProjectTimelineEditor({
     if (isPlaying) onPause();
 
     lastDragTargetRef.current = null;
+    setActiveSceneId(null);
     selectSub(sub.id, { scrollList: false });
     setFrozenTrackTime(cutTimeRef.current);
     setDragSubPreview({
@@ -1605,16 +1748,35 @@ export function ProjectTimelineEditor({
     const dx = e.clientX - activeDrag.startClientX;
 
     if (activeDrag.type === "scrub") {
+      const canScrollTimelineY = () => {
+        const scroller = tracksScrollRef.current;
+        if (scroller && scroller.scrollHeight > scroller.clientHeight + 1) return true;
+        return hasVerticalScrollRoom(viewportRef.current);
+      };
+
+      const applyTimelineScrollY = (deltaY: number) => {
+        const scroller = tracksScrollRef.current;
+        if (scroller && scroller.scrollHeight > scroller.clientHeight + 1) {
+          userScrolledTracksYRef.current = true;
+          const prevTop = scroller.scrollTop;
+          const maxTop = scroller.scrollHeight - scroller.clientHeight;
+          const nextTop = Math.max(0, Math.min(maxTop, prevTop + deltaY));
+          scroller.scrollTop = nextTop;
+          return;
+        }
+        scrollVerticalAncestors(viewportRef.current, deltaY);
+      };
+
       if (activeDrag.axis === "pending") {
         const dy = e.clientY - activeDrag.startClientY;
         const absDx = Math.abs(dx);
         const absDy = Math.abs(dy);
         const dist = Math.hypot(dx, dy);
-        if (dist < 7) return;
-        const canScrollVertically = hasVerticalScrollRoom(viewportRef.current);
-        if (canScrollVertically && absDy > absDx * 1.15) {
+        if (dist < 5) return;
+        const canScrollVertically = canScrollTimelineY();
+        if (canScrollVertically && absDy > absDx * 0.85) {
           activeDrag.axis = "y";
-          scrollVerticalAncestors(viewportRef.current, -dy);
+          applyTimelineScrollY(-dy);
           activeDrag.lastClientY = e.clientY;
           tappedClipRef.current = null;
           tappedSubRef.current = null;
@@ -1628,7 +1790,7 @@ export function ProjectTimelineEditor({
       if (activeDrag.axis === "y") {
         const moveY = e.clientY - activeDrag.lastClientY;
         activeDrag.lastClientY = e.clientY;
-        scrollVerticalAncestors(viewportRef.current, -moveY);
+        applyTimelineScrollY(-moveY);
         return;
       }
 
@@ -1853,8 +2015,11 @@ export function ProjectTimelineEditor({
         if (hadClipTap && tappedClipRef.current) {
           const tappedId = tappedClipRef.current.sceneId;
           setActiveSceneId((cur) => (cur === tappedId ? null : tappedId));
+          selectSub(null, { scrollList: false });
         } else if (hadSubTap && tappedSubRef.current) {
-          selectSub(tappedSubRef.current.subId, { scrollList: true });
+          const tappedSubId = tappedSubRef.current.subId;
+          setActiveSceneId(null);
+          selectSub(tappedSubId, { scrollList: true });
           subTapSeekTarget = tappedSubRef.current.startTime;
         } else if (isUnmovedTouchTap && !hadClipTap && !hadSubTap) {
           setActiveSceneId(null);
@@ -2205,293 +2370,101 @@ export function ProjectTimelineEditor({
         </div>
       )}
 
-      {/* Transport & Split / Delete Cut Controls */}
-      <div
-        className={
-          dockMode
-            ? `px-3.5 py-1.5 flex flex-wrap items-center justify-between gap-2 bg-[#f3f5fc]/70 dark:bg-[#0a0d1c] ${
-                !isCollapsed ? "border-b border-[#d2dcf0] dark:border-[#21284c]" : ""
-              }`
-            : compactMobileExpanded
-              ? "px-2.5 py-1 flex items-center justify-between gap-1.5 overflow-x-auto no-scrollbar bg-[#f3f5fc]/50 dark:bg-[#070814]/60 border-b border-[#d2dcf0] dark:border-[#21284c]"
-              : "flex flex-wrap items-center justify-between gap-2 px-0.5"
-        }
-      >
-        {hideTransport || compactMobileExpanded ? (
-          dockMode ? (
-            <span className="text-[11px] font-semibold uppercase tracking-wider text-[#4d597d] dark:text-[#919ec4] shrink-0 select-none">
-              Timeline
-            </span>
-          ) : null
-        ) : (
-          <div className="flex items-center gap-2 min-w-0">
-            <button
-              type="button"
-              onClick={(e) => {
-                e.currentTarget.blur();
-                onTogglePlay();
-              }}
-              disabled={segments.length === 0}
-              aria-label={isPlaying ? "Pause video" : "Play video"}
-              className="h-7 w-7 rounded-md bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] flex items-center justify-center disabled:opacity-40 cursor-pointer shrink-0 transition-colors"
-            >
-              {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5 ml-0.5" />}
-            </button>
-
-            <span className="text-xs font-mono-tabular text-[#0c1026] dark:text-[#f3f5fc] shrink-0">
-              <span ref={timeReadoutRef} />
-              <span className="text-[#4d597d] dark:text-[#919ec4]">
-                {" "}
-                / {formatTimePrecise(totalCutDuration)}
+      {/* Minimal Top Bar (only shown when Play/Timecode, Undo/Redo, or Collapse are enabled) */}
+      {((!hideTransport && !compactMobileExpanded) ||
+        !hideUndoRedo ||
+        Boolean(dockMode && onToggleCollapse)) && (
+        <div
+          className={
+            dockMode
+              ? `px-3.5 py-1.5 flex items-center justify-between gap-2 bg-[#f3f5fc]/70 dark:bg-[#0a0d1c] ${
+                  !isCollapsed ? "border-b border-[#d2dcf0] dark:border-[#21284c]" : ""
+                }`
+              : compactMobileExpanded
+                ? "px-2.5 py-1 flex items-center justify-between gap-1.5 bg-[#f3f5fc]/50 dark:bg-[#070814]/60 border-b border-[#d2dcf0] dark:border-[#21284c]"
+                : "flex items-center justify-between gap-2 px-0.5"
+          }
+        >
+          {hideTransport || compactMobileExpanded ? (
+            dockMode ? (
+              <span className="text-[11px] font-semibold tracking-wide text-[#4d597d] dark:text-[#919ec4] shrink-0 select-none">
+                Timeline
               </span>
-            </span>
-          </div>
-        )}
-
-        <div className="flex flex-wrap items-center gap-1">
-          <button
-            type="button"
-            onClick={(e) => {
-              e.currentTarget.blur();
-              handleSplitAtPlayhead();
-            }}
-            disabled={!canSplitAtPlayhead}
-            title="Split clip at center playhead"
-            className="h-7 px-2.5 rounded-sm bg-teal-700 text-white hover:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] disabled:opacity-40 disabled:cursor-not-allowed text-[11px] font-semibold flex items-center gap-1 whitespace-nowrap cursor-pointer transition-colors"
-          >
-            <Scissors className="w-3 h-3" />
-            <span>Split</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={(e) => {
-              e.currentTarget.blur();
-              handleDeleteClip();
-            }}
-            disabled={!targetClipForDelete}
-            title="Delete selected clip"
-            className="h-7 px-2 rounded-sm hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40 dark:hover:text-red-400 text-[11px] font-medium text-[#4d597d] dark:text-[#919ec4] flex items-center gap-1 whitespace-nowrap disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors"
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Delete</span>
-          </button>
-
-          {!hideUndoRedo && (
-            <>
+            ) : (
+              <span />
+            )
+          ) : (
+            <div className="flex items-center gap-2 min-w-0">
               <button
                 type="button"
                 onClick={(e) => {
                   e.currentTarget.blur();
-                  handleUndo();
+                  onTogglePlay();
                 }}
-                disabled={!canUndo || !onUndo}
-                title="Undo last edit"
-                aria-label="Undo last edit"
-                className="h-7 w-7 rounded-sm hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] flex items-center justify-center disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors"
+                disabled={segments.length === 0}
+                aria-label={isPlaying ? "Pause video" : "Play video"}
+                className="h-7 w-7 rounded-md bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918] flex items-center justify-center disabled:opacity-40 cursor-pointer shrink-0 transition-colors"
               >
-                <Undo2 className="w-3.5 h-3.5" />
+                {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5 ml-0.5" />}
               </button>
 
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.currentTarget.blur();
-                  handleRedo();
-                }}
-                disabled={!canRedo || !onRedo}
-                title="Redo last edit"
-                aria-label="Redo last edit"
-                className="h-7 w-7 rounded-sm hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] flex items-center justify-center disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors"
-              >
-                <Redo2 className="w-3.5 h-3.5" />
-              </button>
-            </>
-          )}
-
-          <button
-            type="button"
-            onClick={(e) => {
-              e.currentTarget.blur();
-              handleRestoreOriginal();
-            }}
-            title="Reset timeline edits"
-            aria-label="Reset timeline edits"
-            className="h-7 w-7 rounded-sm hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] flex items-center justify-center cursor-pointer transition-colors"
-          >
-            <RotateCcw className="w-3.5 h-3.5" />
-          </button>
-
-          {!isDraft && !hideCaptions && onShiftAllSubtitles && (
-            <>
-              <span aria-hidden="true" className="h-4 w-px bg-[#d2dcf0] dark:bg-[#21284c] mx-0.5" />
-              <div
-                role="group"
-                aria-label="Subtitle timing micro-nudge"
-                className="inline-flex items-center gap-0.5"
-              >
-                <span className="px-1 text-[10px] font-medium text-[#4d597d] dark:text-[#919ec4] select-none hidden sm:inline">
-                  Nudge
+              <span className="text-xs font-mono-tabular text-[#0c1026] dark:text-[#f3f5fc] shrink-0">
+                <span ref={timeReadoutRef} />
+                <span className="text-[#4d597d] dark:text-[#919ec4]">
+                  {" "}
+                  / {formatTimePrecise(totalCutDuration)}
                 </span>
-                <button
-                  type="button"
-                  disabled={!activeTimelineProject.subtitles.length}
-                  onClick={(e) => {
-                    e.currentTarget.blur();
-                    onShiftAllSubtitles(-0.1);
-                  }}
-                  title="Nudge all subtitles -0.1s"
-                  aria-label="Shift all subtitles -0.1s"
-                  className="h-7 px-1.5 rounded-sm text-[11px] font-mono-tabular font-medium text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors whitespace-nowrap"
-                >
-                  -0.1s
-                </button>
-                <button
-                  type="button"
-                  disabled={!activeTimelineProject.subtitles.length}
-                  onClick={(e) => {
-                    e.currentTarget.blur();
-                    onShiftAllSubtitles(0.1);
-                  }}
-                  title="Nudge all subtitles +0.1s"
-                  aria-label="Shift all subtitles +0.1s"
-                  className="h-7 px-1.5 rounded-sm text-[11px] font-mono-tabular font-medium text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors whitespace-nowrap"
-                >
-                  +0.1s
-                </button>
-              </div>
-            </>
+              </span>
+            </div>
           )}
 
-          <span aria-hidden="true" className="h-4 w-px bg-[#d2dcf0] dark:bg-[#21284c] mx-0.5" />
-
-          <div className="inline-flex items-center">
-            <button
-              type="button"
-              onClick={(e) => {
-                e.currentTarget.blur();
-                setPxPerSec((z) => clampZoom(Math.round(z * 0.75)));
-              }}
-              aria-label="Zoom out timeline"
-              className="h-7 w-7 rounded-sm flex items-center justify-center text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] cursor-pointer transition-colors"
-            >
-              <ZoomOut className="w-3.5 h-3.5" />
-            </button>
-            <button
-              type="button"
-              onClick={(e) => {
-                e.currentTarget.blur();
-                setPxPerSec((z) => clampZoom(Math.round(z * 1.35)));
-              }}
-              aria-label="Zoom in timeline"
-              className="h-7 w-7 rounded-sm flex items-center justify-center text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] cursor-pointer transition-colors"
-            >
-              <ZoomIn className="w-3.5 h-3.5" />
-            </button>
-          </div>
-
-          {!isDraft && !hideCaptions && onTranscribeRange && (
-            <button
-              type="button"
-              disabled={segments.length === 0 || Boolean(transcribingRange)}
-              onClick={(e) => {
-                e.currentTarget.blur();
-                if (showRangeFill) {
-                  setShowRangeFill(false);
-                  setRangeNotice(null);
-                } else {
-                  openRangeFillPopover();
-                }
-              }}
-              title="AI transcribe missing speech in a time range"
-              className={`h-7 px-2 rounded-sm text-[11px] font-medium flex items-center gap-1 whitespace-nowrap disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors ${
-                showRangeFill || transcribingRange
-                  ? "bg-teal-50 text-teal-800 dark:bg-teal-950/60 dark:text-teal-200 font-semibold"
-                  : unmatchedSpeechGaps.length > 0
-                    ? "bg-amber-50/90 text-amber-900 hover:bg-amber-100 dark:bg-amber-950/40 dark:text-amber-200 dark:hover:bg-amber-900/50"
-                    : "text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142]"
-              }`}
-            >
-              {transcribingRange ? (
-                <Loader2 className="w-3 h-3 animate-spin" />
-              ) : (
-                <Sparkles className="w-3 h-3" />
-              )}
-              <span>{transcribingRange ? "Filling…" : "AI Fill"}</span>
-              {!transcribingRange && unmatchedSpeechGaps.length > 0 && (
-                <span className="px-1 rounded bg-amber-600/15 dark:bg-amber-400/20 text-[10px] font-mono-tabular font-bold">
-                  {unmatchedSpeechGaps.length}
-                </span>
-              )}
-            </button>
-          )}
-
-          {onGenerateSubtitles && (() => {
-            const hasExistingSubtitles =
-              !isDraft && activeTimelineProject.subtitles.length > 0;
-            const genPct =
-              typeof generationProgress?.percent === "number"
-                ? Math.max(0, Math.min(100, Math.round(generationProgress.percent)))
-                : null;
-            return (
+          <div className="flex items-center gap-1 shrink-0">
+            {!hideUndoRedo && (
               <>
-                <span aria-hidden="true" className="h-4 w-px bg-[#d2dcf0] dark:bg-[#21284c] mx-0.5" />
                 <button
                   type="button"
-                  disabled={isBusy || segments.length === 0 || Boolean(transcribingRange)}
                   onClick={(e) => {
                     e.currentTarget.blur();
-                    onGenerateSubtitles();
+                    handleUndo();
                   }}
-                  title={
-                    hasExistingSubtitles
-                      ? "Regenerate subtitles for timeline clips"
-                      : "Generate subtitles for timeline clips"
-                  }
-                  className={`h-7 px-2.5 rounded-sm text-[11px] flex items-center gap-1.5 whitespace-nowrap disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer transition-colors ${
-                    isBusy
-                      ? "bg-[#e6ecfc] text-[#1c3db8] dark:bg-[#1a2554] dark:text-[#93b5fa] border border-[#b8cafc] dark:border-[#32468a] font-semibold"
-                      : hasExistingSubtitles
-                        ? "border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] hover:border-teal-600/60 dark:hover:border-teal-400/60 text-[#0c1026] dark:text-[#f3f5fc] font-medium"
-                        : "bg-[#e6ecfc] hover:bg-[#d5e0fb] text-[#1c3db8] dark:bg-[#1a2554] dark:hover:bg-[#23326e] dark:text-[#93b5fa] border border-[#b8cafc] dark:border-[#32468a] font-semibold"
-                  }`}
+                  disabled={!canUndo || !onUndo}
+                  title="Undo last edit"
+                  aria-label="Undo last edit"
+                  className="h-7 w-7 rounded-sm hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] flex items-center justify-center disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors"
                 >
-                  {isBusy ? (
-                    <>
-                      <Loader2 className="w-3 h-3 animate-spin shrink-0" />
-                      <span className="font-mono-tabular">
-                        {genPct !== null ? `Generating ${genPct}%` : "Generating…"}
-                      </span>
-                    </>
-                  ) : hasExistingSubtitles ? (
-                    <>
-                      <RefreshCw className="w-3 h-3 shrink-0" />
-                      <span>Regenerate Subtitle</span>
-                    </>
-                  ) : (
-                    <>
-                      <Sparkles className="w-3 h-3 shrink-0" />
-                      <span>Generate Subtitle</span>
-                    </>
-                  )}
+                  <Undo2 className="w-3.5 h-3.5" />
+                </button>
+
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.currentTarget.blur();
+                    handleRedo();
+                  }}
+                  disabled={!canRedo || !onRedo}
+                  title="Redo last edit"
+                  aria-label="Redo last edit"
+                  className="h-7 w-7 rounded-sm hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] flex items-center justify-center disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer transition-colors"
+                >
+                  <Redo2 className="w-3.5 h-3.5" />
                 </button>
               </>
-            );
-          })()}
+            )}
 
-          {dockMode && onToggleCollapse && (
-            <button
-              type="button"
-              onClick={onToggleCollapse}
-              title={isCollapsed ? "Expand timeline dock" : "Collapse timeline dock"}
-              aria-label={isCollapsed ? "Expand timeline dock" : "Collapse timeline dock"}
-              className="h-7 w-7 rounded-sm hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] flex items-center justify-center cursor-pointer transition-colors"
-            >
-              {isCollapsed ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-            </button>
-          )}
+            {dockMode && onToggleCollapse && (
+              <button
+                type="button"
+                onClick={onToggleCollapse}
+                title={isCollapsed ? "Expand timeline dock" : "Collapse timeline dock"}
+                aria-label={isCollapsed ? "Expand timeline dock" : "Collapse timeline dock"}
+                className="h-7 w-7 rounded-sm hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] flex items-center justify-center cursor-pointer transition-colors"
+              >
+                {isCollapsed ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+              </button>
+            )}
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Compact Subtitle Generation Progress Bar */}
       {isBusy && generationProgress && (
@@ -2614,47 +2587,50 @@ export function ProjectTimelineEditor({
           !isDraft && hideCaptions && showSubtitleTrack && activeTimelineProject.subtitles.length > 0;
         const hasVisibleSubTrack = showFullSubTrack || showSubtitleClipsOnly;
 
+        const hasExistingSubtitles =
+          !isDraft && activeTimelineProject.subtitles.length > 0;
+        const genPct =
+          typeof generationProgress?.percent === "number"
+            ? Math.max(0, Math.min(100, Math.round(generationProgress.percent)))
+            : null;
+
         return (
         <div
-          ref={viewportRef}
-          onPointerDown={handlePointerDownViewport}
-          className={`relative overflow-hidden select-none touch-none [&_*]:touch-none cursor-grab active:cursor-grabbing bg-[#e7ecf8] dark:bg-[#050712] ${
+          className={`relative overflow-hidden bg-[#e7ecf8] dark:bg-[#050712] ${
             dockMode
               ? fillHeight
                 ? hasVisibleSubTrack
-                  ? "flex-1 min-h-[152px]"
-                  : "flex-1 min-h-[112px]"
+                  ? "flex-1 min-h-[218px]"
+                  : "flex-1 min-h-[164px]"
                 : compactDock
                   ? hasVisibleSubTrack
-                    ? "h-36"
-                    : "h-24"
+                    ? "h-[212px]"
+                    : "h-[156px]"
                   : hasVisibleSubTrack
-                    ? "h-44"
-                    : "h-32"
+                    ? "h-[224px]"
+                    : "h-[168px]"
               : compactMobileExpanded
-                ? "h-[144px]"
+                ? "h-[212px]"
                 : hasVisibleSubTrack
-                  ? "h-64 rounded-lg border border-[#d2dcf0] dark:border-[#21284c]"
-                  : "h-40 rounded-lg border border-[#d2dcf0] dark:border-[#21284c]"
+                  ? "h-[272px] rounded-lg border border-[#d2dcf0] dark:border-[#21284c]"
+                  : "h-[196px] rounded-lg border border-[#d2dcf0] dark:border-[#21284c]"
           }`}
         >
-        {/* Full-Width Stationary Ruler Bar Background */}
         <div
-          aria-hidden="true"
-          className="pointer-events-none absolute inset-x-0 top-0 h-6 border-b border-[#d2dcf0] dark:border-[#21284c] bg-white/95 dark:bg-[#0d1022]/95"
-        />
-
-        {/* Moving Timeline Content Track */}
-        <div
-          ref={trackSlideRef}
-          style={{
-            width: `${trackWidth}px`,
-            transform: `translate3d(${trackTranslateX}px, 0, 0)`,
-          }}
-          className="absolute inset-y-0 left-0 will-change-transform"
+          ref={viewportRef}
+          onPointerDown={handlePointerDownViewport}
+          className="absolute inset-0 overflow-hidden select-none touch-none [&_*]:touch-none cursor-grab active:cursor-grabbing"
         >
-          {/* Time Ruler Ticks (Cut Timeline Seconds) */}
-          <div className="relative h-6">
+        {/* Pinned Top Time Ruler Bar (moves horizontally in sync, stays fixed on vertical scroll) */}
+        <div className="pointer-events-none absolute inset-x-0 top-0 h-6 z-10 overflow-hidden border-b border-[#d2dcf0] dark:border-[#21284c] bg-white/95 dark:bg-[#0d1022]/95">
+          <div
+            ref={rulerSlideRef}
+            style={{
+              width: `${trackWidth}px`,
+              transform: `translate3d(${trackTranslateX}px, 0, 0)`,
+            }}
+            className="relative h-full will-change-transform"
+          >
             {rulerTicks.map((s) => (
               <div
                 key={s}
@@ -2668,13 +2644,40 @@ export function ProjectTimelineEditor({
               </div>
             ))}
           </div>
+        </div>
 
-          {/* Kept Video Clips Track */}
+        {/* Vertically Scrollable Timeline Tracks Area with Free Up & Down Travel */}
+        <div
+          ref={tracksScrollRef}
+          onScroll={(e) => {
+            if (Math.abs(e.currentTarget.scrollTop - initialTrackScrollTop) > 2) {
+              userScrolledTracksYRef.current = true;
+            }
+          }}
+          className="absolute inset-x-0 top-6 bottom-0 overflow-y-auto overflow-x-hidden no-scrollbar"
+        >
           <div
-            className={`relative h-16 mt-2 transition-opacity duration-150 ${
-              clipReorder ? "opacity-0 pointer-events-none" : ""
-            }`}
+            style={{
+              paddingTop: `${trackTopBufferPx}px`,
+              paddingBottom: `${trackBottomBufferPx}px`,
+            }}
+            className="relative"
           >
+            {/* Moving Timeline Content Track */}
+            <div
+              ref={trackSlideRef}
+              style={{
+                width: `${trackWidth}px`,
+                transform: `translate3d(${trackTranslateX}px, 0, 0)`,
+              }}
+              className="relative will-change-transform"
+            >
+              {/* Kept Video Clips Track */}
+              <div
+                className={`relative h-16 transition-opacity duration-150 ${
+                  clipReorder ? "opacity-0 pointer-events-none" : ""
+                }`}
+              >
             {(() => {
               const trimIdx = trimPreview
                 ? segments.findIndex((s) => s.sceneId === trimPreview.sceneId)
@@ -2858,14 +2861,14 @@ export function ProjectTimelineEditor({
             })()}
           </div>
 
-          {/* Interactive Subtitles Track + AI Original Position Background Highlights */}
+          {/* Interactive Subtitles Track + Bottom AI Original Position Color Bars */}
           {hasVisibleSubTrack && (
           <div
-            className={`relative h-10 mt-2 transition-opacity duration-150 ${
+            className={`relative h-12 mt-2 transition-opacity duration-150 ${
               clipReorder ? "opacity-35 pointer-events-none" : ""
             }`}
           >
-            {/* AI Original Subtitle Guide Area (highlights original AI positions when edited) */}
+            {/* Bottom Color Bar Strip Highlighting Original AI Subtitle Positions */}
             {(() => {
               const resolvedGuides =
                 aiSubtitleGuides.length > 0
@@ -2921,38 +2924,26 @@ export function ProjectTimelineEditor({
               });
 
               return (
-                <div className="pointer-events-none absolute inset-0">
+                <div className="pointer-events-none absolute inset-x-0 bottom-0 h-1.5">
                   {guideItems.map(
                     ({ guide, leftPx, widthPx, isEdited, isThisSelected, alignedLeft, alignedRight }) => (
                       <div
                         key={guide.key}
                         style={{ left: `${leftPx}px`, width: `${widthPx}px` }}
-                        className={`absolute inset-y-0 rounded-md overflow-hidden transition-colors ${
+                        className={`absolute inset-y-0 rounded-full overflow-hidden transition-colors ${
                           isEdited
-                            ? "bg-amber-500/28 dark:bg-amber-400/24"
+                            ? "bg-amber-500 dark:bg-amber-400 shadow-[0_0_6px_rgba(245,158,11,0.55)]"
                             : isThisSelected || alignedLeft || alignedRight
-                              ? "bg-amber-500/18 dark:bg-amber-400/16"
-                              : "bg-amber-500/10 dark:bg-amber-400/10"
+                              ? "bg-amber-500/75 dark:bg-amber-400/75"
+                              : "bg-amber-500/40 dark:bg-amber-400/38"
                         }`}
                       >
-                        <div
-                          className={`absolute inset-y-0 left-0 transition-colors ${
-                            alignedLeft
-                              ? "w-[2px] bg-emerald-500 dark:bg-emerald-400"
-                              : isEdited
-                                ? "w-[2px] bg-amber-600/90 dark:bg-amber-400/90"
-                                : "w-[1px] bg-amber-600/35 dark:bg-amber-400/35"
-                          }`}
-                        />
-                        <div
-                          className={`absolute inset-y-0 right-0 transition-colors ${
-                            alignedRight
-                              ? "w-[2px] bg-emerald-500 dark:bg-emerald-400"
-                              : isEdited
-                                ? "w-[2px] bg-amber-600/90 dark:bg-amber-400/90"
-                                : "w-[1px] bg-amber-600/35 dark:bg-amber-400/35"
-                          }`}
-                        />
+                        {alignedLeft && (
+                          <div className="absolute inset-y-0 left-0 w-[3px] bg-emerald-500 dark:bg-emerald-300" />
+                        )}
+                        {alignedRight && (
+                          <div className="absolute inset-y-0 right-0 w-[3px] bg-emerald-500 dark:bg-emerald-300" />
+                        )}
                       </div>
                     )
                   )}
@@ -3128,14 +3119,132 @@ export function ProjectTimelineEditor({
                 </div>
               );
             })}
+
+            {/* Inline Seam Merge Buttons Between Selected Subtitle & Adjacent Prev/Next Clips */}
+            {selectedSubtitleItem &&
+              onMergeSubtitleWithNext &&
+              !dragSubPreview &&
+              !clipReorder &&
+              (prevAdjacentSub || nextAdjacentSub) &&
+              (() => {
+                const curStartPx = selectedSubtitleItem.startTime * pxPerSec;
+                const curEndPx = (
+                  nextAdjacentSub
+                    ? Math.min(selectedSubtitleItem.endTime, nextAdjacentSub.startTime)
+                    : selectedSubtitleItem.endTime
+                ) * pxPerSec;
+
+                const prevEndPx = prevAdjacentSub
+                  ? Math.min(prevAdjacentSub.endTime, selectedSubtitleItem.startTime) * pxPerSec
+                  : null;
+                const nextStartPx = nextAdjacentSub
+                  ? nextAdjacentSub.startTime * pxPerSec
+                  : null;
+
+                let leftSeamX = prevEndPx !== null ? (prevEndPx + curStartPx) / 2 : null;
+                let rightSeamX = nextStartPx !== null ? (curEndPx + nextStartPx) / 2 : null;
+
+                // Prevent seam buttons from overlapping on very narrow subtitle clips
+                const minButtonGapPx = 42;
+                if (
+                  leftSeamX !== null &&
+                  rightSeamX !== null &&
+                  rightSeamX - leftSeamX < minButtonGapPx
+                ) {
+                  const mid = (leftSeamX + rightSeamX) / 2;
+                  leftSeamX = mid - minButtonGapPx / 2;
+                  rightSeamX = mid + minButtonGapPx / 2;
+                }
+
+                const leftGapWidth =
+                  prevEndPx !== null ? Math.max(0, curStartPx - prevEndPx) : 0;
+                const rightGapWidth =
+                  nextStartPx !== null ? Math.max(0, nextStartPx - curEndPx) : 0;
+
+                return (
+                  <>
+                    {/* Optional subtle dashed gap bridge lines connecting adjacent clips */}
+                    {prevAdjacentSub && prevEndPx !== null && leftGapWidth >= 6 && (
+                      <div
+                        aria-hidden="true"
+                        style={{ left: `${prevEndPx}px`, width: `${leftGapWidth}px` }}
+                        className="pointer-events-none absolute top-[20px] h-[2px] border-t-2 border-dashed border-[#4e7ef7]/60 dark:border-[#7ca3fb]/60 z-10"
+                      />
+                    )}
+                    {nextAdjacentSub && nextStartPx !== null && rightGapWidth >= 6 && (
+                      <div
+                        aria-hidden="true"
+                        style={{ left: `${curEndPx}px`, width: `${rightGapWidth}px` }}
+                        className="pointer-events-none absolute top-[20px] h-[2px] border-t-2 border-dashed border-[#4e7ef7]/60 dark:border-[#7ca3fb]/60 z-10"
+                      />
+                    )}
+
+                    {/* Left Seam Merge Button (Prev + Current) */}
+                    {prevAdjacentSub && leftSeamX !== null && (
+                      <button
+                        type="button"
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          e.currentTarget.blur();
+                          handleMergeSelectedSubtitle("prev");
+                        }}
+                        style={{ left: `${leftSeamX}px` }}
+                        title={`Merge S${selectedSubtitleIndex} + S${selectedSubtitleIndex + 1}`}
+                        aria-label={`Merge subtitle ${selectedSubtitleIndex} and ${selectedSubtitleIndex + 1}`}
+                        className="group absolute top-[45px] -translate-x-1/2 z-30 h-6 px-2 rounded-full border border-[#4e7ef7]/80 dark:border-[#608ef9]/80 bg-white/95 dark:bg-[#11193a]/95 text-[#1c3db8] dark:text-[#93b5fa] hover:bg-[#1c3db8] hover:text-white dark:hover:bg-[#4e7ef7] dark:hover:text-[#060918] shadow-[0_3px_10px_rgba(14,26,74,0.22)] dark:shadow-[0_4px_12px_rgba(0,0,0,0.55)] inline-flex items-center justify-center gap-1 active:scale-95 cursor-pointer transition-colors"
+                      >
+                        <span
+                          aria-hidden="true"
+                          className="absolute -inset-1.5 rounded-full"
+                        />
+                        <span
+                          aria-hidden="true"
+                          className="pointer-events-none absolute -top-[7px] left-1/2 -translate-x-1/2 w-[1.5px] h-[7px] bg-[#4e7ef7]/75 dark:bg-[#608ef9]/75"
+                        />
+                        <Link2 className="w-3 h-3 shrink-0" />
+                      </button>
+                    )}
+
+                    {/* Right Seam Merge Button (Current + Next) */}
+                    {nextAdjacentSub && rightSeamX !== null && (
+                      <button
+                        type="button"
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          e.currentTarget.blur();
+                          handleMergeSelectedSubtitle("next");
+                        }}
+                        style={{ left: `${rightSeamX}px` }}
+                        title={`Merge S${selectedSubtitleIndex + 1} + S${selectedSubtitleIndex + 2}`}
+                        aria-label={`Merge subtitle ${selectedSubtitleIndex + 1} and ${selectedSubtitleIndex + 2}`}
+                        className="group absolute top-[45px] -translate-x-1/2 z-30 h-6 px-2 rounded-full border border-[#4e7ef7]/80 dark:border-[#608ef9]/80 bg-white/95 dark:bg-[#11193a]/95 text-[#1c3db8] dark:text-[#93b5fa] hover:bg-[#1c3db8] hover:text-white dark:hover:bg-[#4e7ef7] dark:hover:text-[#060918] shadow-[0_3px_10px_rgba(14,26,74,0.22)] dark:shadow-[0_4px_12px_rgba(0,0,0,0.55)] inline-flex items-center justify-center gap-1 active:scale-95 cursor-pointer transition-colors"
+                      >
+                        <span
+                          aria-hidden="true"
+                          className="absolute -inset-1.5 rounded-full"
+                        />
+                        <span
+                          aria-hidden="true"
+                          className="pointer-events-none absolute -top-[7px] left-1/2 -translate-x-1/2 w-[1.5px] h-[7px] bg-[#4e7ef7]/75 dark:bg-[#608ef9]/75"
+                        />
+                        <Link2 className="w-3 h-3 shrink-0" />
+                      </button>
+                    )}
+                  </>
+                );
+              })()}
           </div>
           )}
 
           {/* Dedicated Open Scroll Space Below Clips & Subtitles */}
           <div
             aria-hidden="true"
-            className="h-14 mt-2 border-t border-dashed border-[#bcc9e6] dark:border-[#21284c]"
+            className="h-8 mt-3 border-t border-dashed border-[#bcc9e6]/70 dark:border-[#21284c]/80"
           />
+            </div>
+          </div>
         </div>
 
         {/* Fixed Center Playhead Line */}
@@ -3206,7 +3315,15 @@ export function ProjectTimelineEditor({
               </div>
 
               {/* Minimized Horizontal Clip Cards Directly Inside Original Video Clips Row */}
-              <div className="absolute inset-x-0 top-8 h-16 z-40 flex items-center">
+              <div
+                style={{
+                  top: `${Math.max(
+                    24,
+                    24 + trackTopBufferPx - (tracksScrollRef.current?.scrollTop ?? initialTrackScrollTop)
+                  )}px`,
+                }}
+                className="absolute inset-x-0 h-16 z-40 flex items-center"
+              >
                 <div
                   ref={reorderStripRef}
                   className="w-full h-full overflow-x-auto no-scrollbar flex items-center"
@@ -3355,6 +3472,229 @@ export function ProjectTimelineEditor({
           </div>
         )}
 
+      </div>
+
+      {/* Floating Direction Chooser Above Toolbar When Selected Subtitle Has Both Prev & Next Neighbors */}
+      {showMergeChoice &&
+        selectedSubtitleItem &&
+        prevAdjacentSub &&
+        nextAdjacentSub &&
+        !clipReorder &&
+        segments.length > 0 && (
+          <div
+            onPointerDown={(e) => e.stopPropagation()}
+            className="pointer-events-none absolute inset-x-0 bottom-[60px] z-40 flex justify-center px-2.5"
+          >
+            <div className="pointer-events-auto flex items-center gap-2">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  handleMergeSelectedSubtitle("prev");
+                }}
+                title={`Merge with previous subtitle S${selectedSubtitleIndex}`}
+                className="h-8 px-3 rounded-lg border border-[#4e7ef7]/65 dark:border-[#4e7ef7]/65 bg-white/95 dark:bg-[#10183a]/95 backdrop-blur-md shadow-[0_4px_14px_rgba(10,16,40,0.16)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.5)] inline-flex items-center gap-1.5 text-[11px] font-semibold text-[#1c3db8] dark:text-[#93b5fa] hover:bg-[#e6ecfc] dark:hover:bg-[#1c295c] active:scale-95 cursor-pointer transition-colors whitespace-nowrap"
+              >
+                <ArrowLeft className="w-3.5 h-3.5 shrink-0" />
+                <span>Merge S{selectedSubtitleIndex}</span>
+              </button>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  handleMergeSelectedSubtitle("next");
+                }}
+                title={`Merge with next subtitle S${selectedSubtitleIndex + 2}`}
+                className="h-8 px-3 rounded-lg border border-[#4e7ef7]/65 dark:border-[#4e7ef7]/65 bg-white/95 dark:bg-[#10183a]/95 backdrop-blur-md shadow-[0_4px_14px_rgba(10,16,40,0.16)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.5)] inline-flex items-center gap-1.5 text-[11px] font-semibold text-[#1c3db8] dark:text-[#93b5fa] hover:bg-[#e6ecfc] dark:hover:bg-[#1c295c] active:scale-95 cursor-pointer transition-colors whitespace-nowrap"
+              >
+                <span>Merge S{selectedSubtitleIndex + 2}</span>
+                <ArrowRight className="w-3.5 h-3.5 shrink-0" />
+              </button>
+            </div>
+          </div>
+        )}
+
+      {/* Floating Contextual Individual Bottom Editing Tool Buttons */}
+      <div
+        className={`pointer-events-none absolute inset-x-0 bottom-2 z-30 flex justify-center px-2.5 transition-opacity duration-150 ${
+          clipReorder || segments.length === 0 ? "opacity-0" : "opacity-100"
+        }`}
+      >
+        <div
+          role="toolbar"
+          aria-label="Timeline editing tools"
+          onPointerDown={(e) => e.stopPropagation()}
+          className={`max-w-full flex items-center gap-2 px-1 py-1 overflow-x-auto no-scrollbar touch-pan-x ${
+            clipReorder || segments.length === 0 ? "pointer-events-none" : "pointer-events-auto"
+          }`}
+        >
+          {hasSelectedClip ? (
+            <>
+              {selectedSubtitleItem && onEditSubtitle && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.currentTarget.blur();
+                    setShowMergeChoice(false);
+                    onEditSubtitle(selectedSubtitleItem.id);
+                  }}
+                  title="Edit selected subtitle clip"
+                  aria-label="Edit selected subtitle clip"
+                  className="min-w-[64px] h-11 px-3.5 rounded-xl border border-[#5d82f0]/55 dark:border-[#4e7ef7]/55 bg-[#e6ecfc]/95 dark:bg-[#1a2554]/95 backdrop-blur-md shadow-[0_4px_14px_rgba(10,16,40,0.12)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.45)] flex flex-col items-center justify-center gap-1 shrink-0 whitespace-nowrap text-[#1c3db8] dark:text-[#93b5fa] hover:bg-[#d7e2fc] dark:hover:bg-[#22306b] active:scale-95 cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-teal-500"
+                >
+                  <Pencil className="w-[16px] h-[16px] shrink-0" />
+                  <span className="text-[10px] font-semibold leading-none">Edit</span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  setShowMergeChoice(false);
+                  handleSplitSelectedClip();
+                }}
+                disabled={!canSplitSelectedClip}
+                title={
+                  selectedSubtitleItem
+                    ? "Split selected subtitle clip"
+                    : "Split selected video clip at center playhead"
+                }
+                aria-label={
+                  selectedSubtitleItem
+                    ? "Split selected subtitle clip"
+                    : "Split selected video clip at center playhead"
+                }
+                className="min-w-[64px] h-11 px-3.5 rounded-xl border border-teal-600/35 dark:border-teal-400/35 bg-white/92 dark:bg-[#0d1126]/92 backdrop-blur-md shadow-[0_4px_14px_rgba(10,16,40,0.12)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.45)] flex flex-col items-center justify-center gap-1 shrink-0 whitespace-nowrap text-teal-700 dark:text-teal-300 hover:bg-teal-50/95 dark:hover:bg-[#112438] hover:border-teal-600/60 dark:hover:border-teal-400/60 active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-teal-500"
+              >
+                <Scissors className="w-[17px] h-[17px] shrink-0" />
+                <span className="text-[10px] font-semibold leading-none">Split</span>
+              </button>
+
+              {selectedSubtitleItem && onMergeSubtitleWithNext && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.currentTarget.blur();
+                    handleToolbarMergeClick();
+                  }}
+                  disabled={!canMergeSelectedSubtitle}
+                  aria-expanded={showMergeChoice}
+                  title={
+                    prevAdjacentSub && nextAdjacentSub
+                      ? "Merge with previous or next subtitle clip"
+                      : nextAdjacentSub
+                        ? `Merge with S${selectedSubtitleIndex + 2}`
+                        : prevAdjacentSub
+                          ? `Merge with S${selectedSubtitleIndex}`
+                          : "No adjacent subtitle clip to merge"
+                  }
+                  aria-label="Merge adjacent subtitle clip"
+                  className={`min-w-[64px] h-11 px-3.5 rounded-xl border backdrop-blur-md shadow-[0_4px_14px_rgba(10,16,40,0.12)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.45)] flex flex-col items-center justify-center gap-1 shrink-0 whitespace-nowrap active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-teal-500 ${
+                    showMergeChoice
+                      ? "border-[#1c3db8] dark:border-[#4e7ef7] bg-[#1c3db8] dark:bg-[#4e7ef7] text-white dark:text-[#060918]"
+                      : "border-[#5d82f0]/45 dark:border-[#4e7ef7]/45 bg-white/92 dark:bg-[#0d1126]/92 text-[#1c3db8] dark:text-[#93b5fa] hover:bg-[#e6ecfc]/95 dark:hover:bg-[#1a2554]/95 hover:border-[#4e7ef7]/75"
+                  }`}
+                >
+                  <Merge className="w-[16px] h-[16px] shrink-0" />
+                  <span className="text-[10px] font-semibold leading-none">Merge</span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  setShowMergeChoice(false);
+                  handleDeleteSelectedClip();
+                }}
+                disabled={!canDeleteSelectedClip}
+                title={
+                  selectedSubtitleItem
+                    ? "Delete selected subtitle clip"
+                    : "Delete selected video clip"
+                }
+                aria-label={
+                  selectedSubtitleItem
+                    ? "Delete selected subtitle clip"
+                    : "Delete selected video clip"
+                }
+                className="min-w-[64px] h-11 px-3.5 rounded-xl border border-[#c6d2ec]/90 dark:border-[#2a3466]/90 bg-white/92 dark:bg-[#0d1126]/92 backdrop-blur-md shadow-[0_4px_14px_rgba(10,16,40,0.12)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.45)] flex flex-col items-center justify-center gap-1 shrink-0 whitespace-nowrap text-[#2a3559] dark:text-[#dce4fb] hover:bg-red-50/95 dark:hover:bg-[#2a1424] hover:border-red-400/60 dark:hover:border-red-500/60 hover:text-red-600 dark:hover:text-red-400 active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-teal-500"
+              >
+                <Trash2 className="w-[17px] h-[17px] shrink-0" />
+                <span className="text-[10px] font-medium leading-none">Delete</span>
+              </button>
+            </>
+          ) : (
+            <>
+              {onGenerateSubtitles && (
+                <button
+                  type="button"
+                  disabled={isBusy || segments.length === 0 || Boolean(transcribingRange)}
+                  onClick={(e) => {
+                    e.currentTarget.blur();
+                    onGenerateSubtitles();
+                  }}
+                  title={
+                    hasExistingSubtitles
+                      ? "Regenerate subtitles for timeline clips"
+                      : "Generate subtitles for timeline clips"
+                  }
+                  aria-label={
+                    hasExistingSubtitles
+                      ? "Regenerate subtitles for timeline clips"
+                      : "Generate subtitles for timeline clips"
+                  }
+                  className={`min-w-[76px] h-11 px-3.5 rounded-xl border backdrop-blur-md shadow-[0_4px_14px_rgba(10,16,40,0.12)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.45)] flex flex-col items-center justify-center gap-1 shrink-0 whitespace-nowrap active:scale-95 disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-teal-500 ${
+                    isBusy
+                      ? "border-[#5d82f0]/60 dark:border-[#5d82f0]/60 bg-[#e6ecfc]/95 dark:bg-[#1a2554]/95 text-[#1c3db8] dark:text-[#93b5fa]"
+                      : hasExistingSubtitles
+                        ? "border-[#9ab2f0]/80 dark:border-[#354c9e]/90 bg-white/92 dark:bg-[#0d1126]/92 text-[#1c3db8] dark:text-[#89aefb] hover:bg-[#e6ecfc]/95 dark:hover:bg-[#1a2554]/95"
+                        : "border-[#5d82f0]/55 dark:border-[#4e7ef7]/55 bg-[#e6ecfc]/95 dark:bg-[#1a2554]/95 text-[#1c3db8] dark:text-[#93b5fa] hover:bg-[#d7e2fc] dark:hover:bg-[#22306b]"
+                  }`}
+                >
+                  {isBusy ? (
+                    <>
+                      <Loader2 className="w-[17px] h-[17px] animate-spin shrink-0" />
+                      <span className="text-[10px] font-mono-tabular font-semibold leading-none">
+                        {genPct !== null ? `${genPct}%` : "Generating…"}
+                      </span>
+                    </>
+                  ) : hasExistingSubtitles ? (
+                    <>
+                      <RefreshCw className="w-[17px] h-[17px] shrink-0" />
+                      <span className="text-[10px] font-semibold leading-none">
+                        Regenerate Subtitle
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-[17px] h-[17px] shrink-0" />
+                      <span className="text-[10px] font-semibold leading-none">
+                        Generate Subtitle
+                      </span>
+                    </>
+                  )}
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  handleRestoreOriginal();
+                }}
+                title="Reset timeline edits"
+                aria-label="Reset timeline edits"
+                className="min-w-[64px] h-11 px-3.5 rounded-xl border border-[#c6d2ec]/90 dark:border-[#2a3466]/90 bg-white/92 dark:bg-[#0d1126]/92 backdrop-blur-md shadow-[0_4px_14px_rgba(10,16,40,0.12)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.45)] flex flex-col items-center justify-center gap-1 shrink-0 whitespace-nowrap text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] hover:bg-[#eef2fc] dark:hover:bg-[#171f42] hover:border-[#9eb1de] dark:hover:border-[#3e4e91] active:scale-95 cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-teal-500"
+              >
+                <RotateCcw className="w-[16px] h-[16px] shrink-0" />
+                <span className="text-[10px] font-medium leading-none">Reset</span>
+              </button>
+            </>
+          )}
+        </div>
+      </div>
       </div>
         );
       })()}

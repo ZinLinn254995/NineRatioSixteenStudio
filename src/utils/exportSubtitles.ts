@@ -158,6 +158,39 @@ export function buildAiChatTranscriptContent(
   return `${header}\n${entries.join("\n\n")}\n`;
 }
 
+export function buildFullTranscriptContent(
+  title: string,
+  subtitles: SubtitleItem[],
+  opts: SubtitleExportOptions = {}
+): string {
+  const speed = Math.max(0.25, opts.speed ?? 1);
+  const header = title?.trim() ? `Title: ${title.trim()}\n` : "";
+
+  const entries = subtitles.map((sub, idx) => {
+    const start = sub.startTime / speed;
+    const end = Math.max(start + 0.1, sub.endTime / speed);
+    const parts: string[] = [
+      `[${String(idx + 1).padStart(2, "0")}] ${formatClockSec(start)} – ${formatClockSec(end)}`,
+      `Phonetic: ${sub.thaiPhonetic.trim()}`,
+      `Thai:     ${sub.thaiScript.trim()}`,
+      `Burmese:  ${sub.burmese.trim()}`,
+    ];
+    if (Array.isArray(sub.words) && sub.words.length > 0) {
+      const vocab = sub.words
+        .filter((w) => w.phonetic.trim())
+        .map((w) => `${w.phonetic.trim()} (${(w.burmeseGloss || "").trim()})`)
+        .join(" · ");
+      if (vocab) {
+        parts.push(`Words:    ${vocab}`);
+      }
+    }
+    return parts.join("\n");
+  });
+
+  if (entries.length === 0) return "";
+  return `${header}${header ? "\n" : ""}${entries.join("\n\n")}\n`;
+}
+
 export function makeSafeFileSlug(title: string): string {
   return (
     title

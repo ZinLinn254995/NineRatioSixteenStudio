@@ -63,6 +63,9 @@ import { YouTubePreviewPanel } from "./YouTubePreviewPanel";
 import { VideoEditPanel, getVideoEditDirtyMap } from "./VideoEditPanel";
 import { ProjectTimelineEditor } from "./ProjectTimelineEditor";
 import { SubtitleStylePanel } from "./SubtitleStylePanel";
+import { SubtitleDesignPanel, isSubtitleDesignModified } from "./SubtitleDesignPanel";
+import { SubtitleClipEditor } from "./SubtitleClipEditor";
+import { SubtitleGeneratePanel } from "./SubtitleGeneratePanel";
 import { SavedProjectsPanel } from "./SavedProjectsPanel";
 import { PasteTranscriptModal } from "./PasteTranscriptModal";
 import {
@@ -83,12 +86,14 @@ import type { CutSpeechRegion } from "../utils/audioSpeechAnalyzer";
 import { DEFAULT_VIDEO_EDIT } from "../utils/videoFilters";
 import {
   buildAiChatTranscriptContent,
+  buildFullTranscriptContent,
   buildSrtContent,
   buildStudyTextContent,
   buildVttContent,
   downloadTextFile,
   makeSafeFileSlug,
 } from "../utils/exportSubtitles";
+import { copyTextToClipboard } from "../utils/transcriptHistory";
 
 const NOOP_RESTORE_SNAPSHOT = () => {};
 
@@ -136,6 +141,12 @@ interface WorkspaceSidebarProps {
   onRefreshRecommended?: () => void;
   onDetectedYouTubeDuration: (dur: number) => void;
   onGenerateSubtitles: () => void;
+  onConfirmGenerateSubtitles?: (config: import("../types").SubtitleGenerationConfig) => void;
+  showSubtitleGenSettings?: boolean;
+  subtitleGenConfig?: import("../types").SubtitleGenerationConfig;
+  onChangeSubtitleGenConfig?: (next: import("../types").SubtitleGenerationConfig) => void;
+  onCloseSubtitleGenSettings?: () => void;
+  processError?: string | null;
   onGenerateSingleClip?: (sceneId: string) => void;
   onCancelGenerateSubtitles?: () => void;
   onChangeVoiceSettings: (next: VoiceSettings) => void;
@@ -223,6 +234,9 @@ interface WorkspaceSidebarProps {
   selectedSubtitleId?: string | null;
   onSelectSubtitle?: (id: string | null) => void;
   onSelectTimelineSubtitle?: (id: string | null, opts?: { scrollList?: boolean }) => void;
+  editingSubtitleId?: string | null;
+  onEditSubtitle?: (id: string) => void;
+  onCloseEditSubtitle?: () => void;
   captionTab?: "script" | "style" | "sync";
   onChangeCaptionTab?: (tab: "script" | "style" | "sync") => void;
   isSubtitleSearchOpen?: boolean;
@@ -322,6 +336,12 @@ export function WorkspaceSidebar({
   onRefreshRecommended,
   onDetectedYouTubeDuration,
   onGenerateSubtitles,
+  onConfirmGenerateSubtitles,
+  showSubtitleGenSettings = false,
+  subtitleGenConfig,
+  onChangeSubtitleGenConfig,
+  onCloseSubtitleGenSettings,
+  processError = null,
   onGenerateSingleClip,
   onCancelGenerateSubtitles,
   onChangeVoiceSettings,
@@ -390,6 +410,9 @@ export function WorkspaceSidebar({
   selectedSubtitleId: controlledSelectedSubId,
   onSelectSubtitle,
   onSelectTimelineSubtitle,
+  editingSubtitleId = null,
+  onEditSubtitle,
+  onCloseEditSubtitle,
   captionTab: controlledCaptionTab,
   onChangeCaptionTab,
   isSubtitleSearchOpen: controlledSearchOpen,
@@ -892,9 +915,37 @@ export function WorkspaceSidebar({
   };
 
   const hasStudioVideo = Boolean(localMedia || hasProjectMedia(project));
-  const hasSubtitles =
-    !hideCaptions && Boolean(hasGeneratedProject(project) && project.subtitles.length > 0);
+  const hasProjectSubtitles = Boolean(
+    hasGeneratedProject(project) && project.subtitles.length > 0
+  );
+  const hasSubtitles = !hideCaptions && hasProjectSubtitles;
   const isStudioView = activeTab === "studio";
+
+  const handleCopyFullTranscript = useCallback(async () => {
+    if (!project || project.subtitles.length === 0) return;
+    const text = buildFullTranscriptContent(project.title, project.subtitles, {
+      speed: getEffectivePlaybackSpeed(
+        editSettings.playbackSpeed,
+        voiceSettings.speed
+      ),
+      showThaiScript: editSettings.showThaiScript,
+      showWordGloss: editSettings.showWordGloss,
+      showBurmeseLine: editSettings.showBurmeseLine,
+    });
+    if (!text) return;
+    const ok = await copyTextToClipboard(text);
+    if (ok) {
+      setCopiedTranscript(true);
+      window.setTimeout(() => setCopiedTranscript(false), 2000);
+    }
+  }, [
+    project,
+    editSettings.playbackSpeed,
+    editSettings.showThaiScript,
+    editSettings.showWordGloss,
+    editSettings.showBurmeseLine,
+    voiceSettings.speed,
+  ]);
 
   // Reset mobile timeline expand state cleanly when project identity or pre/post subtitle state changes
   const mobileTimelineStateKey = `${activeSavedId ?? localMedia?.localUrl ?? project?.localUrl ?? "none"}::${
@@ -906,16 +957,22 @@ export function WorkspaceSidebar({
     setSourceConfirmAction(null);
   }, [mobileTimelineStateKey, hasSubtitles]);
 
-  const hideDesktopEditTab = !isMobileStudio && hideCaptions && hasStudioVideo;
-  const mobileDirectTimeline = Boolean(
-    isMobileStudio && hideCaptions && studioSection === "edit"
-  );
+  const editingSubtitleIndex =
+    studioSection === "edit" && editingSubtitleId && project
+      ? project.subtitles.findIndex((s) => s.id === editingSubtitleId)
+      : -1;
+  const editingSubtitle =
+    editingSubtitleIndex >= 0 && project
+      ? project.subtitles[editingSubtitleIndex]
+      : null;
 
-  useEffect(() => {
-    if (hideDesktopEditTab && studioSection === "edit") {
-      onChangeStudioSection("visual");
-    }
-  }, [hideDesktopEditTab, studioSection, onChangeStudioSection]);
+  const mobileDirectTimeline = Boolean(
+    isMobileStudio &&
+      hideCaptions &&
+      studioSection === "edit" &&
+      !editingSubtitle &&
+      !showSubtitleGenSettings
+  );
 
   const dirtyMap = getVideoEditDirtyMap(editSettings, voiceSettings);
   const studioTabs: {
@@ -925,21 +982,17 @@ export function WorkspaceSidebar({
     dirty?: boolean;
     count?: number;
   }[] = [
-    ...(!hideDesktopEditTab
-      ? [
-          {
-            id: "edit" as const,
-            label: "Edit",
-            icon: hideCaptions ? Scissors : hasSubtitles ? Captions : Upload,
-            count: hasSubtitles
-              ? project!.subtitles.length
-              : selectedScenes.length > 0
-                ? selectedScenes.length
-                : undefined,
-            dirty: timelineDirty,
-          },
-        ]
-      : []),
+    {
+      id: "edit" as const,
+      label: "Edit",
+      icon: hideCaptions ? Scissors : hasSubtitles ? Captions : Upload,
+      count: hasSubtitles
+        ? project!.subtitles.length
+        : selectedScenes.length > 0
+          ? selectedScenes.length
+          : undefined,
+      dirty: timelineDirty,
+    },
     {
       id: "visual",
       label: "Video & Look",
@@ -956,6 +1009,7 @@ export function WorkspaceSidebar({
       id: "subtitle",
       label: "Subtitle",
       icon: Captions,
+      dirty: isSubtitleDesignModified(editSettings),
     },
   ];
 
@@ -1430,29 +1484,30 @@ export function WorkspaceSidebar({
                 </div>
               )}
 
-              {dirtyMap.isModified &&
-                (studioSection === "visual" || studioSection === "audio") && (
+              {(studioSection === "visual" ||
+                studioSection === "audio" ||
+                studioSection === "subtitle") && (() => {
+                const anyStyleDirty =
+                  dirtyMap.isModified || isSubtitleDesignModified(editSettings);
+                return (
                   <button
                     type="button"
+                    disabled={!anyStyleDirty}
                     onClick={() => {
                       onChangeEditSettings({
                         ...DEFAULT_VIDEO_EDIT,
-                        showThaiScript: editSettings.showThaiScript,
                         translationTone: editSettings.translationTone,
-                        subtitleFontScale: editSettings.subtitleFontScale,
-                        subtitleTheme: editSettings.subtitleTheme,
-                        subtitleHighlightColor: editSettings.subtitleHighlightColor,
-                        showWordGloss: editSettings.showWordGloss,
-                        showBurmeseLine: editSettings.showBurmeseLine,
                       });
                       onChangeVoiceSettings({ ...DEFAULT_VOICE_SETTINGS });
                     }}
-                    className="text-[11px] font-medium text-[#4d597d] dark:text-[#919ec4] hover:text-teal-700 dark:hover:text-teal-400 flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer transition-colors px-1.5"
+                    title="Reset Video & Look, Audio & Voice, and Subtitle"
+                    className="h-7 px-2 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] hover:border-teal-600/50 dark:hover:border-teal-400/50 hover:text-teal-700 dark:hover:text-teal-300 text-[11px] font-medium text-[#4d597d] dark:text-[#919ec4] flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:border-[#d2dcf0] dark:disabled:hover:border-[#21284c] disabled:hover:text-[#4d597d] dark:disabled:hover:text-[#919ec4] transition-colors"
                   >
-                    <RotateCcw className="w-3 h-3" />
-                    <span className="hidden sm:inline">Reset All</span>
+                    <RotateCcw className="w-3 h-3 shrink-0" />
+                    <span>Reset All</span>
                   </button>
-                )}
+                );
+              })()}
 
               {hideCaptions && hasStudioVideo && onClearLocalVideo && (
                 <>
@@ -1479,12 +1534,16 @@ export function WorkspaceSidebar({
           {!mobileDirectTimeline && (
           <div
             className={
-              studioSection === "edit" && hasSubtitles && captionTab === "script"
+              studioSection === "edit" &&
+              !showSubtitleGenSettings &&
+              !editingSubtitle &&
+              hasSubtitles &&
+              captionTab === "script"
                 ? "@container flex-1 min-h-0 flex flex-col overflow-hidden"
                 : "@container flex-1 overflow-y-auto overscroll-y-contain studio-scrollbar min-h-0"
             }
           >
-            {!hideCaptions && (isProcessing || Boolean(regeneratingClipId)) && (() => {
+            {!hideCaptions && !showSubtitleGenSettings && (isProcessing || Boolean(regeneratingClipId)) && (() => {
               const stage = generationProgress?.stage ?? "extracting";
               const percent = Math.max(0, Math.min(100, generationProgress?.percent ?? 5));
               const label =
@@ -1568,7 +1627,98 @@ export function WorkspaceSidebar({
               );
             })()}
 
-            {studioSection === "edit" && !hasSubtitles && !(hideCaptions && hasStudioVideo) && (
+            {studioSection === "edit" &&
+              showSubtitleGenSettings &&
+              !editingSubtitle &&
+              subtitleGenConfig &&
+              onChangeSubtitleGenConfig &&
+              onConfirmGenerateSubtitles &&
+              onCloseSubtitleGenSettings && (
+              <SubtitleGeneratePanel
+                config={subtitleGenConfig}
+                hasExistingSubtitles={hasProjectSubtitles}
+                existingSubtitleCount={project?.subtitles.length ?? 0}
+                clipCount={selectedScenes.length}
+                totalDurationSec={selectedScenes.reduce(
+                  (acc, s) => acc + Math.max(0, s.endSec - s.startSec),
+                  0
+                )}
+                canGenerate={Boolean(localMedia?.localFile && selectedScenes.length > 0)}
+                missingMediaReason={
+                  !localMedia?.localFile
+                    ? "Link or upload a local video file first to generate subtitles."
+                    : selectedScenes.length === 0
+                      ? "Add at least one clip on the timeline first."
+                      : null
+                }
+                isGenerating={isProcessing}
+                generationProgress={generationProgress}
+                processError={processError}
+                onChangeConfig={onChangeSubtitleGenConfig}
+                onStartGenerate={onConfirmGenerateSubtitles}
+                onCancelGenerate={onCancelGenerateSubtitles}
+                onClose={onCloseSubtitleGenSettings}
+              />
+            )}
+
+            {studioSection === "edit" && editingSubtitle && project && (
+              <SubtitleClipEditor
+                subtitle={editingSubtitle}
+                subtitleIndex={editingSubtitleIndex}
+                totalSubtitles={project.subtitles.length}
+                isPlaying={isPlaying}
+                defaultTone={editSettings.translationTone}
+                isRegenerating={regeneratingSubIds.includes(editingSubtitle.id)}
+                regenError={subtitleRegenError}
+                onClearRegenError={onClearSubtitleRegenError}
+                onPlayClip={() => onPlayFromTime(editingSubtitle.startTime)}
+                onPause={onPause}
+                onUpdateField={onUpdateSubtitle}
+                onUpdateWordGloss={onUpdateWordGloss}
+                onRegenerate={onRegenerateSubtitle}
+                onCancelRegenerate={onCancelRegenerateSubtitle}
+                onNavigatePrev={
+                  editingSubtitleIndex > 0 && onEditSubtitle
+                    ? () => onEditSubtitle(project.subtitles[editingSubtitleIndex - 1].id)
+                    : undefined
+                }
+                onNavigateNext={
+                  editingSubtitleIndex < project.subtitles.length - 1 && onEditSubtitle
+                    ? () => onEditSubtitle(project.subtitles[editingSubtitleIndex + 1].id)
+                    : undefined
+                }
+                onClose={() => onCloseEditSubtitle?.()}
+              />
+            )}
+
+            {studioSection === "edit" &&
+              !editingSubtitle &&
+              !showSubtitleGenSettings &&
+              !isMobileStudio &&
+              hideCaptions &&
+              hasStudioVideo && (
+              <div className="px-3.5 py-3 flex flex-col gap-3">
+                <UploadHeader
+                  title={localMedia?.title || project?.title || "Local Video"}
+                  durationSec={
+                    localMedia?.durationSec ??
+                    project?.sourceDurationSec ??
+                    project?.targetDurationSec ??
+                    0
+                  }
+                  onClearVideo={onClearLocalVideo}
+                />
+                <p className="text-[11px] text-[#4d597d] dark:text-[#919ec4] leading-relaxed">
+                  Use the timeline below to split, trim, reorder clips, or generate subtitles.
+                </p>
+              </div>
+            )}
+
+            {studioSection === "edit" &&
+              !editingSubtitle &&
+              !showSubtitleGenSettings &&
+              !hasSubtitles &&
+              !(hideCaptions && hasStudioVideo) && (
               <div className="px-3.5 py-3 flex flex-col gap-3.5 pb-6">
                 {hasStudioVideo ? (
                   <>
@@ -1691,7 +1841,11 @@ export function WorkspaceSidebar({
               </div>
             )}
 
-            {studioSection === "edit" && hasSubtitles && project && (() => {
+            {studioSection === "edit" &&
+              !editingSubtitle &&
+              !showSubtitleGenSettings &&
+              hasSubtitles &&
+              project && (() => {
               const effectiveSpd = getEffectivePlaybackSpeed(
                 editSettings.playbackSpeed,
                 voiceSettings.speed
@@ -2187,6 +2341,10 @@ export function WorkspaceSidebar({
                         onPlayFromTime={onPlayFromTime}
                         onUpdateScenes={onUpdateProjectScenes}
                         onUpdateSubtitleTiming={onUpdateSubtitleTiming}
+                        onEditSubtitle={onEditSubtitle}
+                        onDeleteSubtitle={onDeleteSubtitle}
+                        onSplitSubtitle={onSplitSubtitle}
+                        onMergeSubtitleWithNext={onMergeSubtitleWithNext}
                         onShiftAllSubtitles={onShiftAllSubtitles}
                         onUndo={onUndoProp ?? onUndoSubtitles}
                         onRedo={onRedoProp ?? onRedoSubtitles}
@@ -4063,31 +4221,49 @@ export function WorkspaceSidebar({
             {studioSection === "subtitle" && (
               <div
                 aria-label="Subtitle settings"
-                className="px-3.5 py-4 min-h-full"
-              />
+                className="min-h-full"
+              >
+                <SubtitleDesignPanel
+                  settings={editSettings}
+                  hasSubtitles={hasProjectSubtitles}
+                  subtitleCount={hasProjectSubtitles && project ? project.subtitles.length : 0}
+                  copiedTranscript={copiedTranscript}
+                  onCopyTranscript={handleCopyFullTranscript}
+                  onOpenPasteTranscript={
+                    onApplyPasteTranscriptSync
+                      ? () => setShowPasteSyncModal(true)
+                      : undefined
+                  }
+                  onChange={onChangeEditSettings}
+                />
+              </div>
             )}
           </div>
           )}
 
-          {/* Mobile Persistent Bottom Timeline Dock (fills Edit tab directly, stays compact on Visual/Audio tabs) */}
-          {isMobileStudio && hideCaptions && (
-            <div className={mobileDirectTimeline ? "flex-1 min-h-0 flex flex-col" : "shrink-0"}>
+          {/* Mobile Edit-Tab Timeline Dock (visible only on Edit tab) */}
+          {mobileDirectTimeline && (
+            <div className="flex-1 min-h-0 flex flex-col">
               <ProjectTimelineEditor
                 dockMode
-                fillHeight={mobileDirectTimeline}
-                compactDock={!mobileDirectTimeline}
+                fillHeight
+                compactDock={false}
                 isCollapsed={false}
                 project={project}
                 cutTime={cutTime}
                 subscribeCutTime={subscribeCutTime}
                 isPlaying={isPlaying}
-                isActive={isWorkspaceVisible && isStudioView}
+                isActive={isWorkspaceVisible && isStudioView && studioSection === "edit"}
                 onTogglePlay={onTogglePlay}
                 onPause={onPause}
                 onSeek={onSeek}
                 onPlayFromTime={onPlayFromTime}
                 onUpdateScenes={onUpdateProjectScenes}
                 onUpdateSubtitleTiming={onUpdateSubtitleTiming}
+                onEditSubtitle={onEditSubtitle}
+                onDeleteSubtitle={onDeleteSubtitle}
+                onSplitSubtitle={onSplitSubtitle}
+                onMergeSubtitleWithNext={onMergeSubtitleWithNext}
                 onShiftAllSubtitles={onShiftAllSubtitles}
                 onUndo={onUndoProp ?? onUndoSubtitles}
                 onRedo={onRedoProp ?? onRedoSubtitles}
@@ -4117,9 +4293,10 @@ export function WorkspaceSidebar({
             </div>
           )}
         </div>
-        {!hideCaptions && hasGeneratedProject(project) && onApplyPasteTranscriptSync && (
+        {hasGeneratedProject(project) && onApplyPasteTranscriptSync && (
           <PasteTranscriptModal
             isOpen={showPasteSyncModal}
+            projectKey={activeSavedId || project.localUrl || project.title}
             projectTitle={project.title}
             subtitles={project.subtitles}
             exportOpts={{

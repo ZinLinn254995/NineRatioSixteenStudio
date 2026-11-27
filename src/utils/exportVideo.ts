@@ -4,6 +4,9 @@ import {
   applyAdversarialPerturbationToImageData,
   buildCssFilterString,
   createAdversarialPerturbationTile,
+  resolveStageCanvasGeometry,
+  resolveSubtitleFontMultiplier,
+  resolveSubtitleFontStack,
 } from "./videoFilters";
 import { uploadBlobInChunks } from "./uploadFile";
 import { getEffectivePlaybackSpeed } from "./voicePresets";
@@ -824,6 +827,365 @@ function drawRoundedRect(
   ctx.closePath();
 }
 
+function renderOverlaySubtitleFrame(
+  ctx: CanvasRenderingContext2D,
+  opts: {
+    subtitles: SubtitleItem[];
+    width: number;
+    height: number;
+    editSettings: VideoEditSettings;
+    subTheme: "light" | "dark" | "warm";
+    subHl: "amber" | "emerald" | "indigo" | "rose";
+    subFontScale: number;
+    showWordGloss: boolean;
+    showBurmeseLine: boolean;
+    highlightTime: number;
+  }
+) {
+  const {
+    subtitles,
+    width,
+    height,
+    editSettings,
+    subTheme,
+    subHl,
+    subFontScale,
+    showWordGloss,
+    showBurmeseLine,
+    highlightTime,
+  } = opts;
+
+  let activeSub: SubtitleItem | null = null;
+  for (let i = 0; i < subtitles.length; i++) {
+    const s = subtitles[i];
+    if (highlightTime >= s.startTime && highlightTime <= s.endTime) {
+      activeSub = s;
+      break;
+    }
+  }
+  if (!activeSub) return;
+
+  const isPortrait = width / height <= 0.85;
+  const cardStyle = editSettings.subtitleCardStyle || "card";
+  const wordStyle = editSettings.subtitleWordStyle || "fill";
+  const align = editSettings.subtitleAlign || "center";
+  const fontStack = resolveSubtitleFontStack(editSettings.subtitleFontFamily);
+  const weightStr =
+    editSettings.subtitleTextWeight === "bold"
+      ? "700"
+      : editSettings.subtitleTextWeight === "normal"
+        ? "400"
+        : "600";
+  const cardRadius = Math.max(0, Math.min(28, editSettings.subtitleCardRadius ?? 18));
+  const overlayRadius = Math.round(cardRadius * 0.9);
+  const scaleFactor = Math.max(0.85, Math.min(1.2, width / (isPortrait ? 720 : 960)));
+
+  const phoneticSize = Math.round(27 * subFontScale * scaleFactor);
+  const glossSize = Math.round(18 * subFontScale * scaleFactor);
+  const thaiSize = Math.round(21 * subFontScale * scaleFactor);
+  const burmeseSize = Math.round(23 * subFontScale * scaleFactor);
+
+  const phoneticFont = `${weightStr} ${phoneticSize}px ${fontStack}`;
+  const glossFont = `500 ${glossSize}px 'Noto Sans Myanmar', ${fontStack}`;
+  const thaiFont = `500 ${thaiSize}px 'Noto Sans Thai', ${fontStack}`;
+  const burmeseFont = `500 ${burmeseSize}px 'Noto Sans Myanmar', ${fontStack}`;
+
+  const maxBoxW = Math.round(width * 0.92);
+  const padX = Math.round(22 * scaleFactor);
+  const padY = Math.round(14 * scaleFactor);
+  const innerMaxW = Math.max(180, maxBoxW - padX * 2);
+
+  const wordGapX = Math.round(10 * scaleFactor);
+  const wordPadX = Math.round(8 * scaleFactor);
+  const wordPillH = Math.round(phoneticSize * 1.38);
+  const glossLineH = Math.round(glossSize * 1.28);
+  const rowGapY = Math.round(8 * scaleFactor);
+
+  interface OverlayWordItem {
+    phonetic: string;
+    gloss: string;
+    boxW: number;
+    pillW: number;
+    hasGloss: boolean;
+    startOffsetSec: number;
+    endOffsetSec: number;
+    isLastWord: boolean;
+  }
+
+  const wordRows: { items: OverlayWordItem[]; rowW: number; rowH: number }[] = [];
+  let curRow: OverlayWordItem[] = [];
+  let curRowW = 0;
+
+  const words = activeSub.words || [];
+  for (let wi = 0; wi < words.length; wi++) {
+    const w = words[wi];
+    ctx.font = phoneticFont;
+    const pTextW = ctx.measureText(w.phonetic).width;
+    const pillW = Math.ceil(pTextW + wordPadX * 2);
+    const glossText = showWordGloss && w.burmeseGloss ? w.burmeseGloss.trim() : "";
+    let gTextW = 0;
+    if (glossText) {
+      ctx.font = glossFont;
+      gTextW = ctx.measureText(glossText).width;
+    }
+    const boxW = Math.max(pillW, Math.ceil(gTextW + 6));
+    const item: OverlayWordItem = {
+      phonetic: w.phonetic,
+      gloss: glossText,
+      boxW,
+      pillW,
+      hasGloss: Boolean(glossText),
+      startOffsetSec: w.startOffsetSec,
+      endOffsetSec: w.endOffsetSec,
+      isLastWord: wi === words.length - 1,
+    };
+
+    const nextW = curRow.length === 0 ? boxW : curRowW + wordGapX + boxW;
+    if (curRow.length > 0 && nextW > innerMaxW) {
+      const hasAnyGloss = curRow.some((it) => it.hasGloss);
+      wordRows.push({
+        items: curRow,
+        rowW: curRowW,
+        rowH: wordPillH + (hasAnyGloss ? glossLineH + 4 : 0),
+      });
+      curRow = [item];
+      curRowW = boxW;
+    } else {
+      curRow.push(item);
+      curRowW = nextW;
+    }
+  }
+  if (curRow.length > 0) {
+    const hasAnyGloss = curRow.some((it) => it.hasGloss);
+    wordRows.push({
+      items: curRow,
+      rowW: curRowW,
+      rowH: wordPillH + (hasAnyGloss ? glossLineH + 4 : 0),
+    });
+  }
+
+  ctx.font = thaiFont;
+  const thaiLines =
+    editSettings.showThaiScript && activeSub.thaiScript.trim()
+      ? wrapTextLines(ctx, activeSub.thaiScript.trim(), innerMaxW)
+      : [];
+  const thaiLineH = Math.round(thaiSize * 1.35);
+
+  ctx.font = burmeseFont;
+  const burmeseLines =
+    showBurmeseLine && activeSub.burmese.trim()
+      ? wrapTextLines(ctx, activeSub.burmese.trim(), innerMaxW)
+      : [];
+  const burmeseLineH = Math.round(burmeseSize * 1.4);
+
+  let maxContentW = 0;
+  for (const r of wordRows) maxContentW = Math.max(maxContentW, r.rowW);
+  ctx.font = thaiFont;
+  for (const l of thaiLines) maxContentW = Math.max(maxContentW, Math.ceil(ctx.measureText(l).width));
+  ctx.font = burmeseFont;
+  for (const l of burmeseLines) maxContentW = Math.max(maxContentW, Math.ceil(ctx.measureText(l).width));
+
+  const boxW = Math.min(maxBoxW, Math.max(Math.round(width * 0.4), maxContentW + padX * 2));
+  let contentH = 0;
+  for (let ri = 0; ri < wordRows.length; ri++) {
+    contentH += wordRows[ri].rowH + (ri > 0 ? rowGapY : 0);
+  }
+  if (thaiLines.length > 0) contentH += 8 + thaiLines.length * thaiLineH;
+  if (burmeseLines.length > 0) contentH += 8 + burmeseLines.length * burmeseLineH;
+
+  const boxH = contentH + padY * 2;
+  const bottomMargin = isPortrait ? Math.round(height * 0.055) : Math.round(height * 0.04);
+  const boxX = Math.round((width - boxW) / 2);
+  const boxY = Math.max(24, height - bottomMargin - boxH);
+
+  ctx.save();
+
+  // Soft bottom readability gradient scrim
+  const scrimTop = Math.max(0, boxY - Math.round(height * 0.1));
+  const scrim = ctx.createLinearGradient(0, scrimTop, 0, height);
+  scrim.addColorStop(0, "rgba(0,0,0,0)");
+  scrim.addColorStop(0.45, "rgba(0,0,0,0.34)");
+  scrim.addColorStop(1, "rgba(0,0,0,0.72)");
+  ctx.fillStyle = scrim;
+  ctx.fillRect(0, scrimTop, width, height - scrimTop);
+
+  const isLightBox = (subTheme === "light" || subTheme === "warm") && cardStyle !== "minimal";
+
+  if (cardStyle !== "minimal") {
+    drawRoundedRect(ctx, boxX, boxY, boxW, boxH, overlayRadius);
+    if (cardStyle === "outline") {
+      ctx.fillStyle =
+        subTheme === "light"
+          ? "rgba(255,255,255,0.95)"
+          : subTheme === "warm"
+            ? "rgba(251,247,239,0.95)"
+            : "rgba(7,9,20,0.9)";
+      ctx.fill();
+      ctx.strokeStyle =
+        subTheme === "light"
+          ? "#0c1026"
+          : subTheme === "warm"
+            ? "#92400e"
+            : "rgba(255,255,255,0.78)";
+      ctx.lineWidth = 3;
+      ctx.stroke();
+    } else if (cardStyle === "glass") {
+      ctx.fillStyle =
+        subTheme === "light"
+          ? "rgba(255,255,255,0.72)"
+          : subTheme === "warm"
+            ? "rgba(251,247,239,0.76)"
+            : "rgba(9,13,34,0.64)";
+      ctx.fill();
+      ctx.strokeStyle =
+        subTheme === "light"
+          ? "rgba(255,255,255,0.75)"
+          : subTheme === "warm"
+            ? "rgba(231,220,200,0.85)"
+            : "rgba(255,255,255,0.28)";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    } else {
+      ctx.fillStyle =
+        subTheme === "light"
+          ? "rgba(255,255,255,0.92)"
+          : subTheme === "warm"
+            ? "rgba(251,247,239,0.94)"
+            : "rgba(7,9,20,0.84)";
+      ctx.fill();
+      ctx.strokeStyle =
+        subTheme === "light"
+          ? "rgba(210,220,240,0.9)"
+          : subTheme === "warm"
+            ? "rgba(231,220,200,0.9)"
+            : "rgba(255,255,255,0.16)";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+  } else {
+    ctx.shadowColor = "rgba(0,0,0,0.92)";
+    ctx.shadowBlur = 10;
+    ctx.shadowOffsetY = 2;
+  }
+
+  const hlBg =
+    subHl === "amber"
+      ? "#fbbf24"
+      : subHl === "emerald"
+        ? "#34d399"
+        : subHl === "rose"
+          ? "#f43f5e"
+          : "#2dd4bf";
+  const hlFillText =
+    subHl === "amber"
+      ? "#1c1917"
+      : subHl === "emerald"
+        ? "#052e16"
+        : subHl === "rose"
+          ? "#ffffff"
+          : "#060918";
+  const hlAccentText =
+    subHl === "amber"
+      ? "#fcd34d"
+      : subHl === "emerald"
+        ? "#6ee7b7"
+        : subHl === "rose"
+          ? "#fda4af"
+          : "#5eead4";
+
+  const localElapsed = Math.max(0, highlightTime - activeSub.startTime);
+  let cursorY = boxY + padY;
+  ctx.textBaseline = "middle";
+
+  for (let ri = 0; ri < wordRows.length; ri++) {
+    const row = wordRows[ri];
+    let wx =
+      align === "left"
+        ? boxX + padX
+        : boxX + Math.round((boxW - row.rowW) / 2);
+
+    for (const item of row.items) {
+      const isSpoken =
+        localElapsed >= item.startOffsetSec &&
+        (item.isLastWord
+          ? localElapsed <= item.endOffsetSec
+          : localElapsed < item.endOffsetSec);
+
+      const pillX = align === "left" ? wx : wx + Math.round((item.boxW - item.pillW) / 2);
+
+      if (isSpoken) {
+        if (wordStyle === "fill") {
+          drawRoundedRect(ctx, pillX, cursorY, item.pillW, wordPillH, 7);
+          ctx.fillStyle = hlBg;
+          ctx.fill();
+        } else if (wordStyle === "glow") {
+          drawRoundedRect(ctx, pillX, cursorY, item.pillW, wordPillH, 7);
+          ctx.fillStyle =
+            subHl === "amber"
+              ? "rgba(251,191,36,0.28)"
+              : subHl === "emerald"
+                ? "rgba(52,211,153,0.28)"
+                : subHl === "rose"
+                  ? "rgba(244,63,94,0.32)"
+                  : "rgba(45,212,191,0.28)";
+          ctx.fill();
+        } else if (wordStyle === "underline") {
+          ctx.fillStyle = hlBg;
+          ctx.fillRect(pillX + 2, cursorY + wordPillH - 3, item.pillW - 4, 3);
+        }
+      }
+
+      ctx.font = phoneticFont;
+      ctx.textAlign = "center";
+      ctx.fillStyle = isSpoken
+        ? wordStyle === "fill"
+          ? hlFillText
+          : hlAccentText
+        : isLightBox
+          ? "#0c1026"
+          : "#ffffff";
+      ctx.fillText(item.phonetic, pillX + item.pillW / 2, cursorY + wordPillH / 2 + 1);
+
+      if (item.hasGloss) {
+        ctx.font = glossFont;
+        ctx.textAlign = align === "left" ? "left" : "center";
+        ctx.fillStyle = isLightBox ? "#4d597d" : "rgba(255,255,255,0.78)";
+        const gx = align === "left" ? wx + wordPadX : wx + item.boxW / 2;
+        ctx.fillText(item.gloss, gx, cursorY + wordPillH + 4 + glossLineH / 2);
+      }
+
+      wx += item.boxW + wordGapX;
+    }
+
+    cursorY += row.rowH + rowGapY;
+  }
+
+  ctx.textAlign = align === "left" ? "left" : "center";
+  const textAnchorX = align === "left" ? boxX + padX : boxX + boxW / 2;
+
+  if (thaiLines.length > 0) {
+    cursorY += 2;
+    ctx.font = thaiFont;
+    ctx.fillStyle = isLightBox ? "#4d597d" : "rgba(255,255,255,0.84)";
+    for (const line of thaiLines) {
+      ctx.fillText(line, textAnchorX, cursorY + thaiLineH / 2);
+      cursorY += thaiLineH;
+    }
+  }
+
+  if (burmeseLines.length > 0) {
+    cursorY += 4;
+    ctx.font = burmeseFont;
+    ctx.fillStyle = isLightBox ? "#1e293b" : "rgba(255,255,255,0.96)";
+    for (const line of burmeseLines) {
+      ctx.fillText(line, textAnchorX, cursorY + burmeseLineH / 2);
+      cursorY += burmeseLineH;
+    }
+  }
+
+  ctx.restore();
+}
+
 function mapCutTimeToSourceTime(project: VideoProject, cutTime: number): number {
   if (!project.scenes || project.scenes.length === 0) {
     return Math.max(0, cutTime);
@@ -962,13 +1324,16 @@ export async function exportProjectToMp4(
   onProgress: (p: ExportProgress) => void,
   signal?: AbortSignal
 ): Promise<ExportedVideoResult> {
-  const width = 720;
-  const height = 1280;
+  const stageGeometry = resolveStageCanvasGeometry(editSettings.aspectRatio);
+  const width = stageGeometry.logicalWidth;
+  const height = stageGeometry.logicalHeight;
   const hasSubtitles = project.subtitles.length > 0;
+  const useSplitSubtitleLayout = hasSubtitles && stageGeometry.isPortraitSplitFriendly;
+  const useOverlaySubtitleLayout = hasSubtitles && !stageGeometry.isPortraitSplitFriendly;
   const heightPct = Math.max(26, Math.min(52, editSettings.videoHeightPct || 35));
-  const rawTopH = hasSubtitles ? Math.round((height * heightPct) / 100) : height;
-  const topVideoH = hasSubtitles
-    ? Math.max(240, Math.min(height - 240, Math.round(rawTopH / 2) * 2))
+  const rawTopH = useSplitSubtitleLayout ? Math.round((height * heightPct) / 100) : height;
+  const topVideoH = useSplitSubtitleLayout
+    ? Math.max(200, Math.min(height - 220, Math.round(rawTopH / 2) * 2))
     : height;
   const listH = height - topVideoH;
   const fps = 24;
@@ -1092,7 +1457,7 @@ export async function exportProjectToMp4(
     // Eliminates downloading prepared clips & eliminates slow Android <video> frame-by-frame seeking!
     // Phone renders ONLY the lightweight 2D subtitle strip (if subtitles exist) at 15fps,
     // and server FFmpeg composites native source video + subtitle strip + voice audio in ONE fast pass.
-    if (resolvedUploadId) {
+    if (resolvedUploadId && !useOverlaySubtitleLayout) {
       let subtitleBase64: string | undefined;
       let subtitleUploadId: string | undefined;
       let subtitleFormat: "mp4" | "webm" = "mp4";
@@ -1100,18 +1465,13 @@ export async function exportProjectToMp4(
       let subtitleRecordedDurationSec: number | undefined;
       const subFps = 15;
 
-      if (hasSubtitles && listH >= 120) {
+      if (useSplitSubtitleLayout && listH >= 120) {
         const subCanvas = document.createElement("canvas");
         subCanvas.width = width;
         subCanvas.height = listH;
         const subCtx = subCanvas.getContext("2d", { alpha: false })!;
 
-        const subFontScale =
-          editSettings.subtitleFontScale === "sm"
-            ? 0.86
-            : editSettings.subtitleFontScale === "lg"
-              ? 1.16
-              : 1;
+        const subFontScale = resolveSubtitleFontMultiplier(editSettings);
         const subTheme: "light" | "dark" | "warm" =
           editSettings.subtitleTheme === "warm"
             ? "warm"
@@ -1569,12 +1929,7 @@ export async function exportProjectToMp4(
       }
     }
 
-    const subFontScale =
-      editSettings.subtitleFontScale === "sm"
-        ? 0.86
-        : editSettings.subtitleFontScale === "lg"
-          ? 1.16
-          : 1;
+    const subFontScale = resolveSubtitleFontMultiplier(editSettings);
     const subTheme: "light" | "dark" | "warm" =
       editSettings.subtitleTheme === "warm"
         ? "warm"
@@ -1720,7 +2075,7 @@ export async function exportProjectToMp4(
       }
       ctx.restore();
 
-      if (hasSubtitles) {
+      if (useSplitSubtitleLayout) {
         const ht = Math.min(sourceTotalDuration, t + 0.06);
         const targetScroll = getTargetSubtitleScrollY(cards, ht);
         const delta = targetScroll - currentScrollY;
@@ -1737,6 +2092,20 @@ export async function exportProjectToMp4(
           showBurmeseLine,
           highlightTime: ht,
           scrollY: currentScrollY,
+        });
+      } else if (useOverlaySubtitleLayout) {
+        const ht = Math.min(sourceTotalDuration, t + 0.06);
+        renderOverlaySubtitleFrame(ctx, {
+          subtitles: project.subtitles,
+          width,
+          height,
+          editSettings,
+          subTheme,
+          subHl,
+          subFontScale,
+          showWordGloss,
+          showBurmeseLine,
+          highlightTime: ht,
         });
       }
     };

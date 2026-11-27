@@ -5,14 +5,53 @@ export interface VideoAspectRatioOption {
   label: string;
   shortLabel: string;
   ratio: number | null;
+  subtitleLayout?: "scroll" | "overlay";
 }
 
 export const VIDEO_ASPECT_RATIO_OPTIONS: VideoAspectRatioOption[] = [
   { id: "original", label: "Original", shortLabel: "Original", ratio: null },
-  { id: "9:16", label: "9:16", shortLabel: "9:16", ratio: 9 / 16 },
-  { id: "16:9", label: "16:9", shortLabel: "16:9", ratio: 16 / 9 },
-  { id: "1:1", label: "1:1", shortLabel: "1:1", ratio: 1 },
-  { id: "4:5", label: "4:5", shortLabel: "4:5", ratio: 4 / 5 },
+  {
+    id: "9:16",
+    label: "9:16",
+    shortLabel: "9:16",
+    ratio: 9 / 16,
+    subtitleLayout: "scroll",
+  },
+  {
+    id: "9:16-overlay",
+    label: "9:16",
+    shortLabel: "9:16",
+    ratio: 9 / 16,
+    subtitleLayout: "overlay",
+  },
+  {
+    id: "4:5",
+    label: "4:5",
+    shortLabel: "4:5",
+    ratio: 4 / 5,
+    subtitleLayout: "scroll",
+  },
+  {
+    id: "4:5-overlay",
+    label: "4:5",
+    shortLabel: "4:5",
+    ratio: 4 / 5,
+    subtitleLayout: "overlay",
+  },
+  {
+    id: "1:1",
+    label: "1:1",
+    shortLabel: "1:1",
+    ratio: 1,
+    subtitleLayout: "overlay",
+  },
+  {
+    id: "16:9",
+    label: "16:9",
+    shortLabel: "16:9",
+    ratio: 16 / 9,
+    subtitleLayout: "overlay",
+  },
 ];
 
 export interface ResolvedStageGeometry {
@@ -59,7 +98,10 @@ export function resolveStageCanvasGeometry(
 
   if (mode === "9:16") {
     aspect = 9 / 16;
-    activeLabel = "9:16";
+    activeLabel = "9:16 · Scroll";
+  } else if (mode === "9:16-overlay") {
+    aspect = 9 / 16;
+    activeLabel = "9:16 · Overlay";
   } else if (mode === "16:9") {
     aspect = 16 / 9;
     activeLabel = "16:9";
@@ -68,17 +110,22 @@ export function resolveStageCanvasGeometry(
     activeLabel = "1:1";
   } else if (mode === "4:5") {
     aspect = 4 / 5;
-    activeLabel = "4:5";
+    activeLabel = "4:5 · Scroll";
+  } else if (mode === "4:5-overlay") {
+    aspect = 4 / 5;
+    activeLabel = "4:5 · Overlay";
   } else {
     const raw = hasDims ? sourceDims!.width / sourceDims!.height : 9 / 16;
     aspect = Math.max(0.45, Math.min(2.35, raw));
     activeLabel = detectedRatioLabel ? `Original · ${detectedRatioLabel}` : "Original";
   }
 
-  const isPortraitSplitFriendly = aspect <= 0.85;
+  const isPortraitAspect = aspect <= 0.85;
+  const isPortraitSplitFriendly =
+    mode === "9:16-overlay" || mode === "4:5-overlay" ? false : isPortraitAspect;
   let logicalWidth: number;
   let logicalHeight: number;
-  if (isPortraitSplitFriendly) {
+  if (isPortraitAspect) {
     logicalWidth = 720;
     logicalHeight = Math.max(760, Math.min(1440, Math.round(720 / aspect / 2) * 2));
   } else if (aspect >= 1) {
@@ -128,7 +175,41 @@ export const DEFAULT_VIDEO_EDIT: VideoEditSettings = {
   subtitleHighlightColor: "indigo",
   showWordGloss: true,
   showBurmeseLine: true,
+  subtitleCardStyle: "card",
+  subtitleWordStyle: "fill",
+  subtitleFontFamily: "sans",
+  subtitleAlign: "left",
+  subtitleSizePct: 100,
+  subtitleCardRadius: 18,
+  subtitleTextWeight: "semibold",
+  subtitleLineSpacing: "normal",
 };
+
+export function resolveSubtitleFontMultiplier(settings: VideoEditSettings): number {
+  if (typeof settings.subtitleSizePct === "number" && Number.isFinite(settings.subtitleSizePct)) {
+    return Math.max(0.75, Math.min(1.4, settings.subtitleSizePct / 100));
+  }
+  return settings.subtitleFontScale === "sm"
+    ? 0.86
+    : settings.subtitleFontScale === "lg"
+      ? 1.16
+      : 1;
+}
+
+export function resolveSubtitleFontStack(
+  family: VideoEditSettings["subtitleFontFamily"]
+): string {
+  if (family === "display") {
+    return "'Outfit', 'DM Sans', 'Noto Sans Myanmar', sans-serif";
+  }
+  if (family === "serif") {
+    return "Georgia, 'Times New Roman', 'Noto Sans Myanmar', serif";
+  }
+  if (family === "mono") {
+    return "'JetBrains Mono', 'Noto Sans Myanmar', monospace";
+  }
+  return "'DM Sans', 'Noto Sans Myanmar', 'Noto Sans Thai', -apple-system, BlinkMacSystemFont, sans-serif";
+}
 
 export interface VideoFilterPresetOption {
   id: VideoFilterPresetId;
