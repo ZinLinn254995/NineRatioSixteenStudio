@@ -3,9 +3,11 @@ const useIsomorphicLayoutEffect = typeof window !== "undefined" ? useLayoutEffec
 import {
   ArrowLeft,
   ArrowRight,
+  Check,
   ChevronDown,
   ChevronUp,
   Film,
+  Flag,
   GripHorizontal,
   Link2,
   Loader2,
@@ -22,6 +24,7 @@ import {
   Sparkles,
   Trash2,
   Undo2,
+  X,
 } from "lucide-react";
 import type {
   SpeechRegion,
@@ -38,6 +41,10 @@ import {
 } from "../utils/audioSpeechAnalyzer";
 import { findUnmatchedSpeechGaps, suggestTranscribeRange } from "../utils/subtitleState";
 import { hasVerticalScrollRoom, scrollVerticalAncestors } from "../utils/timelineScroll";
+import {
+  getPassiveTimelineThumbs,
+  subscribePassiveTimelineThumbs,
+} from "../utils/timelineThumbBus";
 
 interface ProjectTimelineEditorProps {
   project: VideoProject | null;
@@ -52,6 +59,16 @@ interface ProjectTimelineEditorProps {
   onPlayFromTime: (sec: number) => void;
   onUpdateScenes: (nextScenes: SpeakingScene[]) => void;
   onUpdateSubtitleTiming?: (id: string, startTime: number, endTime: number) => void;
+  onAddSubtitle?: (
+    input: {
+      startTime: number;
+      endTime: number;
+      thaiPhonetic: string;
+      burmese: string;
+      originalSpokenText?: string;
+    },
+    opts?: { select?: boolean; seekToStart?: boolean }
+  ) => void;
   onEditSubtitle?: (id: string) => void;
   onDeleteSubtitle?: (id: string) => void;
   onSplitSubtitle?: (id: string) => void;
@@ -248,6 +265,7 @@ export function ProjectTimelineEditor({
   onPlayFromTime,
   onUpdateScenes,
   onUpdateSubtitleTiming,
+  onAddSubtitle,
   onEditSubtitle,
   onDeleteSubtitle,
   onSplitSubtitle,
@@ -282,9 +300,10 @@ export function ProjectTimelineEditor({
 }: ProjectTimelineEditorProps) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const trackSlideRef = useRef<HTMLDivElement | null>(null);
-  const rulerSlideRef = useRef<HTMLDivElement | null>(null);
+  const rulerCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const tracksScrollRef = useRef<HTMLDivElement | null>(null);
   const userScrolledTracksYRef = useRef(false);
+  const isUserScrubbingRef = useRef(false);
   const timeReadoutRef = useRef<HTMLSpanElement | null>(null);
   const [showRangeFill, setShowRangeFill] = useState(false);
   const [rangeStartVal, setRangeStartVal] = useState("0");
@@ -306,6 +325,11 @@ export function ProjectTimelineEditor({
     [onSelectSubtitle]
   );
   const [showMergeChoice, setShowMergeChoice] = useState(false);
+  const [newSubMarkStartSec, setNewSubMarkStartSec] = useState<number | null>(null);
+  const newSubMarkStartRef = useRef<number | null>(null);
+  newSubMarkStartRef.current = newSubMarkStartSec;
+  const newSubPreviewBarRef = useRef<HTMLDivElement | null>(null);
+  const newSubEndDurRef = useRef<HTMLSpanElement | null>(null);
   const [dragSubPreview, setDragSubPreview] = useState<{
     id: string;
     startTime: number;
@@ -321,16 +345,10 @@ export function ProjectTimelineEditor({
     nextStartSec: number;
     nextEndSec: number;
   } | null>(null);
-  const [liveScrubCutTime, setLiveScrubCutTime] = useState<number | null>(null);
   const [frozenTrackTime, setFrozenTrackTime] = useState<number | null>(null);
   const [dragBadge, setDragBadge] = useState<{ label: string; sec: number } | null>(null);
   const [thumbnails, setThumbnails] = useState<TimelineThumbFrame[]>([]);
   const [thumbAspect, setThumbAspect] = useState<number>(9 / 16);
-  const thumbCacheRef = useRef<{
-    localUrl: string;
-    aspect: number;
-    byBucket: Map<number, TimelineThumbFrame>;
-  }>({ localUrl: "", aspect: 9 / 16, byBucket: new Map() });
   const [baselineSubRegions, setBaselineSubRegions] = useState<SpeechRegion[]>([]);
 
   const dragStateRef = useRef<DragMode | null>(null);
@@ -342,7 +360,6 @@ export function ProjectTimelineEditor({
     dragStateRef.current = next;
   }, []);
   const liveScrubCutRef = useRef<number | null>(null);
-  liveScrubCutRef.current = liveScrubCutTime;
   const frozenTrackTimeRef = useRef<number | null>(null);
   const wheelTargetCutRef = useRef<{ cutTime: number; expiresAt: number } | null>(null);
   const wheelClearTimerRef = useRef<number | null>(null);
@@ -456,7 +473,9 @@ export function ProjectTimelineEditor({
   const minPxPerSecRef = useRef(minPxPerSec);
   minPxPerSecRef.current = minPxPerSec;
   const cutTimeRef = useRef(cutTime);
-  cutTimeRef.current = cutTime;
+  if (liveScrubCutRef.current === null && !isUserScrubbingRef.current) {
+    cutTimeRef.current = cutTime;
+  }
   const isPlayingRef = useRef(isPlaying);
   isPlayingRef.current = isPlaying;
   const onPauseRef = useRef(onPause);
@@ -545,7 +564,7 @@ export function ProjectTimelineEditor({
         tappedClipRef.current = null;
         tappedSubRef.current = null;
         liveScrubCutRef.current = null;
-        setLiveScrubCutTime(null);
+        isUserScrubbingRef.current = false;
         setDragBadge(null);
 
         const vpRect = viewportRef.current?.getBoundingClientRect();
@@ -677,7 +696,13 @@ export function ProjectTimelineEditor({
     }
     frozenTrackTimeRef.current = null;
     setFrozenTrackTime(null);
-    setLiveScrubCutTime(null);
+    liveScrubCutRef.current = null;
+    isUserScrubbingRef.current = false;
+    wheelWasPlayingRef.current = false;
+    if (wheelClearTimerRef.current !== null) {
+      window.clearTimeout(wheelClearTimerRef.current);
+      wheelClearTimerRef.current = null;
+    }
     wheelTargetCutRef.current = null;
     activePointersRef.current.clear();
     pinchStartRef.current = null;
@@ -766,19 +791,11 @@ export function ProjectTimelineEditor({
     scroller.scrollTop = initialTrackScrollTop;
   }, [isCollapsed, initialTrackScrollTop, projectIdentity]);
 
-  // Stable rounded key for kept clip source intervals so thumbnails sample the actual kept clips
-  const clipThumbSpanKey = useMemo(() => {
-    if (!segments.length) return `full:${Math.round(sourceDuration)}`;
-    return segments
-      .map((s) => `${Math.floor(s.startSec)}-${Math.ceil(s.endSec)}`)
-      .join("|");
-  }, [segments, sourceDuration]);
-
-  // Capture crisp, aspect-accurate filmstrip frames sampled across actual kept clips
+  // Subscribe to passive filmstrip frames captured directly from the primary <video> player.
+  // Avoids spawning a second <video> decoder that competes for Android hardware MediaCodec & blob I/O.
   useEffect(() => {
     if (!activeTimelineProject) {
       setThumbnails([]);
-      thumbCacheRef.current = { localUrl: "", aspect: 9 / 16, byBucket: new Map() };
       return;
     }
 
@@ -788,194 +805,21 @@ export function ProjectTimelineEditor({
       return;
     }
 
-    if (isCollapsed) return;
-
     const currentLocalUrl = activeTimelineProject.localUrl;
-    if (thumbCacheRef.current.localUrl !== currentLocalUrl) {
-      thumbCacheRef.current = {
-        localUrl: currentLocalUrl,
-        aspect: 9 / 16,
-        byBucket: new Map(),
-      };
-      setThumbnails([]);
-    }
-
-    // Build target source timestamps distributed proportionally across the kept clips
-    const rawIntervals =
-      segments.length > 0
-        ? segments.map((s) => ({
-            start: Math.max(0, s.startSec),
-            end: Math.max(s.startSec + 0.1, s.endSec),
-          }))
-        : [{ start: 0, end: Math.max(1, activeTimelineProject.sourceDurationSec || sourceDuration) }];
-
-    const totalKeptSpan = rawIntervals.reduce(
-      (sum, it) => sum + Math.max(0.1, it.end - it.start),
-      0
-    );
-    const targetCount = Math.min(36, Math.max(12, Math.ceil(totalKeptSpan / 2)));
-
-    const sampleTimes: number[] = [];
-    for (let i = 0; i < targetCount; i++) {
-      const offset = ((i + 0.5) / targetCount) * totalKeptSpan;
-      let acc = 0;
-      let chosen = rawIntervals[0].start;
-      for (const it of rawIntervals) {
-        const len = Math.max(0.1, it.end - it.start);
-        if (offset <= acc + len || it === rawIntervals[rawIntervals.length - 1]) {
-          chosen = it.start + Math.min(len, Math.max(0, offset - acc));
-          break;
-        }
-        acc += len;
-      }
-      sampleTimes.push(chosen);
-    }
-
-    // Deduplicate against cached 0.5s buckets so previously captured frames never flicker or re-decode
-    const cache = thumbCacheRef.current;
-    const toCapture: { sec: number; bucket: number }[] = [];
-    const seenBuckets = new Set<number>();
-    for (const sec of sampleTimes) {
-      const bucket = Math.round(sec * 2);
-      if (seenBuckets.has(bucket)) continue;
-      seenBuckets.add(bucket);
-      if (!cache.byBucket.has(bucket)) {
-        toCapture.push({ sec, bucket });
-      }
-    }
-
-    const flushCacheToState = () => {
-      const sorted = Array.from(cache.byBucket.values()).sort(
-        (a, b) => a.sourceSec - b.sourceSec
-      );
-      setThumbnails(sorted);
-    };
-
-    if (cache.byBucket.size > 0) {
-      setThumbAspect(cache.aspect);
-      flushCacheToState();
-    }
-    if (toCapture.length === 0) return;
-
-    let cancelled = false;
-    const estDur = Math.max(1, activeTimelineProject.sourceDurationSec || sourceDuration);
-    const hiddenVid = document.createElement("video");
-    hiddenVid.muted = true;
-    hiddenVid.playsInline = true;
-    hiddenVid.preload = "auto";
-
-    const releaseHiddenVid = () => {
-      hiddenVid.onloadeddata = null;
-      hiddenVid.onloadedmetadata = null;
-      hiddenVid.onerror = null;
-      try {
-        hiddenVid.pause();
-        hiddenVid.removeAttribute("src");
-        hiddenVid.load();
-      } catch {
-        // ignore
+    const syncFromBus = () => {
+      const { aspect, frames } = getPassiveTimelineThumbs(currentLocalUrl);
+      if (frames.length > 0) {
+        setThumbAspect(aspect);
+        setThumbnails(frames);
+      } else {
+        const fallback = activeTimelineProject.keyframeUrls[0] || "";
+        setThumbnails(fallback ? [{ sourceSec: 0, url: fallback }] : []);
       }
     };
 
-    const captureFrames = async () => {
-      // Let primary 9:16 video stage initialize decoder cleanly first
-      await new Promise((r) => setTimeout(r, cache.byBucket.size === 0 ? 320 : 120));
-      if (cancelled) return;
-      hiddenVid.src = currentLocalUrl;
-
-      await new Promise<void>((resolve) => {
-        if (hiddenVid.readyState >= 2 && hiddenVid.videoWidth > 0) return resolve();
-        let settled = false;
-        const done = () => {
-          if (settled) return;
-          settled = true;
-          resolve();
-        };
-        hiddenVid.onloadeddata = done;
-        hiddenVid.onerror = done;
-        setTimeout(done, 3000);
-      });
-      if (cancelled) return;
-
-      const actualDur =
-        Number.isFinite(hiddenVid.duration) && hiddenVid.duration > 0
-          ? hiddenVid.duration
-          : estDur;
-      const vw = hiddenVid.videoWidth || 720;
-      const vh = hiddenVid.videoHeight || 1280;
-      const rawAspect = vw > 0 && vh > 0 ? vw / vh : 9 / 16;
-      const clampedAspect = Math.max(0.5625, Math.min(1.78, rawAspect));
-      cache.aspect = clampedAspect;
-      setThumbAspect(clampedAspect);
-
-      // Crisp 2x Retina canvas matching true video aspect ratio (no stretching)
-      const ch = 128;
-      const cw = Math.max(72, Math.min(228, Math.round(ch * clampedAspect)));
-      const canvas = document.createElement("canvas");
-      canvas.width = cw;
-      canvas.height = ch;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = "high";
-
-      // Center-crop cover source rect so unusual aspect ratios never distort
-      const targetRatio = cw / ch;
-      let sx = 0;
-      let sy = 0;
-      let sw = vw;
-      let sh = vh;
-      if (rawAspect > targetRatio) {
-        sw = vh * targetRatio;
-        sx = (vw - sw) * 0.5;
-      } else if (rawAspect < targetRatio) {
-        sh = vw / targetRatio;
-        sy = (vh - sh) * 0.5;
-      }
-
-      let capturedCount = 0;
-      for (const item of toCapture) {
-        if (cancelled) break;
-        const clampedT = Math.max(0, Math.min(Math.max(0, actualDur - 0.05), item.sec));
-        hiddenVid.currentTime = clampedT;
-        await new Promise<void>((res) => {
-          let settled = false;
-          const finish = () => {
-            if (settled) return;
-            settled = true;
-            hiddenVid.removeEventListener("seeked", onSeeked);
-            res();
-          };
-          const onSeeked = () => finish();
-          hiddenVid.addEventListener("seeked", onSeeked, { once: true });
-          setTimeout(finish, 1400);
-        });
-        if (cancelled) break;
-        // Wait one paint frame so the decoded video frame is ready on GPU
-        await new Promise<void>((r) => requestAnimationFrame(() => r()));
-        if (cancelled) break;
-
-        try {
-          ctx.drawImage(hiddenVid, sx, sy, sw, sh, 0, 0, cw, ch);
-          const dataUrl = canvas.toDataURL("image/jpeg", 0.82);
-          cache.byBucket.set(item.bucket, { sourceSec: clampedT, url: dataUrl });
-          capturedCount++;
-          if (capturedCount === 1 || capturedCount % 3 === 0 || capturedCount === toCapture.length) {
-            flushCacheToState();
-          }
-        } catch {
-          break;
-        }
-      }
-    };
-
-    captureFrames().finally(releaseHiddenVid);
-
-    return () => {
-      cancelled = true;
-      releaseHiddenVid();
-    };
-  }, [project?.localUrl, isCollapsed, clipThumbSpanKey]);
+    syncFromBus();
+    return subscribePassiveTimelineThumbs(currentLocalUrl, syncFromBus);
+  }, [activeTimelineProject?.localUrl, activeTimelineProject?.keyframeUrls]);
 
   // Smoothly throttle rapid drag seeks on Stage9x16 so local video playback stays fluid
   const dispatchSeek = useCallback(
@@ -1066,6 +910,8 @@ export function ProjectTimelineEditor({
       if (wheelClearTimerRef.current !== null) {
         window.clearTimeout(wheelClearTimerRef.current);
       }
+      isUserScrubbingRef.current = false;
+      wheelWasPlayingRef.current = false;
       onScrubbingChangeRef.current?.(false);
       clearPreviewSourceSeekState();
     };
@@ -1108,6 +954,56 @@ export function ProjectTimelineEditor({
   }, [selectedSubtitleItem?.id, activeSceneId, dragSubPreview, clipReorder]);
 
   const hasSelectedClip = Boolean(selectedVideoSegment || selectedSubtitleItem);
+
+  useEffect(() => {
+    if (hasSelectedClip || clipReorder) {
+      setNewSubMarkStartSec(null);
+    }
+  }, [hasSelectedClip, clipReorder]);
+
+  useEffect(() => {
+    setNewSubMarkStartSec(null);
+  }, [project?.localUrl]);
+
+  const getCurrentPlayheadSec = useCallback(() => {
+    const raw = frozenTrackTimeRef.current ?? liveScrubCutRef.current ?? cutTimeRef.current;
+    const safe = typeof raw === "number" && Number.isFinite(raw) ? raw : 0;
+    return Math.max(0, Math.min(totalCutDuration, safe));
+  }, [totalCutDuration]);
+
+  const handleMarkNewSubStart = useCallback(() => {
+    if (!onAddSubtitle || totalCutDuration <= 0) return;
+    const cur = getCurrentPlayheadSec();
+    const clampedStart = Number(Math.max(0, Math.min(totalCutDuration, cur)).toFixed(2));
+    setNewSubMarkStartSec(clampedStart);
+  }, [onAddSubtitle, totalCutDuration, getCurrentPlayheadSec]);
+
+  const handleCommitNewSubEnd = useCallback(() => {
+    if (!onAddSubtitle || newSubMarkStartRef.current === null) return;
+    const mark = newSubMarkStartRef.current;
+    const cur = getCurrentPlayheadSec();
+    let startTime = Math.min(mark, cur);
+    let endTime = Math.max(mark, cur);
+    if (endTime - startTime < 0.2) {
+      startTime = Math.min(startTime, Math.max(0, totalCutDuration - 0.2));
+      endTime = Math.min(totalCutDuration, Math.max(startTime + 0.2, startTime + 1.5));
+    }
+    setNewSubMarkStartSec(null);
+    onAddSubtitle(
+      {
+        startTime: Number(startTime.toFixed(2)),
+        endTime: Number(endTime.toFixed(2)),
+        thaiPhonetic: "",
+        burmese: "",
+        originalSpokenText: "",
+      },
+      { select: false, seekToStart: false }
+    );
+  }, [onAddSubtitle, getCurrentPlayheadSec, totalCutDuration]);
+
+  const handleCancelNewSubMark = useCallback(() => {
+    setNewSubMarkStartSec(null);
+  }, []);
 
   const canSplitSelectedClip = useMemo(() => {
     if (selectedVideoSegment) {
@@ -1300,9 +1196,10 @@ export function ProjectTimelineEditor({
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target?.isContentEditable) {
         return;
       }
-      if (e.key === "Escape" && showMergeChoice) {
+      if (e.key === "Escape" && (showMergeChoice || newSubMarkStartRef.current !== null)) {
         e.preventDefault();
         setShowMergeChoice(false);
+        setNewSubMarkStartSec(null);
         return;
       }
       if (e.code === "Space") {
@@ -1324,28 +1221,153 @@ export function ProjectTimelineEditor({
     showMergeChoice,
   ]);
 
-  const trackCenterTime = frozenTrackTime ?? liveScrubCutTime ?? cutTime;
+  const tickStepSec = useMemo(() => {
+    if (pxPerSec >= 75) return 1;
+    if (pxPerSec >= 34) return 2;
+    if (pxPerSec >= 15) return 5;
+    if (pxPerSec >= 7.5) return 10;
+    if (pxPerSec >= 4.5) return 15;
+    if (pxPerSec >= 2.2) return 30;
+    if (pxPerSec >= 1.1) return 60;
+    if (pxPerSec >= 0.55) return 120;
+    if (pxPerSec >= 0.25) return 300;
+    if (pxPerSec >= 0.14) return 600;
+    return 900;
+  }, [pxPerSec]);
+
+  const trackCenterTime = frozenTrackTime ?? liveScrubCutRef.current ?? cutTime;
   const centerX = viewportWidth / 2;
   const trackWidth = Math.max(totalCutDuration * pxPerSec, 1);
   const trackTranslateX = centerX - trackCenterTime * pxPerSec;
 
   const timelineTransformConfigRef = useRef({
     centerX,
+    viewportWidth,
     pxPerSec,
+    tickStepSec,
+    totalCutDuration,
     frozen: frozenTrackTime !== null,
   });
   timelineTransformConfigRef.current = {
     centerX,
+    viewportWidth,
     pxPerSec,
+    tickStepSec,
+    totalCutDuration,
     frozen: frozenTrackTime !== null,
   };
 
-  useIsomorphicLayoutEffect(() => {
-    if (timeReadoutRef.current) {
-      const safeCut = typeof cutTime === "number" && Number.isFinite(cutTime) ? Math.max(0, cutTime) : 0;
-      timeReadoutRef.current.textContent = formatTimePrecise(safeCut);
+  const drawRulerAtTime = useCallback((centerSec: number) => {
+    const canvas = rulerCanvasRef.current;
+    if (!canvas) return;
+    const cfg = timelineTransformConfigRef.current;
+    const w = Math.max(1, Math.round(cfg.viewportWidth));
+    const h = 24;
+    const dpr = typeof window !== "undefined" ? Math.min(2, window.devicePixelRatio || 1) : 1;
+    const targetW = Math.round(w * dpr);
+    const targetH = Math.round(h * dpr);
+    if (canvas.width !== targetW || canvas.height !== targetH) {
+      canvas.width = targetW;
+      canvas.height = targetH;
     }
-  }, [cutTime, project?.scenes.length]);
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+
+    const isDark =
+      typeof document !== "undefined" && document.documentElement.classList.contains("dark");
+    const textColor = isDark ? "#919ec4" : "#4d597d";
+    const tickColor = isDark ? "#2f3866" : "#bcc9e6";
+
+    const pps = cfg.pxPerSec;
+    const step = cfg.tickStepSec;
+    const halfSec = cfg.centerX / Math.max(0.05, pps);
+    const minSec = Math.max(0, Math.floor((centerSec - halfSec) / step) * step - step);
+    const maxSec = Math.min(cfg.totalCutDuration + 0.01, centerSec + halfSec + step);
+
+    ctx.font =
+      '10px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace';
+    ctx.textBaseline = "bottom";
+    ctx.textAlign = "left";
+
+    ctx.beginPath();
+    ctx.strokeStyle = tickColor;
+    ctx.lineWidth = 1;
+    ctx.fillStyle = textColor;
+
+    for (let s = minSec; s <= maxSec; s += step) {
+      const x = cfg.centerX + (s - centerSec) * pps;
+      if (x < -48 || x > w + 48) continue;
+      const tickX = Math.round(x) + 0.5;
+      ctx.moveTo(tickX, h - 6);
+      ctx.lineTo(tickX, h);
+      ctx.fillText(formatRulerTick(s), x + 4, h - 7);
+    }
+    ctx.stroke();
+  }, []);
+
+  const applyVisualCutTime = useCallback(
+    (rawSec: number) => {
+      const liveSec =
+        typeof rawSec === "number" && Number.isFinite(rawSec) ? Math.max(0, rawSec) : 0;
+      const cfg = timelineTransformConfigRef.current;
+      const nextX = cfg.centerX - liveSec * cfg.pxPerSec;
+      const transformVal = `translate3d(${nextX}px, 0, 0)`;
+      if (trackSlideRef.current) {
+        trackSlideRef.current.style.transform = transformVal;
+      }
+      drawRulerAtTime(liveSec);
+      if (timeReadoutRef.current) {
+        timeReadoutRef.current.textContent = formatTimePrecise(liveSec);
+      }
+      const markStart = newSubMarkStartRef.current;
+      if (markStart !== null) {
+        const clampedLive = Math.min(cfg.totalCutDuration, liveSec);
+        const lo = Math.min(markStart, clampedLive);
+        const hi = Math.max(markStart, clampedLive);
+        const spanSec = Math.max(0, hi - lo);
+        if (newSubPreviewBarRef.current) {
+          newSubPreviewBarRef.current.style.left = `${lo * cfg.pxPerSec}px`;
+          newSubPreviewBarRef.current.style.width = `${Math.max(4, spanSec * cfg.pxPerSec)}px`;
+        }
+        if (newSubEndDurRef.current) {
+          newSubEndDurRef.current.textContent =
+            spanSec >= 0.2 ? `Set End · ${spanSec.toFixed(1)}s` : "Set End";
+        }
+      }
+    },
+    [drawRulerAtTime]
+  );
+
+  useIsomorphicLayoutEffect(() => {
+    const activeSec = frozenTrackTime ?? liveScrubCutRef.current ?? cutTime;
+    const safeCut = typeof activeSec === "number" && Number.isFinite(activeSec) ? Math.max(0, activeSec) : 0;
+    applyVisualCutTime(safeCut);
+  }, [
+    cutTime,
+    frozenTrackTime,
+    viewportWidth,
+    pxPerSec,
+    tickStepSec,
+    totalCutDuration,
+    isCollapsed,
+    project?.scenes.length,
+    newSubMarkStartSec,
+    applyVisualCutTime,
+  ]);
+
+  // Redraw ruler canvas immediately when light/dark theme toggles
+  useEffect(() => {
+    if (typeof MutationObserver === "undefined" || typeof document === "undefined") return;
+    const obs = new MutationObserver(() => {
+      const activeSec = frozenTrackTimeRef.current ?? liveScrubCutRef.current ?? cutTimeRef.current;
+      drawRulerAtTime(activeSec);
+    });
+    obs.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+    return () => obs.disconnect();
+  }, [drawRulerAtTime]);
 
   useEffect(() => {
     if (!subscribeCutTime) return;
@@ -1354,19 +1376,10 @@ export function ProjectTimelineEditor({
         typeof rawLiveSec === "number" && Number.isFinite(rawLiveSec) ? Math.max(0, rawLiveSec) : 0;
       const cfg = timelineTransformConfigRef.current;
       if (cfg.frozen || dragStateRef.current || liveScrubCutRef.current !== null) return;
-      const nextX = cfg.centerX - liveSec * cfg.pxPerSec;
-      const transformVal = `translate3d(${nextX}px, 0, 0)`;
-      if (rulerSlideRef.current) {
-        rulerSlideRef.current.style.transform = transformVal;
-      }
-      if (trackSlideRef.current) {
-        trackSlideRef.current.style.transform = transformVal;
-      }
-      if (timeReadoutRef.current) {
-        timeReadoutRef.current.textContent = formatTimePrecise(liveSec);
-      }
+      cutTimeRef.current = liveSec;
+      applyVisualCutTime(liveSec);
     });
-  }, [subscribeCutTime]);
+  }, [subscribeCutTime, applyVisualCutTime]);
 
   const resolvedSpeechRegions = useMemo<SpeechRegion[]>(() => {
     if (project?.speechRegions && project.speechRegions.length > 0) {
@@ -1502,27 +1515,7 @@ export function ProjectTimelineEditor({
     [onTranscribeRange, transcribingRange, totalCutDuration, isPlaying, onPause, onSeek]
   );
 
-  const tickStepSec = useMemo(() => {
-    if (pxPerSec >= 75) return 1;
-    if (pxPerSec >= 34) return 2;
-    if (pxPerSec >= 15) return 5;
-    if (pxPerSec >= 7.5) return 10;
-    if (pxPerSec >= 4.5) return 15;
-    if (pxPerSec >= 2.2) return 30;
-    if (pxPerSec >= 1.1) return 60;
-    if (pxPerSec >= 0.55) return 120;
-    if (pxPerSec >= 0.25) return 300;
-    if (pxPerSec >= 0.14) return 600;
-    return 900;
-  }, [pxPerSec]);
 
-  const rulerTicks = useMemo(() => {
-    const ticks: number[] = [];
-    for (let s = 0; s <= totalCutDuration + 0.01; s += tickStepSec) {
-      ticks.push(s);
-    }
-    return ticks;
-  }, [totalCutDuration, tickStepSec]);
 
   const blurFocusedButton = () => {
     const active = document.activeElement as HTMLElement | null;
@@ -1829,11 +1822,11 @@ export function ProjectTimelineEditor({
           return;
         } else {
           activeDrag.axis = "x";
-          // Enter live scroll-controlled preview mode FIRST so the pause dim overlay never flashes
+          activeDrag.wasPlayingBeforeScrub = isPlayingRef.current;
+          isUserScrubbingRef.current = true;
+          // Enter live scroll-controlled preview mode without flipping isPlaying to false
+          // so playback resumes seamlessly upon release if it was playing.
           onScrubbingChangeRef.current?.(true);
-          if (isPlayingRef.current) {
-            onPauseRef.current();
-          }
           // Anchor drag start to exact current playhead position so horizontal scrubbing starts without a jump
           activeDrag.startCutTime = liveScrubCutRef.current ?? cutTimeRef.current;
           activeDrag.scrubAnchorClientX = e.clientX;
@@ -1861,7 +1854,8 @@ export function ProjectTimelineEditor({
         Math.min(totalCutDurationRef.current, activeDrag.startCutTime - dt)
       );
       liveScrubCutRef.current = nextCut;
-      setLiveScrubCutTime(nextCut);
+      cutTimeRef.current = nextCut;
+      applyVisualCutTime(nextCut);
       dispatchSeek(nextCut, false, true);
       return;
     }
@@ -2084,9 +2078,9 @@ export function ProjectTimelineEditor({
       tappedSubRef.current = null;
 
       if (activeDrag.type === "scrub") {
+        isUserScrubbingRef.current = false;
         const finalScrubCut = liveScrubCutRef.current;
         liveScrubCutRef.current = null;
-        setLiveScrubCutTime(null);
 
         if (seekThrottleTimerRef.current !== null) {
           window.clearTimeout(seekThrottleTimerRef.current);
@@ -2095,16 +2089,27 @@ export function ProjectTimelineEditor({
         const pendingQueued = queuedSeekSecRef.current;
         queuedSeekSecRef.current = null;
 
+        const shouldResumePlay = activeDrag.wasPlayingBeforeScrub && isPlayingRef.current;
+        onScrubbingChangeRef.current?.(false);
+
         if (subTapSeekTarget !== null) {
-          dispatchSeek(subTapSeekTarget, true);
+          if (shouldResumePlay) {
+            onPlayFromTimeRef.current(subTapSeekTarget);
+          } else {
+            dispatchSeek(subTapSeekTarget, true);
+          }
         } else if (activeDrag.axis === "x") {
           const targetCut = finalScrubCut ?? pendingQueued ?? cutTimeRef.current;
-          // Stay cleanly at the exact scrolled frame without auto-playing forward
-          dispatchSeek(targetCut, true);
+          if (shouldResumePlay) {
+            // Continue playing smoothly from the released scroll position
+            onPlayFromTimeRef.current(targetCut);
+          } else {
+            // Stay paused cleanly at the exact scrolled frame
+            dispatchSeek(targetCut, true);
+          }
         } else if (pendingQueued !== null) {
           dispatchSeek(pendingQueued, true);
         }
-        onScrubbingChangeRef.current?.(false);
       } else if (
         activeDrag.type === "sub-move" ||
         activeDrag.type === "sub-trim-start" ||
@@ -2209,18 +2214,25 @@ export function ProjectTimelineEditor({
       }
 
       if (activeDrag?.type === "scrub") {
+        isUserScrubbingRef.current = false;
         const finalScrubCut = liveScrubCutRef.current;
         liveScrubCutRef.current = null;
-        setLiveScrubCutTime(null);
         if (seekThrottleTimerRef.current !== null) {
           window.clearTimeout(seekThrottleTimerRef.current);
           seekThrottleTimerRef.current = null;
         }
         queuedSeekSecRef.current = null;
-        if (activeDrag.axis === "x" && finalScrubCut !== null) {
-          dispatchSeek(finalScrubCut, true);
-        }
+        const shouldResumePlay = Boolean(
+          e && activeDrag.axis === "x" && activeDrag.wasPlayingBeforeScrub && isPlayingRef.current
+        );
         onScrubbingChangeRef.current?.(false);
+        if (activeDrag.axis === "x" && finalScrubCut !== null) {
+          if (shouldResumePlay) {
+            onPlayFromTimeRef.current(finalScrubCut);
+          } else {
+            dispatchSeek(finalScrubCut, true);
+          }
+        }
       } else if (
         activeDrag?.type === "sub-move" ||
         activeDrag?.type === "sub-trim-start" ||
@@ -2255,8 +2267,8 @@ export function ProjectTimelineEditor({
   pointerCancelHandlerRef.current = handlePointerCancelAny;
 
   // Two-finger trackpad pinch-to-zoom (ctrlKey + wheel) & horizontal/vertical scroll scrub
-  const wheelStateRef = useRef({ pxPerSec, dispatchSeek, isPlaying, onPause });
-  wheelStateRef.current = { pxPerSec, dispatchSeek, isPlaying, onPause };
+  const wheelStateRef = useRef({ pxPerSec, dispatchSeek, applyVisualCutTime });
+  wheelStateRef.current = { pxPerSec, dispatchSeek, applyVisualCutTime };
   useEffect(() => {
     if (isCollapsed) return;
     const el = viewportRef.current;
@@ -2281,12 +2293,13 @@ export function ProjectTimelineEditor({
       const {
         pxPerSec: pps,
         dispatchSeek: seek,
-        onPause: pause,
+        applyVisualCutTime: paintCutTime,
       } = wheelStateRef.current;
       if (wheelClearTimerRef.current === null) {
+        wheelWasPlayingRef.current = isPlayingRef.current;
+        isUserScrubbingRef.current = true;
         onScrubbingChangeRef.current?.(true);
       }
-      if (isPlayingRef.current) pause();
 
       const now = performance.now();
       const baseCut =
@@ -2296,7 +2309,8 @@ export function ProjectTimelineEditor({
       const next = Math.max(0, Math.min(totalCutDurationRef.current, baseCut + delta / pps));
       wheelTargetCutRef.current = { cutTime: next, expiresAt: now + 260 };
       liveScrubCutRef.current = next;
-      setLiveScrubCutTime(next);
+      cutTimeRef.current = next;
+      paintCutTime(next);
       seek(next, false, true);
 
       if (wheelClearTimerRef.current !== null) {
@@ -2304,14 +2318,19 @@ export function ProjectTimelineEditor({
       }
       wheelClearTimerRef.current = window.setTimeout(() => {
         wheelClearTimerRef.current = null;
-        const finalWheelCut = liveScrubCutRef.current;
+        isUserScrubbingRef.current = false;
+        const shouldResume = wheelWasPlayingRef.current && isPlayingRef.current;
         wheelWasPlayingRef.current = false;
+        const finalWheelCut = liveScrubCutRef.current;
         liveScrubCutRef.current = null;
-        setLiveScrubCutTime(null);
-        if (finalWheelCut !== null) {
-          seek(finalWheelCut, true);
-        }
         onScrubbingChangeRef.current?.(false);
+        if (finalWheelCut !== null) {
+          if (shouldResume) {
+            onPlayFromTimeRef.current(finalWheelCut);
+          } else {
+            seek(finalWheelCut, true);
+          }
+        }
       }, 240);
     };
     const onTouchMove = (e: TouchEvent) => {
@@ -2665,7 +2684,8 @@ export function ProjectTimelineEditor({
         const showFullSubTrack = !isDraft && !hideCaptions;
         const showSubtitleClipsOnly =
           !isDraft && hideCaptions && showSubtitleTrack && activeTimelineProject.subtitles.length > 0;
-        const hasVisibleSubTrack = showFullSubTrack || showSubtitleClipsOnly;
+        const hasVisibleSubTrack =
+          showFullSubTrack || showSubtitleClipsOnly || newSubMarkStartSec !== null;
 
         const hasExistingSubtitles =
           !isDraft && activeTimelineProject.subtitles.length > 0;
@@ -2701,29 +2721,9 @@ export function ProjectTimelineEditor({
           onPointerDown={handlePointerDownViewport}
           className="absolute inset-0 overflow-hidden select-none touch-none [&_*]:touch-none cursor-grab active:cursor-grabbing"
         >
-        {/* Pinned Top Time Ruler Bar (moves horizontally in sync, stays fixed on vertical scroll) */}
+        {/* Pinned Top Time Ruler Bar (O(1) Retina canvas — stays smooth even on multi-hour videos) */}
         <div className="pointer-events-none absolute inset-x-0 top-0 h-6 z-10 overflow-hidden border-b border-[#d2dcf0] dark:border-[#21284c] bg-white/95 dark:bg-[#0d1022]/95">
-          <div
-            ref={rulerSlideRef}
-            style={{
-              width: `${trackWidth}px`,
-              transform: `translate3d(${trackTranslateX}px, 0, 0)`,
-            }}
-            className="relative h-full will-change-transform"
-          >
-            {rulerTicks.map((s) => (
-              <div
-                key={s}
-                style={{ left: `${s * pxPerSec}px` }}
-                className="absolute top-0 bottom-0 flex flex-col justify-end pointer-events-none"
-              >
-                <span className="text-[10px] font-mono-tabular text-[#4d597d] dark:text-[#919ec4] pl-1 leading-none pb-1 whitespace-nowrap">
-                  {formatRulerTick(s)}
-                </span>
-                <div className="w-px h-1.5 bg-[#bcc9e6] dark:bg-[#2f3866]" />
-              </div>
-            ))}
-          </div>
+          <canvas ref={rulerCanvasRef} className="block w-full h-full" />
         </div>
 
         {/* Compact Timeline Zoom Controls pinned to Top-Right of Ruler */}
@@ -3124,6 +3124,32 @@ export function ProjectTimelineEditor({
                 );
               })}
 
+            {/* Live Playhead-Aligned New Subtitle Marking Preview */}
+            {newSubMarkStartSec !== null && (
+              <>
+                <div
+                  ref={newSubPreviewBarRef}
+                  style={{
+                    left: `${newSubMarkStartSec * pxPerSec}px`,
+                    width: "4px",
+                  }}
+                  className="pointer-events-none absolute top-0 h-10 rounded-md border-2 border-dashed border-emerald-600 dark:border-emerald-400 bg-emerald-500/22 dark:bg-emerald-400/20 flex items-center px-2 overflow-hidden z-[25]"
+                >
+                  <span className="text-[10px] font-semibold text-emerald-900 dark:text-emerald-200 truncate">
+                    New Subtitle
+                  </span>
+                </div>
+                <div
+                  style={{ left: `${newSubMarkStartSec * pxPerSec}px` }}
+                  className="pointer-events-none absolute -top-1 bottom-0.5 w-[2px] -translate-x-1/2 bg-emerald-600 dark:bg-emerald-400 z-[26]"
+                >
+                  <span className="absolute -top-0.5 left-1 px-1 py-[1px] rounded text-[9px] font-mono-tabular font-bold leading-none bg-emerald-600 dark:bg-emerald-400 text-white dark:text-[#052e16] shadow-sm whitespace-nowrap">
+                    IN
+                  </span>
+                </div>
+              </>
+            )}
+
             {/* Upper Subtitle Clips Row */}
             {activeTimelineProject.subtitles.map((sub, subIdx) => {
               const preview = dragSubPreview?.id === sub.id ? dragSubPreview : null;
@@ -3145,6 +3171,8 @@ export function ProjectTimelineEditor({
               );
               const isSelected = sub.id === activeSubId;
               const isAtPlayhead = cutTime >= startTime && cutTime <= endTime;
+              const subDisplayText = (sub.burmese || sub.thaiPhonetic || "").trim();
+              const isBlankSub = subDisplayText.length === 0;
 
               return (
                 <div
@@ -3162,7 +3190,7 @@ export function ProjectTimelineEditor({
                       };
                     }
                   }}
-                  title={`#${subIdx + 1} (${formatTimePrecise(startTime)} – ${formatTimePrecise(endTime)}): ${sub.burmese || sub.thaiPhonetic}`}
+                  title={`#${subIdx + 1} (${formatTimePrecise(startTime)} – ${formatTimePrecise(endTime)}): ${subDisplayText || "Empty subtitle"}`}
                   className={`absolute top-0 h-10 transition-shadow ${
                     preview
                       ? "z-30 shadow-lg cursor-grabbing touch-none"
@@ -3177,9 +3205,13 @@ export function ProjectTimelineEditor({
                     } flex items-center overflow-hidden ${
                       isSelected
                         ? "rounded-none bg-[#1c3db8] dark:bg-[#264cd6] text-white"
-                        : isAtPlayhead
-                          ? "rounded-md bg-[#e6ecfc] dark:bg-[#101c45] text-[#142d87] dark:text-[#a8c3fa] ring-1 ring-inset ring-[#264cd6]/70 dark:ring-[#4e7ef7]/60"
-                          : "rounded-md bg-white/95 dark:bg-[#141933]/95 text-[#0c1026] dark:text-[#f3f5fc] ring-1 ring-inset ring-[#bcc9e6] dark:ring-[#2f3866] hover:ring-[#264cd6]/60"
+                        : isBlankSub
+                          ? isAtPlayhead
+                            ? "rounded-md border border-dashed border-[#264cd6]/80 dark:border-[#4e7ef7]/80 bg-[#e6ecfc]/85 dark:bg-[#101c45]/85 text-[#142d87] dark:text-[#a8c3fa]"
+                            : "rounded-md border border-dashed border-[#96a9d6] dark:border-[#3e4b85] bg-white/80 dark:bg-[#141933]/80 text-[#4d597d] dark:text-[#919ec4] hover:border-[#264cd6]/70"
+                          : isAtPlayhead
+                            ? "rounded-md bg-[#e6ecfc] dark:bg-[#101c45] text-[#142d87] dark:text-[#a8c3fa] ring-1 ring-inset ring-[#264cd6]/70 dark:ring-[#4e7ef7]/60"
+                            : "rounded-md bg-white/95 dark:bg-[#141933]/95 text-[#0c1026] dark:text-[#f3f5fc] ring-1 ring-inset ring-[#bcc9e6] dark:ring-[#2f3866] hover:ring-[#264cd6]/60"
                     }`}
                   >
                     {widthPx >= 14 && (
@@ -3194,8 +3226,12 @@ export function ProjectTimelineEditor({
                           S{subIdx + 1}
                         </span>
                         {widthPx >= 36 && (
-                          <span className="text-[11px] font-medium truncate">
-                            {sub.burmese || sub.thaiPhonetic}
+                          <span
+                            className={`text-[11px] font-medium truncate ${
+                              isBlankSub ? "italic opacity-65" : ""
+                            }`}
+                          >
+                            {subDisplayText || "Empty"}
                           </span>
                         )}
                       </div>
@@ -3763,8 +3799,76 @@ export function ProjectTimelineEditor({
                 <span className="text-[10px] font-medium leading-none">Delete</span>
               </button>
             </>
+          ) : newSubMarkStartSec !== null ? (
+            <>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  handleMarkNewSubStart();
+                }}
+                title="Re-mark start time at current playhead"
+                aria-label="Re-mark subtitle start time at current playhead"
+                className="min-w-[78px] h-11 px-3 rounded-xl border border-emerald-600/45 dark:border-emerald-400/45 bg-white/92 dark:bg-[#0d1126]/92 backdrop-blur-md shadow-[0_4px_14px_rgba(10,16,40,0.12)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.45)] flex flex-col items-center justify-center gap-1 shrink-0 whitespace-nowrap text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50/95 dark:hover:bg-[#0f2924] active:scale-95 cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-emerald-500"
+              >
+                <Flag className="w-[15px] h-[15px] shrink-0" />
+                <span className="text-[10px] font-mono-tabular font-semibold leading-none">
+                  Start {formatTimePrecise(newSubMarkStartSec)}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  handleCommitNewSubEnd();
+                }}
+                title="Set end time at current playhead and add empty subtitle"
+                aria-label="Set subtitle end time at current playhead"
+                className="min-w-[96px] h-11 px-4 rounded-xl border border-emerald-600 dark:border-emerald-400 bg-emerald-600 hover:bg-emerald-700 dark:bg-emerald-500 dark:hover:bg-emerald-400 text-white dark:text-[#052e16] backdrop-blur-md shadow-[0_4px_14px_rgba(16,185,129,0.28)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.45)] flex flex-col items-center justify-center gap-1 shrink-0 whitespace-nowrap active:scale-95 cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-emerald-400"
+              >
+                <Check className="w-[17px] h-[17px] shrink-0" />
+                <span
+                  ref={newSubEndDurRef}
+                  className="text-[10px] font-mono-tabular font-semibold leading-none"
+                >
+                  Set End
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  handleCancelNewSubMark();
+                }}
+                title="Cancel adding subtitle"
+                aria-label="Cancel adding subtitle"
+                className="min-w-[64px] h-11 px-3 rounded-xl border border-[#c6d2ec]/90 dark:border-[#2a3466]/90 bg-white/92 dark:bg-[#0d1126]/92 backdrop-blur-md shadow-[0_4px_14px_rgba(10,16,40,0.12)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.45)] flex flex-col items-center justify-center gap-1 shrink-0 whitespace-nowrap text-[#4d597d] dark:text-[#919ec4] hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50/95 dark:hover:bg-[#2a1424] hover:border-red-400/60 dark:hover:border-red-500/60 active:scale-95 cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-teal-500"
+              >
+                <X className="w-[16px] h-[16px] shrink-0" />
+                <span className="text-[10px] font-medium leading-none">Cancel</span>
+              </button>
+            </>
           ) : (
             <>
+              {onAddSubtitle && (
+                <button
+                  type="button"
+                  disabled={segments.length === 0}
+                  onClick={(e) => {
+                    e.currentTarget.blur();
+                    handleMarkNewSubStart();
+                  }}
+                  title="Mark start at playhead to add an empty subtitle"
+                  aria-label="Add subtitle at playhead"
+                  className="min-w-[76px] h-11 px-3.5 rounded-xl border border-emerald-600/45 dark:border-emerald-400/45 bg-white/92 dark:bg-[#0d1126]/92 backdrop-blur-md shadow-[0_4px_14px_rgba(10,16,40,0.12)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.45)] flex flex-col items-center justify-center gap-1 shrink-0 whitespace-nowrap text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50/95 dark:hover:bg-[#0f2924] hover:border-emerald-600/70 dark:hover:border-emerald-400/70 active:scale-95 disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-emerald-500"
+                >
+                  <Plus className="w-[17px] h-[17px] shrink-0" />
+                  <span className="text-[10px] font-semibold leading-none">Add Subtitle</span>
+                </button>
+              )}
+
               {onGenerateSubtitles && (
                 <button
                   type="button"

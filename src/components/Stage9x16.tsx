@@ -81,7 +81,7 @@ interface Stage9x16Props {
   editSettings: VideoEditSettings;
   onTogglePlay: () => void;
   onPlayingChange: (playing: boolean) => void;
-  onSeek: (timeSec: number) => void;
+  onSeek: (timeSec: number, opts?: { live?: boolean }) => void;
   onTimeUpdate: (newCutTime: number) => void;
   onEnded: () => void;
   onToggleMute: () => void;
@@ -261,7 +261,15 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
         playerRef.current?.pause();
       },
       setScrubbing: (active: boolean) => {
+        isScrubbingStageRef.current = active;
         playerRef.current?.setScrubbing(active);
+        if (!active && getLiveCutTime) {
+          const live = getLiveCutTime();
+          if (Number.isFinite(live)) {
+            lastSubClockSyncAtRef.current = performance.now();
+            setSubClockTime(Math.max(0, live));
+          }
+        }
       },
       seekCutTime: (cutSec: number, opts?: { force?: boolean }) => {
         playerRef.current?.seekCutTime(cutSec, opts);
@@ -277,7 +285,7 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
         playerRef.current?.previewSourceTime(sourceSec, opts);
       },
     }),
-    [activeProject?.localUrl]
+    [activeProject?.localUrl, getLiveCutTime]
   );
 
   useEffect(() => {
@@ -368,6 +376,13 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
   const [subClockTime, setSubClockTime] = useState<number>(safeCutTime);
   const wordKeyRef = useRef<string>("");
   const lastDisplaySecRef = useRef<number>(-1);
+  const isScrubbingStageRef = useRef<boolean>(false);
+  const lastSubClockSyncAtRef = useRef<number>(0);
+  const rangeScrubRef = useRef<{ active: boolean; wasPlaying: boolean; lastSec: number | null }>({
+    active: false,
+    wasPlaying: false,
+    lastSec: null,
+  });
   const subtitlesRef = useRef(subtitles);
   subtitlesRef.current = subtitles;
   const isPlayingRef = useRef(isPlaying);
@@ -463,14 +478,21 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
         }
       }
 
-      const hl = isPlayingRef.current
-        ? Math.min(totDur, liveSec + leadSecRef.current)
-        : liveSec;
-      const nextSub = findActiveSubtitle(subtitlesRef.current, hl);
-      const nextKey = getActiveWordHighlightKey(nextSub, hl);
-      if (nextKey !== wordKeyRef.current) {
-        wordKeyRef.current = nextKey;
-        setSubClockTime(liveSec);
+      if (subtitlesRef.current.length > 0) {
+        const now = performance.now();
+        if (!isScrubbingStageRef.current || now - lastSubClockSyncAtRef.current >= 120) {
+          const hl =
+            isPlayingRef.current && !isScrubbingStageRef.current
+              ? Math.min(totDur, liveSec + leadSecRef.current)
+              : liveSec;
+          const nextSub = findActiveSubtitle(subtitlesRef.current, hl);
+          const nextKey = getActiveWordHighlightKey(nextSub, hl);
+          if (nextKey !== wordKeyRef.current) {
+            wordKeyRef.current = nextKey;
+            lastSubClockSyncAtRef.current = now;
+            setSubClockTime(liveSec);
+          }
+        }
       }
     });
   }, [subscribeCutTime]);
@@ -497,7 +519,7 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
     try {
       container.scrollTo({
         top: targetTop,
-        behavior: "smooth",
+        behavior: isScrubbingStageRef.current ? "auto" : "smooth",
       });
     } catch {
       // ignore unsupported smooth scroll
@@ -1031,7 +1053,13 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
             </div>
 
             {/* Lower-Third Cinematic Subtitle Overlay (Scaled 1:1 with Logical Export Canvas) */}
-            {useOverlaySubtitleLayout && activeSub && (() => {
+            {useOverlaySubtitleLayout &&
+              activeSub &&
+              (activeSub.words.length > 0 ||
+                Boolean(activeSub.thaiPhonetic?.trim()) ||
+                Boolean(activeSub.thaiScript?.trim()) ||
+                Boolean(activeSub.burmese?.trim())) &&
+              (() => {
               const fontMultiplier = resolveSubtitleFontMultiplier(editSettings);
               const fontStack = resolveSubtitleFontStack(editSettings.subtitleFontFamily);
               const theme = editSettings.subtitleTheme || "auto";
@@ -2072,9 +2100,53 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
               max={totalDuration}
               step={0.1}
               defaultValue={initialStageCutTime}
+              onPointerDown={() => {
+                rangeScrubRef.current = {
+                  active: true,
+                  wasPlaying: isPlayingRef.current,
+                  lastSec: null,
+                };
+                isScrubbingStageRef.current = true;
+                playerRef.current?.setScrubbing(true);
+              }}
               onChange={(e) => {
                 const next = parseFloat(e.target.value);
-                if (Number.isFinite(next)) onSeek(next);
+                if (!Number.isFinite(next)) return;
+                if (rangeScrubRef.current.active) {
+                  rangeScrubRef.current.lastSec = next;
+                  onSeek(next, { live: true });
+                } else {
+                  onSeek(next);
+                }
+              }}
+              onPointerUp={() => {
+                if (!rangeScrubRef.current.active) return;
+                const { wasPlaying, lastSec } = rangeScrubRef.current;
+                rangeScrubRef.current = { active: false, wasPlaying: false, lastSec: null };
+                isScrubbingStageRef.current = false;
+                playerRef.current?.setScrubbing(false);
+                const parsed = scrubberInputRef.current
+                  ? parseFloat(scrubberInputRef.current.value)
+                  : NaN;
+                const targetSec =
+                  lastSec ?? (Number.isFinite(parsed) ? parsed : getLiveCutTime ? getLiveCutTime() : safeCutTime);
+                onSeek(targetSec);
+                if (wasPlaying && isPlayingRef.current) {
+                  playerRef.current?.play();
+                }
+              }}
+              onPointerCancel={() => {
+                if (!rangeScrubRef.current.active) return;
+                const { wasPlaying, lastSec } = rangeScrubRef.current;
+                rangeScrubRef.current = { active: false, wasPlaying: false, lastSec: null };
+                isScrubbingStageRef.current = false;
+                playerRef.current?.setScrubbing(false);
+                if (lastSec !== null) {
+                  onSeek(lastSec);
+                }
+                if (wasPlaying && isPlayingRef.current) {
+                  playerRef.current?.play();
+                }
               }}
               aria-label="Timeline scrubber"
               className="w-full h-1.5 rounded-full appearance-none bg-[#d2dcf0] dark:bg-[#21284c] cursor-pointer"

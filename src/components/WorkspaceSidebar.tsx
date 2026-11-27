@@ -173,13 +173,16 @@ interface WorkspaceSidebarProps {
     field: "all" | "burmese" | "thaiPhonetic" | "thaiScript";
     caseSensitive?: boolean;
   }) => number;
-  onAddSubtitle: (input: {
-    startTime: number;
-    endTime: number;
-    thaiPhonetic: string;
-    burmese: string;
-    originalSpokenText?: string;
-  }) => void;
+  onAddSubtitle: (
+    input: {
+      startTime: number;
+      endTime: number;
+      thaiPhonetic: string;
+      burmese: string;
+      originalSpokenText?: string;
+    },
+    opts?: { select?: boolean; seekToStart?: boolean }
+  ) => void;
   onDeleteSubtitle: (id: string) => void;
   onUpdateSubtitleTiming: (id: string, startTime: number, endTime: number) => void;
   onSplitSubtitle: (id: string) => void;
@@ -640,10 +643,42 @@ export function WorkspaceSidebar({
 
   useEffect(() => {
     if (!subscribeCutTime) return;
-    return subscribeCutTime((sec) => {
-      const nextId = findActiveSubtitle(projectSubtitlesRef.current, sec)?.id ?? null;
+    let lastUpdateAt = 0;
+    let trailingTimer: number | null = null;
+    let latestSec = 0;
+
+    const syncId = (sec: number) => {
+      const subs = projectSubtitlesRef.current;
+      if (subs.length === 0) return;
+      const nextId = findActiveSubtitle(subs, sec)?.id ?? null;
       setLivePlayingSubId((cur) => (cur === nextId ? cur : nextId));
+    };
+
+    const unsubscribe = subscribeCutTime((sec) => {
+      latestSec = sec;
+      const now = performance.now();
+      if (now - lastUpdateAt >= 120) {
+        lastUpdateAt = now;
+        if (trailingTimer !== null) {
+          window.clearTimeout(trailingTimer);
+          trailingTimer = null;
+        }
+        syncId(sec);
+      } else if (trailingTimer === null) {
+        trailingTimer = window.setTimeout(() => {
+          trailingTimer = null;
+          lastUpdateAt = performance.now();
+          syncId(latestSec);
+        }, Math.max(16, 120 - (now - lastUpdateAt)));
+      }
     });
+
+    return () => {
+      unsubscribe();
+      if (trailingTimer !== null) {
+        window.clearTimeout(trailingTimer);
+      }
+    };
   }, [subscribeCutTime]);
 
   useEffect(() => {
@@ -1785,6 +1820,7 @@ export function WorkspaceSidebar({
                         onPlayFromTime={onPlayFromTime}
                         onUpdateScenes={onUpdateProjectScenes}
                         onUpdateSubtitleTiming={onUpdateSubtitleTiming}
+                        onAddSubtitle={onAddSubtitle}
                         onShiftAllSubtitles={onShiftAllSubtitles}
                         onUndo={onUndoProp ?? onUndoSubtitles}
                         onRedo={onRedoProp ?? onRedoSubtitles}
@@ -2345,6 +2381,7 @@ export function WorkspaceSidebar({
                         onPlayFromTime={onPlayFromTime}
                         onUpdateScenes={onUpdateProjectScenes}
                         onUpdateSubtitleTiming={onUpdateSubtitleTiming}
+                        onAddSubtitle={onAddSubtitle}
                         onEditSubtitle={onEditSubtitle}
                         onDeleteSubtitle={onDeleteSubtitle}
                         onSplitSubtitle={onSplitSubtitle}
@@ -4265,6 +4302,7 @@ export function WorkspaceSidebar({
                 onPlayFromTime={onPlayFromTime}
                 onUpdateScenes={onUpdateProjectScenes}
                 onUpdateSubtitleTiming={onUpdateSubtitleTiming}
+                onAddSubtitle={onAddSubtitle}
                 onEditSubtitle={onEditSubtitle}
                 onDeleteSubtitle={onDeleteSubtitle}
                 onSplitSubtitle={onSplitSubtitle}

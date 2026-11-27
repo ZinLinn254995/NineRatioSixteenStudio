@@ -12,6 +12,7 @@ import type { SpeakingScene, VideoEditSettings, VoiceSettings } from "../types";
 import { applyVoiceEffectsToVideoElement, resumeAllVoiceContexts } from "../utils/webAudioVoice";
 import { getEffectivePlaybackSpeed } from "../utils/voicePresets";
 import { buildCssFilterString, buildCssTransformString } from "../utils/videoFilters";
+import { capturePassiveThumbFromVideo } from "../utils/timelineThumbBus";
 import { AdversarialNoiseOverlay } from "./AdversarialNoiseOverlay";
 
 export function getSceneCutStart(scenes: SpeakingScene[], sceneIndex: number): number {
@@ -117,20 +118,27 @@ export const ScenePlayer = memo(
     ref
   ) {
     const localVideoRef = useRef<HTMLVideoElement | null>(null);
+    const scrubCanvasRef = useRef<HTMLCanvasElement | null>(null);
     const activeSceneIdxRef = useRef<number>(0);
     const pendingLocalSeekRef = useRef<number | null>(null);
     const pendingLocalPlayRef = useRef<boolean>(false);
     const reloadAttemptedRef = useRef<boolean>(false);
+    const freezeRecoveryStageRef = useRef<number>(0);
+    const freezeWatchTimerRef = useRef<number | null>(null);
+    const freezeWatchVfcIdRef = useRef<number | null>(null);
+    const canPlayWaitTimerRef = useRef<number | null>(null);
     const voiceAttachedRef = useRef<boolean>(false);
     const autoMutedFallbackRef = useRef<boolean>(false);
     const lastSeekFixAtRef = useRef<number>(0);
     const lastLocalSeekIssuedAtRef = useRef<number>(0);
+    const lastSeekDurationMsRef = useRef<number>(0);
     const seekSettleUntilRef = useRef<number>(0);
     const playAttemptPendingRef = useRef<boolean>(false);
     const sourcePreviewOverrideRef = useRef<number | null>(null);
     const pendingPreviewSeekRef = useRef<number | null>(null);
     const previewSeekRafRef = useRef<number | null>(null);
     const isScrubbingRef = useRef<boolean>(false);
+    const waitingForScrubPaintRef = useRef<boolean>(false);
     const scrubFlushRafRef = useRef<number | null>(null);
     const scrubFlushTimerRef = useRef<number | null>(null);
 
@@ -198,8 +206,197 @@ export const ScenePlayer = memo(
     onTimeUpdateRef.current = onTimeUpdate;
     const onPlayingChangeRef = useRef(onPlayingChange);
     onPlayingChangeRef.current = onPlayingChange;
+    const localUrlRef = useRef(localUrl);
+    localUrlRef.current = localUrl;
     const onEndedRef = useRef(onEnded);
     onEndedRef.current = onEnded;
+
+    const hideScrubCanvas = useCallback(() => {
+      const canvas = scrubCanvasRef.current;
+      if (canvas) {
+        canvas.style.opacity = "0";
+        canvas.style.display = "none";
+      }
+    }, []);
+
+    const paintScrubCanvasFrame = useCallback((vid: HTMLVideoElement, showCanvas: boolean) => {
+      const canvas = scrubCanvasRef.current;
+      if (!canvas) return;
+      if (!showCanvas) {
+        canvas.style.opacity = "0";
+        canvas.style.display = "none";
+        return;
+      }
+      if (vid.readyState < 2 || vid.videoWidth <= 0 || vid.videoHeight <= 0) return;
+      const vw = vid.videoWidth;
+      const vh = vid.videoHeight;
+      const maxEdge = 540;
+      const scale = Math.min(1, maxEdge / Math.max(vw, vh));
+      const tw = Math.max(2, Math.round(vw * scale));
+      const th = Math.max(2, Math.round(vh * scale));
+      if (canvas.width !== tw || canvas.height !== th) {
+        canvas.width = tw;
+        canvas.height = th;
+      }
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      try {
+        ctx.drawImage(vid, 0, 0, tw, th);
+        canvas.style.display = "block";
+        canvas.style.opacity = "1";
+      } catch {
+        // ignore transient frame read errors
+      }
+    }, []);
+
+    const clearCanPlayWaitTimer = useCallback(() => {
+      if (canPlayWaitTimerRef.current !== null) {
+        window.clearTimeout(canPlayWaitTimerRef.current);
+        canPlayWaitTimerRef.current = null;
+      }
+    }, []);
+
+    const stopPlaybackFreezeWatchdog = useCallback(() => {
+      if (freezeWatchTimerRef.current !== null) {
+        window.clearTimeout(freezeWatchTimerRef.current);
+        freezeWatchTimerRef.current = null;
+      }
+      const vid = localVideoRef.current as
+        | (HTMLVideoElement & { cancelVideoFrameCallback?: (id: number) => void })
+        | null;
+      if (freezeWatchVfcIdRef.current !== null && vid?.cancelVideoFrameCallback) {
+        try {
+          vid.cancelVideoFrameCallback(freezeWatchVfcIdRef.current);
+        } catch {
+          // ignore
+        }
+      }
+      freezeWatchVfcIdRef.current = null;
+    }, []);
+
+    const startPlaybackFreezeWatchdog = useCallback(
+      (vid: HTMLVideoElement, startMediaSec: number) => {
+        stopPlaybackFreezeWatchdog();
+        if (freezeRecoveryStageRef.current >= 2) return;
+
+        type VfcMeta = { mediaTime?: number; presentedFrames?: number };
+        const vidExt = vid as HTMLVideoElement & {
+          requestVideoFrameCallback?: (cb: (now: number, meta?: VfcMeta) => void) => number;
+          getVideoPlaybackQuality?: () => { totalVideoFrames?: number };
+        };
+        const hasVfc = typeof vidExt.requestVideoFrameCallback === "function";
+        const initialTotalFrames =
+          typeof vidExt.getVideoPlaybackQuality === "function"
+            ? (vidExt.getVideoPlaybackQuality()?.totalVideoFrames ?? 0)
+            : null;
+        if (!hasVfc && initialTotalFrames === null) return;
+
+        let distinctFrames = 0;
+        let lastPresentedMediaTime = -1;
+
+        if (hasVfc) {
+          const onFrame = (_now: number, meta?: VfcMeta) => {
+            freezeWatchVfcIdRef.current = null;
+            const mt =
+              meta && typeof meta.mediaTime === "number" && Number.isFinite(meta.mediaTime)
+                ? meta.mediaTime
+                : null;
+            if (mt !== null) {
+              if (lastPresentedMediaTime < 0 || Math.abs(mt - lastPresentedMediaTime) > 0.008) {
+                distinctFrames++;
+                lastPresentedMediaTime = mt;
+              }
+            } else {
+              distinctFrames++;
+            }
+
+            const lag =
+              lastPresentedMediaTime >= 0 ? Math.abs(vid.currentTime - lastPresentedMediaTime) : 0;
+            if (distinctFrames >= 3 && lag < 0.35) {
+              freezeRecoveryStageRef.current = 0;
+              stopPlaybackFreezeWatchdog();
+              return;
+            }
+            if (!vid.paused && isPlayingRef.current && !isScrubbingRef.current) {
+              try {
+                freezeWatchVfcIdRef.current = vidExt.requestVideoFrameCallback!(onFrame);
+              } catch {
+                freezeWatchVfcIdRef.current = null;
+              }
+            }
+          };
+          try {
+            freezeWatchVfcIdRef.current = vidExt.requestVideoFrameCallback!(onFrame);
+          } catch {
+            freezeWatchVfcIdRef.current = null;
+          }
+        }
+
+        freezeWatchTimerRef.current = window.setTimeout(() => {
+          freezeWatchTimerRef.current = null;
+          const curVid = localVideoRef.current;
+          if (
+            !curVid ||
+            curVid.paused ||
+            curVid.seeking ||
+            !isPlayingRef.current ||
+            isScrubbingRef.current ||
+            freezeRecoveryStageRef.current >= 2
+          ) {
+            stopPlaybackFreezeWatchdog();
+            return;
+          }
+
+          const currentFramesDelta =
+            initialTotalFrames !== null && typeof vidExt.getVideoPlaybackQuality === "function"
+              ? (vidExt.getVideoPlaybackQuality()?.totalVideoFrames ?? initialTotalFrames) -
+                initialTotalFrames
+              : 0;
+          const framesRendered = hasVfc ? distinctFrames : currentFramesDelta;
+          const advancedSec = curVid.currentTime - startMediaSec;
+          const mediaTimeLag =
+            lastPresentedMediaTime >= 0 ? curVid.currentTime - lastPresentedMediaTime : 0;
+
+          // Audio/clock advanced >= 0.35s while preview video frame stayed frozen
+          const isFrozen =
+            advancedSec >= 0.35 && (framesRendered < 2 || mediaTimeLag >= 0.45);
+
+          if (isFrozen) {
+            const stage = freezeRecoveryStageRef.current;
+            freezeRecoveryStageRef.current = stage + 1;
+            stopPlaybackFreezeWatchdog();
+            const recoverTarget = startMediaSec < 0.15 ? 0 : startMediaSec;
+            pendingLocalPlayRef.current = true;
+            playAttemptPendingRef.current = false;
+            lastLocalSeekIssuedAtRef.current = performance.now();
+            seekSettleUntilRef.current = performance.now() + 1200;
+
+            if (stage === 0) {
+              // Stage 1: Clean pause + exact keyframe/target seek, then wait for seeked before play
+              try {
+                curVid.pause();
+                curVid.currentTime = recoverTarget;
+              } catch {
+                // ignore
+              }
+            } else {
+              // Stage 2: Full MediaCodec pipeline reset via load() and resume from target
+              pendingLocalSeekRef.current = recoverTarget;
+              try {
+                curVid.pause();
+                curVid.load();
+              } catch {
+                // ignore
+              }
+            }
+          } else {
+            freezeRecoveryStageRef.current = 0;
+            stopPlaybackFreezeWatchdog();
+          }
+        }, 520);
+      },
+      [stopPlaybackFreezeWatchdog]
+    );
 
     const cancelPreviewSeekRaf = useCallback(() => {
       if (previewSeekRafRef.current !== null) {
@@ -209,6 +406,7 @@ export const ScenePlayer = memo(
     }, []);
 
     const cancelScrubFlush = useCallback(() => {
+      waitingForScrubPaintRef.current = false;
       if (scrubFlushRafRef.current !== null) {
         cancelAnimationFrame(scrubFlushRafRef.current);
         scrubFlushRafRef.current = null;
@@ -218,6 +416,48 @@ export const ScenePlayer = memo(
         scrubFlushTimerRef.current = null;
       }
     }, []);
+
+    const issueVideoSeek = useCallback((vid: HTMLVideoElement, targetSec: number) => {
+      const now = performance.now();
+      lastLocalSeekIssuedAtRef.current = now;
+      seekSettleUntilRef.current = now + 650;
+      try {
+        vid.currentTime = targetSec;
+      } catch {
+        // ignore invalid media seek state
+      }
+    }, []);
+
+    const scheduleScrubPaintThenFlush = useCallback(
+      (_vid: HTMLVideoElement, onReady: (v: HTMLVideoElement) => void) => {
+        cancelScrubFlush();
+        waitingForScrubPaintRef.current = true;
+        let settled = false;
+
+        const finishPaint = () => {
+          if (settled) return;
+          settled = true;
+          cancelScrubFlush();
+          const curVid = localVideoRef.current;
+          if (curVid) {
+            onReady(curVid);
+          }
+        };
+
+        // Safety cap in case rAF is throttled
+        scrubFlushTimerRef.current = window.setTimeout(finishPaint, 50);
+
+        // Wait two animation frames after seeked so the newly decoded video frame commits to the screen
+        // before issuing the next queued scrub seek (reliable on paused <video> across mobile & desktop)
+        scrubFlushRafRef.current = requestAnimationFrame(() => {
+          scrubFlushRafRef.current = requestAnimationFrame(() => {
+            scrubFlushRafRef.current = null;
+            finishPaint();
+          });
+        });
+      },
+      [cancelScrubFlush]
+    );
 
     const flushLocalPreviewSeek = useCallback((vid: HTMLVideoElement) => {
       const target = pendingPreviewSeekRef.current;
@@ -244,10 +484,16 @@ export const ScenePlayer = memo(
       pendingLocalPlayRef.current = false;
       playAttemptPendingRef.current = false;
       reloadAttemptedRef.current = false;
+      freezeRecoveryStageRef.current = 0;
       sourcePreviewOverrideRef.current = null;
       pendingPreviewSeekRef.current = null;
       isScrubbingRef.current = false;
+      waitingForScrubPaintRef.current = false;
+      lastSeekDurationMsRef.current = 0;
       setIsScrubbing(false);
+      hideScrubCanvas();
+      clearCanPlayWaitTimer();
+      stopPlaybackFreezeWatchdog();
       cancelPreviewSeekRaf();
       cancelScrubFlush();
       setAutoMutedFallback(false);
@@ -256,10 +502,21 @@ export const ScenePlayer = memo(
         sourcePreviewOverrideRef.current = null;
         pendingPreviewSeekRef.current = null;
         isScrubbingRef.current = false;
+        waitingForScrubPaintRef.current = false;
+        hideScrubCanvas();
+        clearCanPlayWaitTimer();
+        stopPlaybackFreezeWatchdog();
         cancelPreviewSeekRaf();
         cancelScrubFlush();
       };
-    }, [localUrl, cancelPreviewSeekRaf, cancelScrubFlush]);
+    }, [
+      localUrl,
+      cancelPreviewSeekRaf,
+      cancelScrubFlush,
+      clearCanPlayWaitTimer,
+      hideScrubCanvas,
+      stopPlaybackFreezeWatchdog,
+    ]);
 
     useEffect(() => {
       autoMutedFallbackRef.current = false;
@@ -272,6 +529,9 @@ export const ScenePlayer = memo(
       pendingPreviewSeekRef.current = null;
       isScrubbingRef.current = false;
       setIsScrubbing(false);
+      hideScrubCanvas();
+      clearCanPlayWaitTimer();
+      stopPlaybackFreezeWatchdog();
       cancelPreviewSeekRaf();
       cancelScrubFlush();
       const vid = localVideoRef.current;
@@ -332,26 +592,6 @@ export const ScenePlayer = memo(
         return;
       }
 
-      if (vid.readyState >= 1) {
-        const actualDur =
-          Number.isFinite(vid.duration) && vid.duration > 0 ? vid.duration : sourceSec + 10;
-        const clamped = Math.max(0, Math.min(Math.max(0, actualDur - 0.05), sourceSec));
-        if (Math.abs(vid.currentTime - clamped) > 0.08 || vid.seeking) {
-          lastLocalSeekIssuedAtRef.current = performance.now();
-          seekSettleUntilRef.current = performance.now() + 650;
-          try {
-            vid.currentTime = clamped;
-          } catch {
-            // ignore invalid media seek state
-          }
-        } else {
-          seekSettleUntilRef.current = 0;
-        }
-        pendingLocalSeekRef.current = null;
-      } else {
-        pendingLocalSeekRef.current = sourceSec;
-      }
-
       try {
         if (vid.muted !== mutedRef.current) {
           vid.muted = mutedRef.current;
@@ -364,6 +604,43 @@ export const ScenePlayer = memo(
         voiceSettingsRef.current.speed
       );
       applySafePlaybackRate(vid, targetRate);
+
+      let needsSeekWait = false;
+      if (vid.readyState >= 1) {
+        const actualDur =
+          Number.isFinite(vid.duration) && vid.duration > 0 ? vid.duration : sourceSec + 10;
+        const clamped = Math.max(0, Math.min(Math.max(0, actualDur - 0.05), sourceSec));
+        if (Math.abs(vid.currentTime - clamped) > 0.04) {
+          needsSeekWait = true;
+          lastLocalSeekIssuedAtRef.current = performance.now();
+          seekSettleUntilRef.current = performance.now() + 900;
+          try {
+            if (!vid.paused) vid.pause();
+            vid.currentTime = clamped;
+          } catch {
+            // ignore invalid media seek state
+          }
+        } else {
+          seekSettleUntilRef.current = 0;
+          if (vid.seeking) {
+            needsSeekWait = true;
+          }
+        }
+        pendingLocalSeekRef.current = null;
+      } else {
+        pendingLocalSeekRef.current = sourceSec;
+        needsSeekWait = true;
+      }
+
+      // On Android Chrome, calling play() synchronously while a seek is in flight causes
+      // audio to start before MediaCodec finishes decoding the target frame, dropping video
+      // until the next keyframe (up to 8s). Wait for seeked/canplay before starting playback.
+      if (needsSeekWait) {
+        pendingLocalPlayRef.current = true;
+        playAttemptPendingRef.current = false;
+        onPlayingChangeRef.current(true);
+        return;
+      }
 
       pendingLocalPlayRef.current = true;
       playAttemptPendingRef.current = true;
@@ -380,6 +657,9 @@ export const ScenePlayer = memo(
             playAttemptPendingRef.current = false;
             pendingLocalPlayRef.current = false;
             onPlayingChangeRef.current(!vid.paused);
+            if (!vid.paused) {
+              startPlaybackFreezeWatchdog(vid, vid.currentTime);
+            }
           })
           .catch((err: unknown) => {
             playAttemptPendingRef.current = false;
@@ -412,6 +692,9 @@ export const ScenePlayer = memo(
                   playAttemptPendingRef.current = false;
                   pendingLocalPlayRef.current = false;
                   onPlayingChangeRef.current(!vid.paused);
+                  if (!vid.paused) {
+                    startPlaybackFreezeWatchdog(vid, vid.currentTime);
+                  }
                 })
                 .catch((err2: unknown) => {
                   playAttemptPendingRef.current = false;
@@ -436,8 +719,19 @@ export const ScenePlayer = memo(
         playAttemptPendingRef.current = false;
         pendingLocalPlayRef.current = false;
         onPlayingChangeRef.current(!vid.paused);
+        if (!vid.paused) {
+          startPlaybackFreezeWatchdog(vid, vid.currentTime);
+        }
       }
-    }, [cancelPreviewSeekRaf, cancelScrubFlush, readCurrentCutTime]);
+    }, [
+      cancelPreviewSeekRaf,
+      cancelScrubFlush,
+      clearCanPlayWaitTimer,
+      hideScrubCanvas,
+      readCurrentCutTime,
+      startPlaybackFreezeWatchdog,
+      stopPlaybackFreezeWatchdog,
+    ]);
 
     const pauseLocalPlayback = useCallback(() => {
       isPlayingRef.current = false;
@@ -445,6 +739,8 @@ export const ScenePlayer = memo(
       pendingLocalPlayRef.current = false;
       autoMutedFallbackRef.current = false;
       setAutoMutedFallback(false);
+      clearCanPlayWaitTimer();
+      stopPlaybackFreezeWatchdog();
       const vid = localVideoRef.current;
       if (vid && !vid.paused) {
         try {
@@ -454,7 +750,7 @@ export const ScenePlayer = memo(
         }
       }
       onPlayingChangeRef.current(false);
-    }, []);
+    }, [clearCanPlayWaitTimer, stopPlaybackFreezeWatchdog]);
 
     const seekLocalToCutTime = useCallback(
       (targetCut: number, opts?: { force?: boolean }) => {
@@ -474,7 +770,15 @@ export const ScenePlayer = memo(
         const actualDur =
           Number.isFinite(vid.duration) && vid.duration > 0 ? vid.duration : sourceSec + 10;
         const clamped = Math.max(0, Math.min(Math.max(0, actualDur - 0.02), sourceSec));
-        const threshold = isPlayingRef.current && !opts?.force ? 0.12 : 0.015;
+        const threshold = opts?.force
+          ? 0.01
+          : isScrubbingRef.current
+            ? lastSeekDurationMsRef.current > 80
+              ? 0.06
+              : 0.03
+            : isPlayingRef.current
+              ? 0.12
+              : 0.015;
 
         if (Math.abs(vid.currentTime - clamped) <= threshold && !vid.seeking) {
           pendingLocalSeekRef.current = null;
@@ -482,25 +786,24 @@ export const ScenePlayer = memo(
         }
 
         const now = performance.now();
-        // While hardware decoder is busy with an active seek, queue only the latest target
-        // so the in-progress frame finishes decoding & painting live on screen, then immediately
-        // jumps to the newest target after paint.
-        if (vid.seeking && !opts?.force && now - lastLocalSeekIssuedAtRef.current < 260) {
-          pendingLocalSeekRef.current = clamped;
-          return;
+        if (!opts?.force) {
+          // Allow long-GOP (e.g. 8s keyframe interval) mobile hardware seeks to complete and paint
+          // instead of aborting mid-decode.
+          const seekInFlight =
+            vid.seeking &&
+            lastLocalSeekIssuedAtRef.current > 0 &&
+            now - lastLocalSeekIssuedAtRef.current < 2500;
+          if (seekInFlight || waitingForScrubPaintRef.current) {
+            pendingLocalSeekRef.current = clamped;
+            return;
+          }
         }
 
         cancelScrubFlush();
         pendingLocalSeekRef.current = null;
-        lastLocalSeekIssuedAtRef.current = now;
-        seekSettleUntilRef.current = now + 650;
-        try {
-          vid.currentTime = clamped;
-        } catch {
-          // ignore invalid media seek state
-        }
+        issueVideoSeek(vid, clamped);
       },
-      [cancelScrubFlush]
+      [cancelScrubFlush, issueVideoSeek]
     );
 
     useImperativeHandle(
@@ -524,16 +827,23 @@ export const ScenePlayer = memo(
           isScrubbingRef.current = active;
           setIsScrubbing(active);
           if (active) {
+            pendingLocalPlayRef.current = false;
+            playAttemptPendingRef.current = false;
+            stopPlaybackFreezeWatchdog();
             const vid = localVideoRef.current;
-            if (vid && !vid.paused) {
-              try {
-                vid.pause();
-              } catch {
-                // ignore
+            if (vid) {
+              paintScrubCanvasFrame(vid, true);
+              if (!vid.paused) {
+                try {
+                  vid.pause();
+                } catch {
+                  // ignore
+                }
               }
             }
           } else {
             cancelScrubFlush();
+            hideScrubCanvas();
           }
         },
         seekCutTime: (cutSec: number, opts?: { force?: boolean }) => {
@@ -565,6 +875,7 @@ export const ScenePlayer = memo(
 
           sourcePreviewOverrideRef.current = null;
           pendingPreviewSeekRef.current = null;
+          hideScrubCanvas();
           cancelPreviewSeekRaf();
           if (opts?.skipResync || !vid) return;
 
@@ -598,6 +909,9 @@ export const ScenePlayer = memo(
         cancelPreviewSeekRaf,
         cancelScrubFlush,
         flushLocalPreviewSeek,
+        hideScrubCanvas,
+        paintScrubCanvasFrame,
+        stopPlaybackFreezeWatchdog,
         readCurrentCutTime,
       ]
     );
@@ -654,7 +968,12 @@ export const ScenePlayer = memo(
       }
 
       if (isPlaying) {
-        if (vid.paused && !playAttemptPendingRef.current && !pendingLocalPlayRef.current) {
+        if (
+          !isScrubbingRef.current &&
+          vid.paused &&
+          !playAttemptPendingRef.current &&
+          !pendingLocalPlayRef.current
+        ) {
           startLocalPlayback();
         }
       } else {
@@ -761,7 +1080,7 @@ export const ScenePlayer = memo(
     }, [isPlaying]);
 
     const applyPendingLocalSeekAndPlay = useCallback(
-      (vid: HTMLVideoElement) => {
+      (vid: HTMLVideoElement, allowLowReadyState = false) => {
         if (sourcePreviewOverrideRef.current !== null) {
           flushLocalPreviewSeek(vid);
           return;
@@ -772,15 +1091,10 @@ export const ScenePlayer = memo(
             Number.isFinite(vid.duration) && vid.duration > 0 ? vid.duration : target + 1;
           const clamped = Math.max(0, Math.min(Math.max(0, actualDur - 0.02), target));
           pendingLocalSeekRef.current = null;
-          if (Math.abs(vid.currentTime - clamped) > 0.015) {
-            const now = performance.now();
-            lastLocalSeekIssuedAtRef.current = now;
-            seekSettleUntilRef.current = now + 650;
-            try {
-              vid.currentTime = clamped;
-            } catch {
-              // ignore invalid media seek state
-            }
+          const threshold = isScrubbingRef.current ? 0.025 : 0.015;
+          if (Math.abs(vid.currentTime - clamped) > threshold) {
+            issueVideoSeek(vid, clamped);
+            return;
           }
         }
         const targetRate = getEffectivePlaybackSpeed(
@@ -788,7 +1102,28 @@ export const ScenePlayer = memo(
           voiceSettingsRef.current.speed
         );
         applySafePlaybackRate(vid, targetRate);
-        if (pendingLocalPlayRef.current && isPlayingRef.current && vid.paused && vid.readyState >= 1) {
+        if (
+          pendingLocalPlayRef.current &&
+          isPlayingRef.current &&
+          !isScrubbingRef.current &&
+          vid.paused &&
+          !vid.seeking &&
+          vid.readyState >= 1
+        ) {
+          // Prefer waiting briefly for HAVE_FUTURE_DATA (readyState >= 3) after a seek/load
+          // so MediaCodec has decoded future frames before audio starts running.
+          if (!allowLowReadyState && vid.readyState < 3) {
+            clearCanPlayWaitTimer();
+            canPlayWaitTimerRef.current = window.setTimeout(() => {
+              canPlayWaitTimerRef.current = null;
+              const cur = localVideoRef.current;
+              if (cur && pendingLocalPlayRef.current && isPlayingRef.current && !isScrubbingRef.current) {
+                applyPendingLocalSeekAndPlay(cur, true);
+              }
+            }, 320);
+            return;
+          }
+          clearCanPlayWaitTimer();
           pendingLocalPlayRef.current = false;
           playAttemptPendingRef.current = true;
           vid
@@ -796,6 +1131,9 @@ export const ScenePlayer = memo(
             .then(() => {
               playAttemptPendingRef.current = false;
               onPlayingChangeRef.current(!vid.paused);
+              if (!vid.paused) {
+                startPlaybackFreezeWatchdog(vid, vid.currentTime);
+              }
             })
             .catch((err: unknown) => {
               playAttemptPendingRef.current = false;
@@ -814,6 +1152,9 @@ export const ScenePlayer = memo(
                   .then(() => {
                     playAttemptPendingRef.current = false;
                     onPlayingChangeRef.current(!vid.paused);
+                    if (!vid.paused) {
+                      startPlaybackFreezeWatchdog(vid, vid.currentTime);
+                    }
                   })
                   .catch(() => {
                     playAttemptPendingRef.current = false;
@@ -827,7 +1168,7 @@ export const ScenePlayer = memo(
             });
         }
       },
-      [flushLocalPreviewSeek]
+      [clearCanPlayWaitTimer, flushLocalPreviewSeek, issueVideoSeek, startPlaybackFreezeWatchdog]
     );
 
     const transformCss = buildCssTransformString(editSettings);
@@ -879,7 +1220,7 @@ export const ScenePlayer = memo(
         className="relative w-full h-full overflow-hidden bg-[#111111] cursor-pointer group"
       >
         <div
-          className="absolute inset-0 origin-center pointer-events-none"
+          className="absolute inset-0 flex items-center justify-center origin-center pointer-events-none"
           style={{
             ...(transformCss !== "none" ? { transform: transformCss } : {}),
             ...(filterCss !== "none" ? { filter: filterCss } : {}),
@@ -891,8 +1232,12 @@ export const ScenePlayer = memo(
             src={localUrl}
             preload="auto"
             playsInline
+            disablePictureInPicture
+            disableRemotePlayback
             muted={muted || autoMutedFallback}
-            onLoadedData={() => setLocalPlayError(null)}
+            onLoadedData={() => {
+              setLocalPlayError(null);
+            }}
             onLoadedMetadata={(e) => {
               const v = e.currentTarget;
               if (v.videoWidth > 0 && v.videoHeight > 0) {
@@ -907,63 +1252,86 @@ export const ScenePlayer = memo(
                 setLocalVideoDims({ w: v.videoWidth, h: v.videoHeight });
               }
               setLocalPlayError(null);
+              // Never preempt an active scrub seek or frame paint when readyState bounces on canplay
+              if (isScrubbingRef.current || waitingForScrubPaintRef.current || v.seeking) {
+                return;
+              }
               applyPendingLocalSeekAndPlay(v);
             }}
             onSeeked={(e) => {
+              const v = e.currentTarget;
+              if (lastLocalSeekIssuedAtRef.current > 0) {
+                const seekMs = Math.max(0, performance.now() - lastLocalSeekIssuedAtRef.current);
+                lastSeekDurationMsRef.current =
+                  lastSeekDurationMsRef.current > 0
+                    ? lastSeekDurationMsRef.current * 0.6 + seekMs * 0.4
+                    : seekMs;
+              }
               lastLocalSeekIssuedAtRef.current = 0;
               seekSettleUntilRef.current = 0;
+              const showingScrubCanvas =
+                isScrubbingRef.current || sourcePreviewOverrideRef.current !== null;
+              if (showingScrubCanvas) {
+                // During active scrubbing, drawing into scrub canvas forces Android Chrome's
+                // SurfaceTexture to flush immediately so the decoded frame visibly updates.
+                paintScrubCanvasFrame(v, true);
+                capturePassiveThumbFromVideo(localUrlRef.current, v, false);
+              } else {
+                hideScrubCanvas();
+              }
               if (sourcePreviewOverrideRef.current !== null) {
-                cancelScrubFlush();
-                scrubFlushRafRef.current = requestAnimationFrame(() => {
-                  scrubFlushRafRef.current = null;
-                  scrubFlushTimerRef.current = window.setTimeout(() => {
-                    scrubFlushTimerRef.current = null;
-                    const v = localVideoRef.current;
-                    if (v) flushLocalPreviewSeek(v);
-                  }, 0);
+                scheduleScrubPaintThenFlush(v, (curVid) => {
+                  flushLocalPreviewSeek(curVid);
                 });
                 return;
               }
-              // When scrubbing, wait until the browser paints the newly decoded frame
-              // before triggering the next queued seek so frames visibly animate live.
-              if (pendingLocalSeekRef.current !== null && (isScrubbingRef.current || !isPlayingRef.current)) {
-                cancelScrubFlush();
-                scrubFlushRafRef.current = requestAnimationFrame(() => {
-                  scrubFlushRafRef.current = null;
-                  scrubFlushTimerRef.current = window.setTimeout(() => {
-                    scrubFlushTimerRef.current = null;
-                    const v = localVideoRef.current;
-                    if (v) applyPendingLocalSeekAndPlay(v);
-                  }, 0);
+              // During live scrubbing, wait for the newly decoded frame to actually present
+              // to the display before issuing the next queued seek.
+              if (isScrubbingRef.current || (pendingLocalSeekRef.current !== null && !isPlayingRef.current)) {
+                scheduleScrubPaintThenFlush(v, (curVid) => {
+                  if (pendingLocalSeekRef.current !== null) {
+                    applyPendingLocalSeekAndPlay(curVid);
+                  }
                 });
                 return;
               }
-              applyPendingLocalSeekAndPlay(e.currentTarget);
+              applyPendingLocalSeekAndPlay(v);
             }}
             onPlay={(e) => {
+              const v = e.currentTarget;
               setLocalPlayError(null);
+              hideScrubCanvas();
+              clearCanPlayWaitTimer();
               reloadAttemptedRef.current = false;
               playAttemptPendingRef.current = false;
               pendingLocalPlayRef.current = false;
               if (hasVoiceEffectsRef.current || voiceAttachedRef.current) {
                 resumeAllVoiceContexts();
                 voiceAttachedRef.current = true;
-                applyVoiceEffectsToVideoElement(e.currentTarget, voiceSettingsRef.current, true);
+                applyVoiceEffectsToVideoElement(v, voiceSettingsRef.current, true);
               }
               const nextRate = getEffectivePlaybackSpeed(
                 editSettingsRef.current.playbackSpeed,
                 voiceSettingsRef.current.speed
               );
-              applySafePlaybackRate(e.currentTarget, nextRate);
+              applySafePlaybackRate(v, nextRate);
               if (!isPlayingRef.current) {
                 onPlayingChangeRef.current(true);
+              }
+              if (!v.paused && !isScrubbingRef.current) {
+                startPlaybackFreezeWatchdog(v, v.currentTime);
               }
             }}
             onPause={(e) => {
               const v = e.currentTarget;
+              stopPlaybackFreezeWatchdog();
+              if (!isScrubbingRef.current && !v.seeking && v.readyState >= 2) {
+                capturePassiveThumbFromVideo(localUrlRef.current, v, false);
+              }
               if (
                 v.seeking ||
                 v.ended ||
+                isScrubbingRef.current ||
                 playAttemptPendingRef.current ||
                 pendingLocalPlayRef.current
               ) {
@@ -974,6 +1342,8 @@ export const ScenePlayer = memo(
               }
             }}
             onEnded={() => {
+              clearCanPlayWaitTimer();
+              stopPlaybackFreezeWatchdog();
               const curScenes = scenesRef.current;
               const idx = activeSceneIdxRef.current;
               const vid = localVideoRef.current;
@@ -992,6 +1362,8 @@ export const ScenePlayer = memo(
               }
             }}
             onError={(e) => {
+              clearCanPlayWaitTimer();
+              stopPlaybackFreezeWatchdog();
               playAttemptPendingRef.current = false;
               const v = e.currentTarget;
               if (
@@ -1016,21 +1388,51 @@ export const ScenePlayer = memo(
             style={
               fittedLocalVideoSize
                 ? {
-                    position: "absolute",
-                    left: "50%",
-                    top: "50%",
-                    width: `${fittedLocalVideoSize.w}px`,
-                    height: `${fittedLocalVideoSize.h}px`,
+                    width: `${Math.round(fittedLocalVideoSize.w)}px`,
+                    height: `${Math.round(fittedLocalVideoSize.h)}px`,
                     maxWidth: "none",
                     maxHeight: "none",
-                    transform: "translate(-50%, -50%)",
                   }
                 : undefined
             }
             className={
               fittedLocalVideoSize
-                ? "block bg-[#111111]"
+                ? "block shrink-0 bg-[#111111]"
                 : `w-full h-full bg-[#111111] ${
+                    editSettings.fitMode === "contain" ? "object-contain" : "object-cover"
+                  }`
+            }
+          />
+          <canvas
+            ref={scrubCanvasRef}
+            aria-hidden="true"
+            style={
+              fittedLocalVideoSize
+                ? {
+                    position: "absolute",
+                    left: "50%",
+                    top: "50%",
+                    width: `${Math.round(fittedLocalVideoSize.w)}px`,
+                    height: `${Math.round(fittedLocalVideoSize.h)}px`,
+                    maxWidth: "none",
+                    maxHeight: "none",
+                    transform: "translate(-50%, -50%)",
+                    display:
+                      isScrubbing || sourcePreviewOverrideRef.current !== null ? "block" : "none",
+                    opacity: isScrubbing || sourcePreviewOverrideRef.current !== null ? 1 : 0,
+                    pointerEvents: "none",
+                  }
+                : {
+                    display:
+                      isScrubbing || sourcePreviewOverrideRef.current !== null ? "block" : "none",
+                    opacity: isScrubbing || sourcePreviewOverrideRef.current !== null ? 1 : 0,
+                    pointerEvents: "none",
+                  }
+            }
+            className={
+              fittedLocalVideoSize
+                ? "block"
+                : `absolute inset-0 w-full h-full ${
                     editSettings.fitMode === "contain" ? "object-contain" : "object-cover"
                   }`
             }

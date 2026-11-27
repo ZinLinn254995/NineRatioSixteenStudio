@@ -18,6 +18,7 @@ import type {
   YouTubeLicenseFilter,
   YouTubeVideo,
 } from "./src/types.ts";
+import { buildTranslatorSystemInstruction } from "./server/thaiBurmeseTranslatorTraining.ts";
 
 const execFileAsync = promisify(execFile);
 const FFMPEG_EXEC_OPTS = { maxBuffer: 16 * 1024 * 1024 };
@@ -422,6 +423,7 @@ async function generateGroundedWithFailover(
   thinkingLevel: ThinkingLevel = ThinkingLevel.MEDIUM,
   opts?: {
     maxAttempts?: number;
+    systemInstruction?: string;
     onRetry?: (info: { attempt: number; maxAttempts: number; delayMs: number; model: string }) => void;
   }
 ) {
@@ -438,14 +440,19 @@ async function generateGroundedWithFailover(
     if (!model) break;
 
     try {
+      const systemInstructionPart = opts?.systemInstruction
+        ? { systemInstruction: opts.systemInstruction }
+        : {};
       const config =
         model === "gemini-4-hydrogen"
           ? {
+              ...systemInstructionPart,
               thinkingConfig: { thinkingLevel },
               responseMimeType: "application/json",
               responseSchema: schema,
             }
           : {
+              ...systemInstructionPart,
               responseMimeType: "application/json",
               responseSchema: schema,
             };
@@ -1237,6 +1244,28 @@ const sceneTranscriptSchema = {
       type: Type.STRING,
       description: "Brief 3-5 word summary of what is spoken in this scene.",
     },
+    dialogueContext: {
+      type: Type.OBJECT,
+      description:
+        "Analyze the scene BEFORE translating utterances: topic/domain, who is speaking to whom & their relationship, and the emotional/situational mood.",
+      properties: {
+        topic: {
+          type: Type.STRING,
+          description: "What subject, domain, or story topic is being discussed in this clip.",
+        },
+        speakersAndRelationship: {
+          type: Type.STRING,
+          description:
+            "Who the speakers are (e.g. gender/age/role) and their relationship (e.g. close friends, couple, older brother & younger sister, boss & staff, host & viewers).",
+        },
+        situationAndTone: {
+          type: Type.STRING,
+          description:
+            "Current situational context and emotional mood (e.g. playful teasing, heated argument, comforting, polite workplace request, energetic vlog review).",
+        },
+      },
+      required: ["topic", "speakersAndRelationship", "situationAndTone"],
+    },
     utterances: {
       type: Type.ARRAY,
       description:
@@ -1244,6 +1273,11 @@ const sceneTranscriptSchema = {
       items: {
         type: Type.OBJECT,
         properties: {
+          speaker: {
+            type: Type.STRING,
+            description:
+              "Speaker identifier for this utterance (e.g. 'S1', 'S2', 'S3'). Must change whenever a different voice/speaker talks — NEVER combine two different speakers in one utterance.",
+          },
           startSec: {
             type: Type.NUMBER,
             description: "Exact start timestamp (seconds) relative to the start of this clip (0s).",
@@ -1295,6 +1329,7 @@ const sceneTranscriptSchema = {
           },
         },
         required: [
+          "speaker",
           "startSec",
           "endSec",
           "originalSpokenText",
@@ -1306,7 +1341,7 @@ const sceneTranscriptSchema = {
       },
     },
   },
-  required: ["hasDialogue", "summary", "utterances"],
+  required: ["hasDialogue", "summary", "dialogueContext", "utterances"],
 };
 
 interface RawSceneWord {
@@ -1320,7 +1355,13 @@ interface RawSceneWord {
 interface RawSceneUtterances {
   hasDialogue?: boolean;
   summary?: string;
+  dialogueContext?: {
+    topic?: string;
+    speakersAndRelationship?: string;
+    situationAndTone?: string;
+  };
   utterances?: {
+    speaker?: string;
     startSec: number;
     endSec: number;
     originalSpokenText: string;
@@ -1640,17 +1681,20 @@ function getClipPrompt(
     speechWindows && speechWindows.length > 0
       ? `\nWAVEFORM-DETECTED SPEECH WINDOWS (exact seconds relative to 0.0s start of this clip):\n${speechWindows
           .map((w, i) => `  [${i + 1}] ${w.startSec.toFixed(2)}s – ${w.endSec.toFixed(2)}s`)
-          .join("\n")}\n- Align every utterance's startSec and endSec closely to when spoken voice is actually audible inside these detected windows (split a window into multiple utterances if there are multiple sentences/phrases, and skip any window that only contains music or sound effects).\n`
+          .join("\n")}\n- NOTE: A single speech window often contains MULTIPLE consecutive speakers talking back-to-back with zero gap OR multiple distinct clauses by one speaker. ALWAYS subdivide a window into separate utterances at EVERY speaker change and EVERY natural clause/sentence boundary. Skip any window containing only music or sound effects.\n`
       : "";
 
   return `Listen carefully to the ACTUAL spoken audio in ${scopeDesc}.
 ${vadSection}
-CRITICAL GROUNDING & TIMING RULES:
+CRITICAL GROUNDING, SPEAKER-SEPARATION & TIMING RULES:
 - ONLY transcribe and translate what is ACTUALLY SPOKEN in the audio of this clip.
 - NEVER invent, guess, or fabricate dialogue that is not spoken.
 - If there is NO spoken dialogue in this clip (only silence, music, or sound effects), set "hasDialogue": false and return an empty "utterances" array.
+- CONTEXT-FIRST TRANSLATION: First fill "dialogueContext" (topic, speakersAndRelationship, situationAndTone) by listening to the whole clip, then translate EVERY utterance in natural Burmese that matches that exact topic, speaker relationship (pronouns/kinship/politeness), and situational emotion.
+- SPEAKER TURN DISCIPLINE: Always identify the "speaker" ("S1", "S2", "S3", ...) for every utterance. Whenever a different person speaks — even immediately with 0.0s pause or a brief 1–2 word reply — you MUST create a separate utterance object. NEVER merge two consecutive speakers into one subtitle line!
+- PHRASE & CLAUSE DISCIPLINE: Segment continuous speech systematically at sentence-final particles, natural pauses, and clause boundaries so each utterance is a clean, self-contained spoken thought (never cram multiple distinct turns or sentences into one long subtitle).
 - Report ALL "startSec" and "endSec" values (both for utterances AND for each word) relative to the start of THIS clip (strictly between 0.0 and ${clipDurationSec.toFixed(1)} seconds) with sub-second precision (e.g. 0.42, 1.35, 2.84).
-- NEVER round timestamps to whole seconds, and NEVER include leading or trailing silent pauses inside an utterance's startSec/endSec. Start right when the voice begins and end right when the voice stops.
+- NEVER round timestamps to whole seconds, and NEVER include leading or trailing silent pauses inside an utterance's startSec/endSec. Start right when that speaker's voice begins and end right when that speaker's turn/phrase stops.
 - Utterances must be strictly chronological and non-overlapping.
 
 ${getAdvancedStylePromptBlock(effectiveCfg)}`;
@@ -1869,13 +1913,15 @@ function refineUtterancesWithEnvelope(
   };
 
   const refined = utts.map((u, idx) => {
-    const origStart = Math.max(0, Math.min(clipDur - 0.3, Number(u.startSec) || 0));
-    const origEnd = Math.max(origStart + 0.3, Math.min(clipDur, Number(u.endSec) || origStart + 1));
+    const origStart = Math.max(0, Math.min(clipDur - 0.22, Number(u.startSec) || 0));
+    const origEnd = Math.max(origStart + 0.22, Math.min(clipDur, Number(u.endSec) || origStart + 1));
 
     const prevEndBound = idx > 0 ? Math.max(0, Number(utts[idx - 1].endSec) || 0) : 0;
     const prevEndFrame = Math.floor(prevEndBound / frameDur);
     const nextStartBound =
       idx < utts.length - 1 ? Math.min(clipDur, Number(utts[idx + 1].startSec) || clipDur) : clipDur;
+    const hasTightPrevTurn = idx > 0 && origStart - prevEndBound <= 0.18;
+    const hasTightNextTurn = idx < utts.length - 1 && nextStartBound - origEnd <= 0.18;
 
     // Search up to ±1.6s when Gemini's boundary lands in silence (bounded by neighbor utterances)
     const searchStartMin = Math.max(
@@ -1884,7 +1930,7 @@ function refineUtterancesWithEnvelope(
     );
     const searchStartMax = Math.min(
       smooth.length - 1,
-      Math.floor((origEnd - 0.25) / frameDur),
+      Math.floor((origEnd - 0.2) / frameDur),
       Math.floor((origStart + 1.6) / frameDur)
     );
 
@@ -1922,8 +1968,8 @@ function refineUtterancesWithEnvelope(
         const onsetF = walkBackToConsonantOnset(foundBackward, searchStartMin);
         newStart = Math.max(prevEndBound, onsetF * frameDur - 0.07);
       }
-    } else {
-      // Already inside speech: walk backward to true voice onset (max 0.6s, or up to VAD window start)
+    } else if (!hasTightPrevTurn) {
+      // Already inside speech with clear preceding pause: walk backward to true voice onset
       const matchedWin = speechWindows.find(
         (w) => origStart >= w.startSec - 0.4 && origStart <= w.endSec + 0.1
       );
@@ -1941,7 +1987,7 @@ function refineUtterancesWithEnvelope(
     }
 
     const searchEndMin = Math.max(
-      Math.floor((newStart + 0.3) / frameDur),
+      Math.floor((newStart + 0.22) / frameDur),
       Math.floor((origEnd - 1.6) / frameDur)
     );
     const searchEndMax = Math.min(
@@ -1974,13 +2020,14 @@ function refineUtterancesWithEnvelope(
         const distB = origEndFrame - foundBackward;
         const distF = foundForward - origEndFrame;
         const chosen = distF < distB && distF <= 90 ? foundForward : foundBackward;
-        newEnd = Math.min(clipDur, chosen * frameDur + 0.08);
+        newEnd = Math.min(clipDur, nextStartBound, chosen * frameDur + 0.08);
       } else if (foundBackward !== -1) {
-        newEnd = Math.min(clipDur, foundBackward * frameDur + 0.08);
+        newEnd = Math.min(clipDur, nextStartBound, foundBackward * frameDur + 0.08);
       } else if (foundForward !== -1) {
-        newEnd = Math.min(clipDur, foundForward * frameDur + 0.08);
+        newEnd = Math.min(clipDur, nextStartBound, foundForward * frameDur + 0.08);
       }
-    } else {
+    } else if (!hasTightNextTurn) {
+      // Only extend end forward when there is a real pause before the next utterance (never bleed into next speaker)
       const matchedWin = speechWindows.find(
         (w) => origEnd >= w.startSec - 0.1 && origEnd <= w.endSec + 0.4
       );
@@ -1992,11 +2039,11 @@ function refineUtterancesWithEnvelope(
         f++;
       }
       if (f > origEndFrame) {
-        newEnd = Math.min(clipDur, f * frameDur + 0.07);
+        newEnd = Math.min(clipDur, nextStartBound, f * frameDur + 0.07);
       }
     }
 
-    if (newEnd - newStart < 0.35) {
+    if (newEnd - newStart < 0.22) {
       return { ...u, startSec: origStart, endSec: origEnd };
     }
 
@@ -2166,8 +2213,8 @@ function compileSceneTranscripts(
         .map((u) => {
           const rawLocalStart = looksAbsolute ? u.startSec - sc.startSec : u.startSec;
           const rawLocalEnd = looksAbsolute ? u.endSec - sc.startSec : u.endSec;
-          const localStart = Math.max(0, Math.min(clipDur - 0.3, rawLocalStart));
-          const localEnd = Math.max(localStart + 0.35, Math.min(clipDur, rawLocalEnd));
+          const localStart = Math.max(0, Math.min(clipDur - 0.22, rawLocalStart));
+          const localEnd = Math.max(localStart + 0.22, Math.min(clipDur, rawLocalEnd));
           return { u, localStart, localEnd };
         })
         .sort((a, b) => a.localStart - b.localStart);
@@ -2178,9 +2225,9 @@ function compileSceneTranscripts(
         const curr = normalizedUtts[i];
         if (curr.localStart < prev.localEnd) {
           const mid = Number(((prev.localEnd + curr.localStart) / 2).toFixed(2));
-          prev.localEnd = Math.max(prev.localStart + 0.3, mid);
+          prev.localEnd = Math.max(prev.localStart + 0.2, mid);
           curr.localStart = prev.localEnd;
-          curr.localEnd = Math.max(curr.localStart + 0.3, curr.localEnd);
+          curr.localEnd = Math.max(curr.localStart + 0.2, curr.localEnd);
         }
       }
 
@@ -2640,6 +2687,11 @@ async function transcribePreparedExtractedScenes(
         sceneTranscriptSchema,
         ThinkingLevel.LOW,
         {
+          systemInstruction: buildTranslatorSystemInstruction({
+            includeAudioSegmentation: false,
+            sourceLangCode: genConfig?.sourceLanguage,
+            targetLangCode: genConfig?.targetLanguage,
+          }),
           onRetry: ({ attempt, maxAttempts }) => emitRetryProgress(idx, attempt, maxAttempts),
         }
       );
@@ -2685,8 +2737,13 @@ async function transcribePreparedExtractedScenes(
           ],
         },
         sceneTranscriptSchema,
-        ThinkingLevel.LOW,
+        ThinkingLevel.MEDIUM,
         {
+          systemInstruction: buildTranslatorSystemInstruction({
+            includeAudioSegmentation: true,
+            sourceLangCode: genConfig?.sourceLanguage,
+            targetLangCode: genConfig?.targetLanguage,
+          }),
           onRetry: ({ attempt, maxAttempts }) => emitRetryProgress(idx, attempt, maxAttempts),
         }
       );
@@ -3739,7 +3796,14 @@ TASK:
       ai,
       contents,
       singleSubtitleSchema,
-      ThinkingLevel.HIGH
+      ThinkingLevel.HIGH,
+      {
+        systemInstruction: buildTranslatorSystemInstruction({
+          includeAudioSegmentation: false,
+          sourceLangCode: "th",
+          targetLangCode: "my",
+        }),
+      }
     );
 
     const raw = JSON.parse((resp.text || "{}").trim()) as {
@@ -3860,6 +3924,8 @@ app.post("/api/retranslate-subtitles", async (req, res) => {
 
       const prompt = `Re-translate and polish the Burmese subtitles (and word-by-word Burmese glosses) for the dialogue sequence below so they match the selected tone and read cohesively across the whole conversation.
 
+First analyze the whole sequence: what topic is being discussed, who is talking to whom & their relationship (gender, age, closeness, politeness), and the emotional/situational mood — then reflect that consistently in Burmese pronouns, kinship terms, vocabulary, and particles.
+
 ${getTranslationToneInstruction(tone)}
 
 INPUT SUBTITLE LINES (JSON):
@@ -3875,7 +3941,14 @@ RULES:
         ai,
         prompt,
         batchRetranslateSchema,
-        ThinkingLevel.MEDIUM
+        ThinkingLevel.MEDIUM,
+        {
+          systemInstruction: buildTranslatorSystemInstruction({
+            includeAudioSegmentation: false,
+            sourceLangCode: "th",
+            targetLangCode: "my",
+          }),
+        }
       );
 
       const parsed = JSON.parse((resp.text || "{}").trim()) as {
@@ -4626,11 +4699,12 @@ CRITICAL RULES:
 - Do NOT repeat or duplicate the Previous/Next surrounding context lines if only their edges appear in the padding buffer.
 - If there is NO spoken human dialogue in the target window (only silence, background noise, or music), set "hasDialogue": false and return an empty "utterances" array.
 - Report ALL "startSec" and "endSec" values relative to 0.0s start of this audio clip (${localAudioPrep.clipDur.toFixed(2)}s total) with sub-second precision.
-- Split into multiple chronological, non-overlapping utterances if multiple distinct sentences are spoken.
+- SPEAKER & PHRASE SEPARATION: Identify "speaker" ("S1", "S2", ...) for every utterance. Whenever a different speaker talks — even back-to-back with zero gap — or when distinct sentences/clauses are spoken, ALWAYS split into separate chronological, non-overlapping utterances. NEVER merge two speakers into one subtitle.
 
 ${getTranslationToneInstruction(tone)}
 
 For each spoken utterance:
+- "speaker": Speaker label ("S1", "S2", ...) matching the active voice.
 - "originalSpokenText": Exact verbatim words spoken.
 - "thaiScript": Verbatim Thai script if spoken in Thai, otherwise natural Thai translation.
 - "thaiPhonetic": Clear English phonetic pronunciation of the Thai speech (e.g. "Sa-wat-dee khrap").
@@ -4646,7 +4720,14 @@ For each spoken utterance:
           ],
         },
         sceneTranscriptSchema,
-        ThinkingLevel.HIGH
+        ThinkingLevel.HIGH,
+        {
+          systemInstruction: buildTranslatorSystemInstruction({
+            includeAudioSegmentation: true,
+            sourceLangCode: "th",
+            targetLangCode: "my",
+          }),
+        }
       );
     const parsed = JSON.parse((resp.text || "{}").trim()) as RawSceneUtterances;
     const rawRes = refineUtterancesWithEnvelope(

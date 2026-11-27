@@ -1715,7 +1715,7 @@ export default function App() {
       liveCutTimeRef.current = newCutTime;
       cutTimeListenersRef.current.forEach((fn) => fn(newCutTime));
       const now = performance.now();
-      if (now - lastReactCutSyncAtRef.current >= 250) {
+      if (now - lastReactCutSyncAtRef.current >= 1000) {
         lastReactCutSyncAtRef.current = now;
         setCutTime(newCutTime);
       }
@@ -1762,16 +1762,18 @@ export default function App() {
   }, [publishCutTime]);
 
   const handleTogglePlay = () => {
-    const playableProj = hasProjectMedia(project) ? project : null;
+    const playableProj = hasProjectMedia(projectRef.current) ? projectRef.current : null;
     if (!playableProj || playableProj.scenes.length === 0) return;
     resumeAllVoiceContexts();
-    setIsPlaying((p) => {
-      if (p) {
-        setLoopingSubId(null);
-        setCutTime(liveCutTimeRef.current);
-      }
-      return !p;
-    });
+    if (isPlaying) {
+      setLoopingSubId(null);
+      stageRef.current?.pause();
+      setIsPlaying(false);
+      setCutTime(liveCutTimeRef.current);
+    } else {
+      stageRef.current?.play();
+      setIsPlaying(true);
+    }
   };
 
   const handlePause = useCallback(() => {
@@ -1783,16 +1785,15 @@ export default function App() {
 
   const handlePlayFromTime = useCallback(
     (sec: number) => {
-      const playableProj = hasProjectMedia(project) ? project : null;
+      const playableProj = hasProjectMedia(projectRef.current) ? projectRef.current : null;
       if (!playableProj || playableProj.scenes.length === 0) return;
       resumeAllVoiceContexts();
       setLoopingSubId(null);
       publishCutTime(sec, true);
       stageRef.current?.play();
-      setSeekNonce((n) => n + 1);
       setIsPlaying(true);
     },
-    [project, publishCutTime]
+    [publishCutTime]
   );
 
   const handleToggleLoopSubtitle = useCallback(
@@ -2036,13 +2037,16 @@ export default function App() {
     );
   };
 
-  const handleAddSubtitle = (input: {
-    startTime: number;
-    endTime: number;
-    thaiPhonetic: string;
-    burmese: string;
-    originalSpokenText?: string;
-  }) => {
+  const handleAddSubtitle = (
+    input: {
+      startTime: number;
+      endTime: number;
+      thaiPhonetic: string;
+      burmese: string;
+      originalSpokenText?: string;
+    },
+    opts?: { select?: boolean; seekToStart?: boolean }
+  ) => {
     if (!project) return;
     pushSubtitleUndo();
     const maxDur = Math.max(0.5, project.targetDurationSec || 10);
@@ -2051,6 +2055,8 @@ export default function App() {
     const duration = Math.max(0.2, endTime - startTime);
     const thaiPhonetic = input.thaiPhonetic.trim();
     const burmese = input.burmese.trim();
+    const originalSpokenText =
+      input.originalSpokenText !== undefined ? input.originalSpokenText.trim() : "Custom subtitle";
     const mappedStart = mapCutTimeToSource(project.scenes, startTime);
     const mappedEnd = mapCutTimeToSource(project.scenes, endTime);
 
@@ -2062,7 +2068,7 @@ export default function App() {
         endTime,
         sourceStartSec: Number(mappedStart.sourceSec.toFixed(2)),
         sourceEndSec: Number(mappedEnd.sourceSec.toFixed(2)),
-        originalSpokenText: input.originalSpokenText?.trim() || "Custom subtitle",
+        originalSpokenText,
         thaiPhonetic,
         thaiScript: thaiPhonetic,
         burmese,
@@ -2083,12 +2089,17 @@ export default function App() {
       if (!prev) return prev;
       return {
         ...prev,
+        isDraft: false,
         subtitles: [...prev.subtitles, newItem].sort((a, b) => a.startTime - b.startTime),
       };
     });
-    setSelectedSubtitleId(newItem.id);
-    setStageSelectRequest({ id: newItem.id, focusPhonetic: false, nonce: Date.now() });
-    handleSeek(startTime);
+    if (opts?.select !== false) {
+      setSelectedSubtitleId(newItem.id);
+      setStageSelectRequest({ id: newItem.id, focusPhonetic: false, nonce: Date.now() });
+    }
+    if (opts?.seekToStart !== false) {
+      handleSeek(startTime);
+    }
   };
 
   const handleDeleteSubtitle = (id: string) => {
@@ -4725,6 +4736,7 @@ export default function App() {
                       onPlayFromTime={handlePlayFromTime}
                       onUpdateScenes={handleUpdateProjectScenes}
                       onUpdateSubtitleTiming={handleUpdateSubtitleTiming}
+                      onAddSubtitle={handleAddSubtitle}
                       onEditSubtitle={(id) => {
                         setShowSubtitleGenSettings(false);
                         setSelectedSubtitleId(id);
