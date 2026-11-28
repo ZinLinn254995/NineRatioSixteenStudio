@@ -21,7 +21,11 @@ import type {
   SubtitleGenerationConfig,
   SubtitleGenerationProgress,
   SubtitleItem,
+  SubtitleSourceLanguage,
   SubtitleWord,
+  TranscriptModelId,
+  TranscriptProgress,
+  TranscriptResult,
   TranslationTone,
   VideoEditSettings,
   VideoProject,
@@ -40,7 +44,7 @@ import {
 import { ProjectTimelineEditor } from "./components/ProjectTimelineEditor";
 import { EmptyStudioUpload } from "./components/EmptyStudioUpload";
 import { ExportSheet } from "./components/ExportSheet";
-import { ImportSrtModal, type ImportSrtMode } from "./components/ImportSrtModal";
+import { PasteStructuredTranscriptDialog } from "./components/PasteStructuredTranscriptDialog";
 import { OfflineIndicator, PWAInstallButton } from "./components/PWAInstallButton";
 import {
   exportProjectToMp4,
@@ -61,6 +65,7 @@ import {
   uploadBlobInChunks,
 } from "./utils/uploadFile";
 import { extractMp4AudioClips } from "./utils/mp4ClipAudio";
+import { runTranscriptGeneration } from "./utils/whisperTranscriber";
 import type { StructuredTranscriptImportResult } from "./utils/pasteTranscriptSync";
 import { makeSafeFileSlug } from "./utils/exportSubtitles";
 import {
@@ -70,6 +75,7 @@ import {
   remapSubtitlesToScenes,
   withSceneId,
 } from "./utils/projectTimeline";
+import { seedPassiveTimelineThumbsForVideoUrl } from "./utils/timelineThumbBus";
 import { hasGeneratedProject, hasProjectMedia } from "./utils/projectState";
 import {
   MAX_HISTORY,
@@ -160,7 +166,7 @@ export default function App() {
   const [loopingSubId, setLoopingSubId] = useState<string | null>(null);
   const [selectedSubtitleId, setSelectedSubtitleId] = useState<string | null>(null);
   const [editingSubtitleId, setEditingSubtitleId] = useState<string | null>(null);
-  const [showSubtitleGenSettings, setShowSubtitleGenSettings] = useState(false);
+  const [showPasteTranscriptDialog, setShowPasteTranscriptDialog] = useState(false);
   const [subtitleGenConfig, setSubtitleGenConfig] = useState<SubtitleGenerationConfig>(
     () => loadSavedSubtitleGenConfig()
   );
@@ -210,17 +216,23 @@ export default function App() {
   );
   const [stagePreviewScale, setStagePreviewScale] = useState<number>(DEFAULT_STAGE_PREVIEW_SCALE);
 
-  const [showImportSrtModal, setShowImportSrtModal] = useState(false);
-  const [isImportingSrt, setIsImportingSrt] = useState(false);
-  const [importSrtProgress, setImportSrtProgress] =
-    useState<SubtitleGenerationProgress | null>(null);
-  const [importSrtError, setImportSrtError] = useState<string | null>(null);
   const [isExportingAudio, setIsExportingAudio] = useState(false);
+
+  const [transcriptModelId, setTranscriptModelId] =
+    useState<TranscriptModelId>("whisper-base");
+  const [transcriptLanguage, setTranscriptLanguage] =
+    useState<SubtitleSourceLanguage>("auto");
+  const [transcriptWordTimestamps, setTranscriptWordTimestamps] = useState(false);
+  const [isTranscribingStandalone, setIsTranscribingStandalone] = useState(false);
+  const [transcriptProgress, setTranscriptProgress] =
+    useState<TranscriptProgress | null>(null);
+  const [transcriptError, setTranscriptError] = useState<string | null>(null);
+  const [transcriptResult, setTranscriptResult] = useState<TranscriptResult | null>(null);
 
   const activeRunIdRef = useRef(0);
   const lastGenActionRef = useRef<{ type: "all" } | { type: "clip"; sceneId: string } | null>(null);
   const generateAbortRef = useRef<AbortController | null>(null);
-  const importSrtAbortRef = useRef<AbortController | null>(null);
+  const standaloneTranscriptAbortRef = useRef<AbortController | null>(null);
   const resyncAbortRef = useRef<AbortController | null>(null);
   const transcribeRangeAbortRef = useRef<AbortController | null>(null);
   const retranslateAbortRef = useRef<AbortController | null>(null);
@@ -283,22 +295,9 @@ export default function App() {
     }
   }, [editingSubtitleId, studioSection, project]);
 
-  useEffect(() => {
-    if (showSubtitleGenSettings && studioSection !== "edit") {
-      setShowSubtitleGenSettings(false);
-    }
-  }, [showSubtitleGenSettings, studioSection]);
-
   const handleChangeSubtitleGenConfig = useCallback((next: SubtitleGenerationConfig) => {
     setSubtitleGenConfig(next);
     saveSubtitleGenConfig(next);
-  }, []);
-
-  const handleOpenSubtitleGenSettings = useCallback(() => {
-    setEditingSubtitleId(null);
-    setProcessError(null);
-    setStudioSection("edit");
-    setShowSubtitleGenSettings(true);
   }, []);
 
   const subscribeCutTime = useCallback((listener: (sec: number) => void) => {
@@ -833,6 +832,12 @@ export default function App() {
     setActiveSavedId(null);
     setProject(null);
     setBaselineFromProject(null);
+    standaloneTranscriptAbortRef.current?.abort();
+    standaloneTranscriptAbortRef.current = null;
+    setIsTranscribingStandalone(false);
+    setTranscriptProgress(null);
+    setTranscriptError(null);
+    setTranscriptResult(null);
 
     const resolvedMime = inferVideoMimeType(rawFile.name, rawFile.type);
     let file: File = rawFile;
@@ -923,6 +928,8 @@ export default function App() {
         undoStackRef.current.length === 0 &&
         redoStackRef.current.length === 0 &&
         curProj.scenes.length === 1 &&
+        !curProj.scenes[0].mediaUrl &&
+        curProj.scenes[0].mediaType !== "image" &&
         curProj.scenes[0].startSec === 0 &&
         Math.abs(curProj.scenes[0].endSec - (curProj.sourceDurationSec || dur)) < 0.25 &&
         Math.abs(curProj.scenes[0].endSec - dur) > 0.05
@@ -963,11 +970,174 @@ export default function App() {
     setProject((prev) => (prev ? { ...prev, sourceDurationSec: dur } : prev));
   }, []);
 
+  const handleAddMediaClip = async (fileList: FileList | File[]) => {
+    const files = Array.from(fileList || []);
+    if (files.length === 0) return;
+
+    const curProj = projectRef.current;
+    if (!curProj) {
+      const firstVideo = files.find(
+        (f) => f.type.startsWith("video/") || /\.(mp4|mov|webm|m4v|mkv|avi)$/i.test(f.name)
+      );
+      if (firstVideo) {
+        await handleUploadLocalVideo(firstVideo);
+      }
+      return;
+    }
+
+    const sessionRunId = activeRunIdRef.current;
+    const addedScenes: SpeakingScene[] = [];
+    const baseIdx = curProj.scenes.length;
+
+    for (let i = 0; i < files.length; i++) {
+      const rawFile = files[i];
+      const isImage =
+        rawFile.type.startsWith("image/") ||
+        /\.(png|jpe?g|webp|gif|bmp|avif|heic|heif|svg)$/i.test(rawFile.name);
+      const cleanName = rawFile.name.replace(/\.[^.]+$/, "").trim();
+
+      if (isImage) {
+        const mediaUrl = registerBlobUrl(rawFile);
+        await new Promise<void>((resolve) => {
+          const img = new Image();
+          const timer = window.setTimeout(resolve, 2500);
+          img.onload = () => {
+            window.clearTimeout(timer);
+            resolve();
+          };
+          img.onerror = () => {
+            window.clearTimeout(timer);
+            resolve();
+          };
+          img.src = mediaUrl;
+        });
+        if (activeRunIdRef.current !== sessionRunId) return;
+
+        addedScenes.push({
+          id: `proj-img-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 6)}`,
+          index: baseIdx + addedScenes.length,
+          startSec: 0,
+          endSec: 3,
+          durationSec: 3,
+          summary: cleanName || `Image ${baseIdx + addedScenes.length + 1}`,
+          mediaType: "image",
+          mediaUrl,
+          mediaFile: rawFile,
+          sourceDurationSec: 60,
+        });
+      } else {
+        const resolvedMime = inferVideoMimeType(rawFile.name, rawFile.type);
+        let file: File = rawFile;
+        if (rawFile.size > 0 && rawFile.size <= 64 * 1024 * 1024) {
+          try {
+            const byteBlob = await materializeReadableBlob(rawFile, resolvedMime);
+            if (activeRunIdRef.current !== sessionRunId) return;
+            file = new File(
+              [byteBlob],
+              rawFile.name,
+              resolvedMime ? { type: resolvedMime } : undefined
+            );
+          } catch {
+            file = rawFile;
+          }
+        }
+        if (activeRunIdRef.current !== sessionRunId) return;
+
+        const mediaUrl = registerBlobUrl(file);
+        const durationSec = await new Promise<number>((resolve) => {
+          const v = document.createElement("video");
+          v.muted = true;
+          v.playsInline = true;
+          v.preload = "metadata";
+          let done = false;
+          const finish = (dur: number) => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            v.onloadedmetadata = null;
+            v.onerror = null;
+            try {
+              v.pause();
+              v.removeAttribute("src");
+              v.load();
+            } catch {
+              // ignore
+            }
+            resolve(dur);
+          };
+          const timer = setTimeout(() => finish(10), 6000);
+          v.onloadedmetadata = () => {
+            const raw = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : 10;
+            finish(Math.max(0.5, Math.round(raw * 10) / 10));
+          };
+          v.onerror = () => finish(10);
+          v.src = mediaUrl;
+        });
+        if (activeRunIdRef.current !== sessionRunId) return;
+
+        void seedPassiveTimelineThumbsForVideoUrl(mediaUrl, durationSec);
+
+        addedScenes.push({
+          id: `proj-vid-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 6)}`,
+          index: baseIdx + addedScenes.length,
+          startSec: 0,
+          endSec: durationSec,
+          durationSec,
+          summary: cleanName || `Clip ${baseIdx + addedScenes.length + 1}`,
+          mediaType: "video",
+          mediaUrl,
+          mediaFile: file,
+          sourceDurationSec: durationSec,
+        });
+      }
+    }
+
+    if (addedScenes.length === 0) return;
+
+    const latestProj = projectRef.current;
+    if (!latestProj) return;
+
+    pushProjectUndo();
+    const prevCutDuration = latestProj.scenes.reduce((acc, sc) => acc + getSceneDurationSec(sc), 0);
+    const nextScenes = ensureSceneIds([...latestProj.scenes, ...addedScenes]);
+    const nextDuration = Number(
+      nextScenes.reduce((acc, sc) => acc + getSceneDurationSec(sc), 0).toFixed(2)
+    );
+    checkTimelineDirty(nextScenes);
+
+    setProject((prev) => {
+      if (!prev) return prev;
+      const baselineSubs = timelineBaselineRef.current?.subtitles ?? prev.subtitles;
+      const nextSubtitles = remapSubtitlesToScenes(baselineSubs, nextScenes);
+      return {
+        ...prev,
+        scenes: nextScenes,
+        targetDurationSec: nextDuration,
+        subtitles: nextSubtitles,
+      };
+    });
+
+    setIsPlaying(false);
+    publishCutTime(prevCutDuration, true);
+    setSeekNonce((n) => n + 1);
+    setSaveNotice(
+      addedScenes.length === 1
+        ? `Added ${addedScenes[0].mediaType === "image" ? "image" : "video"} clip to timeline.`
+        : `Added ${addedScenes.length} clips to timeline.`
+    );
+  };
+
   const handleClearLocalVideo = () => {
     activeRunIdRef.current++;
     if (localMedia?.localUrl?.startsWith("blob:")) {
       URL.revokeObjectURL(localMedia.localUrl);
       createdUrlsRef.current = createdUrlsRef.current.filter((u) => u !== localMedia.localUrl);
+    }
+    for (const sc of projectRef.current?.scenes ?? []) {
+      if (sc.mediaUrl?.startsWith("blob:")) {
+        URL.revokeObjectURL(sc.mediaUrl);
+        createdUrlsRef.current = createdUrlsRef.current.filter((u) => u !== sc.mediaUrl);
+      }
     }
     setIsProcessing(false);
     setIsPlaying(false);
@@ -976,6 +1146,12 @@ export default function App() {
     setSaveNotice(null);
     setActiveSavedId(null);
     setLocalMedia(null);
+    standaloneTranscriptAbortRef.current?.abort();
+    standaloneTranscriptAbortRef.current = null;
+    setIsTranscribingStandalone(false);
+    setTranscriptProgress(null);
+    setTranscriptError(null);
+    setTranscriptResult(null);
     setProject((prev) => {
       if (prev) {
         setBaselineFromProject(null);
@@ -986,6 +1162,105 @@ export default function App() {
     setActiveTab("studio");
     setStudioSection("edit");
   };
+
+  const handleCancelStandaloneTranscript = useCallback(() => {
+    standaloneTranscriptAbortRef.current?.abort();
+    standaloneTranscriptAbortRef.current = null;
+    setIsTranscribingStandalone(false);
+    setTranscriptProgress(null);
+  }, []);
+
+  const handleStartStandaloneTranscript = useCallback(async () => {
+    const file = projectRef.current?.localFile || localMedia?.localFile;
+    if (!file) {
+      setTranscriptError("Please upload or link a local video file first.");
+      return;
+    }
+
+    standaloneTranscriptAbortRef.current?.abort();
+    const ctrl = new AbortController();
+    standaloneTranscriptAbortRef.current = ctrl;
+
+    setTranscriptError(null);
+    setIsTranscribingStandalone(true);
+    setTranscriptProgress({
+      phase: "extracting",
+      label: "Preparing audio...",
+      percent: 5,
+    });
+
+    try {
+      const activeScenes =
+        selectedScenes.length > 0
+          ? selectedScenes
+          : [
+              {
+                id: "sc-full",
+                startSec: 0,
+                endSec: Math.max(1, localMedia?.durationSec ?? projectRef.current?.sourceDurationSec ?? 120),
+              },
+            ];
+
+      const result = await runTranscriptGeneration({
+        file,
+        title: localMedia?.title || projectRef.current?.title || file.name,
+        scenes: activeScenes,
+        modelId: transcriptModelId,
+        language: transcriptLanguage,
+        wordTimestamps: transcriptWordTimestamps,
+        uploadId: projectRef.current?.uploadId || localMedia?.uploadId,
+        onUploadId: (uploadId) => {
+          setLocalMedia((prev) => (prev ? { ...prev, uploadId } : prev));
+          setProject((prev) => (prev ? { ...prev, uploadId } : prev));
+        },
+        signal: ctrl.signal,
+        onProgress: (p) => {
+          if (!ctrl.signal.aborted) {
+            setTranscriptProgress(p);
+          }
+        },
+      });
+
+      if (ctrl.signal.aborted) return;
+      setTranscriptResult(result);
+    } catch (err) {
+      if (ctrl.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) {
+        return;
+      }
+      setTranscriptError(
+        formatReadableApiError(err, "Failed to generate transcript. Try a smaller model or Cloud AI.")
+      );
+    } finally {
+      if (standaloneTranscriptAbortRef.current === ctrl) {
+        standaloneTranscriptAbortRef.current = null;
+      }
+      setIsTranscribingStandalone(false);
+      setTranscriptProgress(null);
+    }
+  }, [
+    localMedia,
+    selectedScenes,
+    transcriptLanguage,
+    transcriptModelId,
+    transcriptWordTimestamps,
+  ]);
+
+  const handleUpdateTranscriptSegmentText = useCallback(
+    (segmentId: string, text: string) => {
+      setTranscriptResult((prev) => {
+        if (!prev) return prev;
+        const nextSegments = prev.segments.map((seg) =>
+          seg.id === segmentId ? { ...seg, text } : seg
+        );
+        return {
+          ...prev,
+          segments: nextSegments,
+          text: nextSegments.map((s) => s.text.trim()).filter(Boolean).join(" "),
+        };
+      });
+    },
+    []
+  );
 
   const handleCancelGenerateSubtitles = useCallback(() => {
     activeRunIdRef.current++;
@@ -1425,7 +1700,6 @@ export default function App() {
                 : false,
         }));
 
-        setShowSubtitleGenSettings(false);
         setActiveTab("studio");
         setStudioSection("edit");
       }
@@ -1448,207 +1722,6 @@ export default function App() {
         setGenerationProgress(null);
       }
     }
-  };
-
-  const handleOpenImportSrt = () => {
-    setImportSrtError(null);
-    setShowImportSrtModal(true);
-  };
-
-  const handleCancelImportSrt = () => {
-    importSrtAbortRef.current?.abort();
-    importSrtAbortRef.current = null;
-    setIsImportingSrt(false);
-    setImportSrtProgress(null);
-  };
-
-  const handleImportSrtSubtitles = async (
-    srtContent: string,
-    mode: ImportSrtMode,
-    fileName?: string
-  ) => {
-    const targetMedia = localMedia;
-    if (!targetMedia) {
-      setImportSrtError("Upload a local video first before importing subtitles.");
-      return;
-    }
-
-    importSrtAbortRef.current?.abort();
-    const controller = new AbortController();
-    importSrtAbortRef.current = controller;
-
-    const activeGenConfig = subtitleGenConfig;
-    const legacyTone: TranslationTone =
-      activeGenConfig.translationTone === "casual" ||
-      activeGenConfig.translationTone === "formal" ||
-      activeGenConfig.translationTone === "dramatic" ||
-      activeGenConfig.translationTone === "literal"
-        ? activeGenConfig.translationTone
-        : videoEdit.translationTone;
-
-    const effectiveScenes =
-      selectedScenes.length > 0
-        ? selectedScenes
-        : [
-            {
-              id: `scene-import-${Date.now()}`,
-              startSec: 0,
-              endSec: Math.max(5, targetMedia.durationSec || 60),
-            },
-          ];
-
-    setIsImportingSrt(true);
-    setImportSrtError(null);
-    setImportSrtProgress({
-      stage: "detecting",
-      label: mode === "translate" ? "Reading SRT & preparing translation..." : "Loading SRT cues...",
-      percent: 8,
-      totalClips: effectiveScenes.length,
-    });
-
-    try {
-      const resp = await fetch("/api/import-subtitles", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/x-ndjson",
-        },
-        body: JSON.stringify({
-          title: targetMedia.title,
-          durationSec: targetMedia.durationSec,
-          selectedScenes: effectiveScenes.map(({ startSec, endSec }) => ({
-            startSec,
-            endSec,
-          })),
-          srtContent,
-          mode,
-          translationTone: legacyTone,
-          generationConfig: activeGenConfig,
-          stream: true,
-        }),
-        signal: controller.signal,
-      });
-
-      const data = await readStreamingProcessResponse<VideoProject & { error?: string }>(resp, (ev) => {
-        setImportSrtProgress(ev);
-      });
-
-      if (controller.signal.aborted) return;
-
-      if (project && project.subtitles.length > 0) {
-        pushSubtitleUndo();
-      }
-
-      const normalizedServerProj = attachSceneIdsFromServerProject(data, effectiveScenes);
-      const nextProj: VideoProject = {
-        ...normalizedServerProj,
-        localUrl: targetMedia.localUrl,
-        localFile: targetMedia.localFile,
-      };
-      setProject(nextProj);
-      setBaselineFromProject(nextProj);
-
-      if (mode === "translate") {
-        const hasTranslationLine =
-          activeGenConfig.subtitleFormat !== "translation_only" &&
-          activeGenConfig.subtitleFormat !== "original_only" &&
-          activeGenConfig.targetLanguage !== "none";
-        setVideoEdit((prev) => ({
-          ...prev,
-          translationTone: legacyTone,
-          showBurmeseLine: hasTranslationLine,
-          showWordGloss: hasTranslationLine && activeGenConfig.includeWordGloss,
-          showThaiScript:
-            activeGenConfig.subtitleFormat === "bilingual_phonetic"
-              ? activeGenConfig.includeNativeScript && prev.showThaiScript
-              : activeGenConfig.subtitleFormat === "bilingual_native"
-                ? activeGenConfig.includeNativeScript
-                : false,
-        }));
-      }
-
-      setShowImportSrtModal(false);
-      setShowSubtitleGenSettings(false);
-      setActiveTab("studio");
-      setStudioSection("edit");
-      showShortcutToast(
-        `Imported ${nextProj.subtitles.length} cues${fileName ? ` from ${fileName}` : ""}`
-      );
-    } catch (err) {
-      if (
-        controller.signal.aborted ||
-        (err instanceof DOMException && err.name === "AbortError")
-      ) {
-        return;
-      }
-      setImportSrtError(formatReadableApiError(err, "Failed to import SRT/VTT subtitles."));
-    } finally {
-      if (importSrtAbortRef.current === controller) {
-        importSrtAbortRef.current = null;
-      }
-      setIsImportingSrt(false);
-      setImportSrtProgress(null);
-    }
-  };
-
-  const handleImportStructuredTranscript = (
-    result: StructuredTranscriptImportResult,
-    fileName?: string
-  ) => {
-    const targetMedia = localMedia;
-    if (!targetMedia) {
-      setImportSrtError("Upload a local video first before importing a transcript.");
-      return;
-    }
-    if (result.subtitles.length === 0) {
-      setImportSrtError("No valid transcript lines were detected.");
-      return;
-    }
-
-    if (project && project.subtitles.length > 0) {
-      pushSubtitleUndo();
-    }
-
-    const speechRegions: SpeechRegion[] = result.subtitles.map((sub) => ({
-      sourceStartSec: sub.sourceStartSec,
-      sourceEndSec: sub.sourceEndSec,
-    }));
-
-    const nextProj: VideoProject = {
-      title: targetMedia.title || "Uploaded Video",
-      channel: targetMedia.channel || "Local Video",
-      sourceDurationSec: Math.max(
-        1,
-        targetMedia.durationSec || result.targetDurationSec
-      ),
-      targetDurationSec: result.targetDurationSec,
-      scenes: result.scenes,
-      subtitles: result.subtitles,
-      speechRegions,
-      keyframeUrls: project?.keyframeUrls ?? [],
-      uploadId: targetMedia.uploadId,
-      localUrl: targetMedia.localUrl,
-      localFile: targetMedia.localFile,
-    };
-
-    setProject(nextProj);
-    setBaselineFromProject(nextProj);
-
-    setVideoEdit((prev) => ({
-      ...prev,
-      showBurmeseLine: result.hasBurmese ? true : prev.showBurmeseLine,
-      showWordGloss: result.hasWords ? true : prev.showWordGloss,
-      showThaiScript: result.hasThai ? prev.showThaiScript : false,
-    }));
-
-    setShowImportSrtModal(false);
-    setShowSubtitleGenSettings(false);
-    setImportSrtError(null);
-    setActiveTab("studio");
-    setStudioSection("edit");
-    showShortcutToast(
-      `Imported ${result.subtitles.length} lines${fileName ? ` from ${fileName}` : ""}`
-    );
   };
 
   const handleExportAudioOnly = async () => {
@@ -2126,7 +2199,9 @@ export default function App() {
       base.some(
         (b, idx) =>
           Math.abs(b.startSec - nextScenes[idx].startSec) > 0.05 ||
-          Math.abs(b.endSec - nextScenes[idx].endSec) > 0.05
+          Math.abs(b.endSec - nextScenes[idx].endSec) > 0.05 ||
+          (b.mediaUrl || "") !== (nextScenes[idx].mediaUrl || "") ||
+          (b.mediaType || "video") !== (nextScenes[idx].mediaType || "video")
       );
     setTimelineDirty(dirty);
   }, []);
@@ -2144,7 +2219,9 @@ export default function App() {
             sc.id !== prevScenes[idx].id ||
             Math.abs(sc.startSec - prevScenes[idx].startSec) > 0.001 ||
             Math.abs(sc.endSec - prevScenes[idx].endSec) > 0.001 ||
-            sc.summary !== prevScenes[idx].summary
+            sc.summary !== prevScenes[idx].summary ||
+            (sc.mediaUrl || "") !== (prevScenes[idx].mediaUrl || "") ||
+            (sc.mediaType || "video") !== (prevScenes[idx].mediaType || "video")
         );
       if (!changed) return;
 
@@ -2356,10 +2433,12 @@ export default function App() {
     const mappedStart = mapCutTimeToSource(project.scenes, startTime);
     const mappedEnd = mapCutTimeToSource(project.scenes, endTime);
 
+    const mappedStartScene = project.scenes[mappedStart.sceneIndex];
     const newItem: SubtitleItem = withSceneId(
       {
         id: `sub-custom-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         sceneIndex: mappedStart.sceneIndex,
+        mediaUrl: mappedStartScene?.mediaUrl,
         startTime,
         endTime,
         sourceStartSec: Number(mappedStart.sourceSec.toFixed(2)),
@@ -2398,6 +2477,102 @@ export default function App() {
     }
   };
 
+  const handleApplyPastedTranscript = (
+    result: StructuredTranscriptImportResult,
+    mode: "replace" | "append"
+  ) => {
+    const curProj = projectRef.current;
+    if (!curProj || result.subtitles.length === 0) return;
+
+    const maxCutDur = Math.max(
+      0.5,
+      curProj.targetDurationSec || localMedia?.durationSec || result.targetDurationSec || 10
+    );
+
+    const clampSub = (sub: SubtitleItem): SubtitleItem => {
+      const startTime = Number(Math.max(0, Math.min(maxCutDur - 0.15, sub.startTime)).toFixed(2));
+      const endTime = Number(
+        Math.max(startTime + 0.15, Math.min(maxCutDur, sub.endTime)).toFixed(2)
+      );
+      const duration = Math.max(0.15, endTime - startTime);
+      const oldDur = Math.max(0.15, sub.endTime - sub.startTime);
+      const ratio = duration / oldDur;
+      const mappedStart = mapCutTimeToSource(curProj.scenes, startTime);
+      const mappedEnd = mapCutTimeToSource(curProj.scenes, endTime);
+      return withSceneId(
+        {
+          ...sub,
+          sceneIndex: mappedStart.sceneIndex,
+          startTime,
+          endTime,
+          sourceStartSec: Number(mappedStart.sourceSec.toFixed(2)),
+          sourceEndSec: Number(mappedEnd.sourceSec.toFixed(2)),
+          words: sub.words.map((w) => ({
+            ...w,
+            startOffsetSec: Number(
+              Math.max(0, Math.min(duration - 0.02, w.startOffsetSec * ratio)).toFixed(2)
+            ),
+            endOffsetSec: Number(
+              Math.max(0.02, Math.min(duration, w.endOffsetSec * ratio)).toFixed(2)
+            ),
+          })),
+        },
+        curProj.scenes
+      );
+    };
+
+    const normalizedSubs = result.subtitles.map(clampSub).sort((a, b) => a.startTime - b.startTime);
+    if (normalizedSubs.length === 0) return;
+
+    pushSubtitleUndo();
+
+    const mergeSubtitles = (base: SubtitleItem[]) =>
+      mode === "replace"
+        ? normalizedSubs.map((s) => ({ ...s, words: s.words.map((w) => ({ ...w })) }))
+        : [
+            ...base,
+            ...normalizedSubs.map((s) => ({ ...s, words: s.words.map((w) => ({ ...w })) })),
+          ].sort((a, b) => a.startTime - b.startTime);
+
+    if (timelineBaselineRef.current) {
+      timelineBaselineRef.current.subtitles = mergeSubtitles(
+        timelineBaselineRef.current.subtitles
+      );
+    }
+
+    setProject((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        isDraft: false,
+        subtitles: mergeSubtitles(prev.subtitles),
+      };
+    });
+
+    setVideoEdit((prev) => ({
+      ...prev,
+      showBurmeseLine: result.hasBurmese ? true : prev.showBurmeseLine,
+      showWordGloss: result.hasWords ? true : prev.showWordGloss,
+      showThaiScript: result.hasThai ? true : prev.showThaiScript,
+    }));
+
+    const firstSub = normalizedSubs[0];
+    setEditingSubtitleId(null);
+    setSelectedSubtitleId(firstSub.id);
+    setStageSelectRequest({ id: firstSub.id, focusPhonetic: false, nonce: Date.now() });
+    handleSeek(firstSub.startTime);
+    setShowPasteTranscriptDialog(false);
+    setSaveNotice(
+      mode === "replace" && curProj.subtitles.length > 0
+        ? `Replaced subtitles with ${normalizedSubs.length} pasted ${
+            normalizedSubs.length === 1 ? "line" : "lines"
+          }.`
+        : `Added ${normalizedSubs.length} pasted ${
+            normalizedSubs.length === 1 ? "subtitle" : "subtitles"
+          }.`
+    );
+  };
+
   const handleDeleteSubtitle = (id: string) => {
     if (project?.subtitles.some((s) => s.id === id)) {
       pushSubtitleUndo();
@@ -2414,6 +2589,23 @@ export default function App() {
         subtitles: prev.subtitles.filter((sub) => sub.id !== id),
       };
     });
+  };
+
+  const handleClearAllSubtitles = () => {
+    const curProj = projectRef.current;
+    if (!curProj || curProj.subtitles.length === 0) return;
+    const clearedCount = curProj.subtitles.length;
+    pushSubtitleUndo();
+    if (timelineBaselineRef.current) {
+      timelineBaselineRef.current.subtitles = [];
+    }
+    setProject((prev) => (prev ? { ...prev, subtitles: [] } : prev));
+    setSelectedSubtitleId(null);
+    setEditingSubtitleId(null);
+    setLoopingSubId(null);
+    setSaveNotice(
+      `Cleared ${clearedCount} ${clearedCount === 1 ? "subtitle" : "subtitles"}.`
+    );
   };
 
   const handleFindReplaceSubtitles = (opts: {
@@ -4195,6 +4387,12 @@ export default function App() {
     setSeekNonce((n) => n + 1);
     setProcessError(null);
     setSaveNotice(null);
+    standaloneTranscriptAbortRef.current?.abort();
+    standaloneTranscriptAbortRef.current = null;
+    setIsTranscribingStandalone(false);
+    setTranscriptProgress(null);
+    setTranscriptError(null);
+    setTranscriptResult(null);
 
     let localFile: File | undefined;
     let localUrl: string | undefined;
@@ -4818,15 +5016,8 @@ export default function App() {
               onDetectedYouTubeDuration={(dur) =>
                 setSourcePreview((prev) => (prev ? { ...prev, durationSec: dur } : prev))
               }
-              onGenerateSubtitles={handleOpenSubtitleGenSettings}
-              onConfirmGenerateSubtitles={handleGenerateSubtitles}
-              onOpenImportSrt={handleOpenImportSrt}
               onExportAudio={localMedia ? () => void handleExportAudioOnly() : undefined}
               isExportingAudio={isExportingAudio}
-              showSubtitleGenSettings={showSubtitleGenSettings}
-              subtitleGenConfig={subtitleGenConfig}
-              onChangeSubtitleGenConfig={handleChangeSubtitleGenConfig}
-              onCloseSubtitleGenSettings={() => setShowSubtitleGenSettings(false)}
               processError={processError}
               onGenerateSingleClip={handleGenerateSingleClip}
               onCancelGenerateSubtitles={handleCancelGenerateSubtitles}
@@ -4841,10 +5032,13 @@ export default function App() {
               onPlayFromTime={handlePlayFromTime}
               onUpdateProjectScenes={handleUpdateProjectScenes}
               onResetTimeline={handleResetTimeline}
+              onAddMediaClip={handleAddMediaClip}
               onUpdateSubtitle={handleUpdateSubtitle}
               onUpdateWordGloss={handleUpdateWordGloss}
               onFindReplaceSubtitles={handleFindReplaceSubtitles}
               onAddSubtitle={handleAddSubtitle}
+              onOpenPasteTranscript={() => setShowPasteTranscriptDialog(true)}
+              onClearAllSubtitles={handleClearAllSubtitles}
               onDeleteSubtitle={handleDeleteSubtitle}
               onUpdateSubtitleTiming={handleUpdateSubtitleTiming}
               onSplitSubtitle={handleSplitSubtitle}
@@ -4905,7 +5099,6 @@ export default function App() {
               onSelectTimelineSubtitle={handleSelectTimelineSubtitle}
               editingSubtitleId={editingSubtitleId}
               onEditSubtitle={(id) => {
-                setShowSubtitleGenSettings(false);
                 setSelectedSubtitleId(id);
                 setEditingSubtitleId(id);
                 setStudioSection("edit");
@@ -4932,6 +5125,20 @@ export default function App() {
               onApplyPasteTranscriptSync={handleApplyPasteTranscriptSync}
               onPreviewSourceSeek={handlePreviewSourceSeek}
               hideCaptions={!SHOW_CAPTIONS_UI}
+              transcriptModelId={transcriptModelId}
+              transcriptLanguage={transcriptLanguage}
+              transcriptWordTimestamps={transcriptWordTimestamps}
+              isTranscribingStandalone={isTranscribingStandalone}
+              transcriptProgress={transcriptProgress}
+              transcriptError={transcriptError}
+              transcriptResult={transcriptResult}
+              onChangeTranscriptModel={setTranscriptModelId}
+              onChangeTranscriptLanguage={setTranscriptLanguage}
+              onChangeTranscriptWordTimestamps={setTranscriptWordTimestamps}
+              onStartStandaloneTranscript={handleStartStandaloneTranscript}
+              onCancelStandaloneTranscript={handleCancelStandaloneTranscript}
+              onClearTranscriptError={() => setTranscriptError(null)}
+              onUpdateTranscriptSegmentText={handleUpdateTranscriptSegmentText}
             />
           );
 
@@ -5014,8 +5221,8 @@ export default function App() {
                   </section>
                 </div>
 
-                {/* Lower Studio Area: Edge-to-Edge Bottom Timeline Dock (visible only in Edit tab when not editing a single subtitle clip or configuring generation settings) */}
-                {studioSection === "edit" && !editingSubtitleId && !showSubtitleGenSettings && (
+                {/* Lower Studio Area: Edge-to-Edge Bottom Timeline Dock (visible only in Edit tab when not editing a single subtitle clip) */}
+                {studioSection === "edit" && !editingSubtitleId && (
                   <div className="shrink-0">
                     <ProjectTimelineEditor
                       dockMode
@@ -5036,8 +5243,9 @@ export default function App() {
                       onUpdateScenes={handleUpdateProjectScenes}
                       onUpdateSubtitleTiming={handleUpdateSubtitleTiming}
                       onAddSubtitle={handleAddSubtitle}
+                      onOpenPasteTranscript={() => setShowPasteTranscriptDialog(true)}
+                      onClearAllSubtitles={handleClearAllSubtitles}
                       onEditSubtitle={(id) => {
-                        setShowSubtitleGenSettings(false);
                         setSelectedSubtitleId(id);
                         setEditingSubtitleId(id);
                         setStudioSection("edit");
@@ -5056,6 +5264,7 @@ export default function App() {
                       canRedo={redoStack.length > 0}
                       onResetTimeline={handleResetTimeline}
                       onGoToScenes={() => setStudioSection("edit")}
+                      onAddMediaClip={handleAddMediaClip}
                       cutSpeechRegions={cutSpeechRegions}
                       onTranscribeRange={handleTranscribeRange}
                       transcribingRange={transcribingRange}
@@ -5063,9 +5272,6 @@ export default function App() {
                       regeneratingClipId={regeneratingClipId}
                       regeneratingClipPercent={regeneratingClipPercent}
                       onGenerateSingleClip={handleGenerateSingleClip}
-                      onGenerateSubtitles={handleOpenSubtitleGenSettings}
-                      generationProgress={generationProgress}
-                      isBusy={isProcessing}
                       onPreviewSourceSeek={handlePreviewSourceSeek}
                       selectedSubtitleId={selectedSubtitleId}
                       onSelectSubtitle={handleSelectTimelineSubtitle}
@@ -5136,29 +5342,13 @@ export default function App() {
         onDiscardResult={handleDiscardExportResult}
       />
 
-      <ImportSrtModal
-        isOpen={showImportSrtModal}
-        hasExistingSubtitles={Boolean(project && project.subtitles.length > 0)}
-        existingSubtitleCount={project?.subtitles.length ?? 0}
-        hasVideo={Boolean(localMedia)}
+      <PasteStructuredTranscriptDialog
+        isOpen={Boolean(showPasteTranscriptDialog && project)}
+        onClose={() => setShowPasteTranscriptDialog(false)}
         selectedScenes={selectedScenes}
-        videoDurationSec={
-          localMedia?.durationSec ??
-          project?.sourceDurationSec ??
-          project?.targetDurationSec ??
-          60
-        }
-        isImporting={isImportingSrt}
-        isExportingAudio={isExportingAudio}
-        progress={importSrtProgress}
-        error={importSrtError}
-        onImport={(content, mode, name) => void handleImportSrtSubtitles(content, mode, name)}
-        onImportStructured={handleImportStructuredTranscript}
-        onExportAudio={localMedia ? () => void handleExportAudioOnly() : undefined}
-        onCancelImport={handleCancelImportSrt}
-        onClose={() => {
-          if (!isImportingSrt) setShowImportSrtModal(false);
-        }}
+        totalDurationSec={project?.targetDurationSec || localMedia?.durationSec || 0}
+        existingSubtitleCount={project?.subtitles.length ?? 0}
+        onApply={handleApplyPastedTranscript}
       />
 
       {shortcutToast && (

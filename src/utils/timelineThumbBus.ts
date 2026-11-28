@@ -18,7 +18,7 @@ function getOrCreateStore(localUrl: string): UrlThumbStore {
   let store = storesByUrl.get(localUrl);
   if (!store) {
     // Keep memory bounded if the user switches between many videos in one session
-    if (storesByUrl.size > 6) {
+    if (storesByUrl.size > 16) {
       const oldestKey = storesByUrl.keys().next().value;
       if (oldestKey) storesByUrl.delete(oldestKey);
     }
@@ -126,5 +126,69 @@ export function capturePassiveThumbFromVideo(
     store.listeners.forEach((fn) => fn());
   } catch {
     // Ignore transient canvas draw failures
+  }
+}
+
+export async function seedPassiveTimelineThumbsForVideoUrl(
+  videoUrl: string,
+  durationSec: number
+): Promise<void> {
+  if (!videoUrl || typeof document === "undefined") return;
+  const existing = storesByUrl.get(videoUrl);
+  if (existing && existing.byBucket.size >= 3) return;
+
+  const vid = document.createElement("video");
+  vid.muted = true;
+  vid.playsInline = true;
+  vid.preload = "auto";
+  vid.src = videoUrl;
+
+  const waitEvent = (evt: "loadeddata" | "seeked", timeoutMs: number) =>
+    new Promise<boolean>((resolve) => {
+      let done = false;
+      const finish = (ok: boolean) => {
+        if (done) return;
+        done = true;
+        window.clearTimeout(timer);
+        vid.removeEventListener(evt, onOk);
+        vid.removeEventListener("error", onErr);
+        resolve(ok);
+      };
+      const onOk = () => finish(true);
+      const onErr = () => finish(false);
+      const timer = window.setTimeout(() => finish(false), timeoutMs);
+      vid.addEventListener(evt, onOk, { once: true });
+      vid.addEventListener("error", onErr, { once: true });
+    });
+
+  try {
+    const loaded = await waitEvent("loadeddata", 5000);
+    if (!loaded || vid.readyState < 2) return;
+    const dur =
+      Number.isFinite(vid.duration) && vid.duration > 0 ? vid.duration : Math.max(0.5, durationSec);
+    const sampleTimes =
+      dur <= 1.2
+        ? [0]
+        : [Math.min(0.15, dur * 0.1), dur * 0.35, dur * 0.7, Math.max(0, dur - 0.25)];
+    for (const sec of sampleTimes) {
+      const clamped = Math.max(0, Math.min(Math.max(0, dur - 0.05), sec));
+      if (Math.abs(vid.currentTime - clamped) > 0.05) {
+        try {
+          vid.currentTime = clamped;
+          await waitEvent("seeked", 2500);
+        } catch {
+          // ignore
+        }
+      }
+      capturePassiveThumbFromVideo(videoUrl, vid, true);
+    }
+  } finally {
+    try {
+      vid.pause();
+      vid.removeAttribute("src");
+      vid.load();
+    } catch {
+      // ignore
+    }
   }
 }

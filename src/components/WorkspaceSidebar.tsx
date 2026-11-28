@@ -51,6 +51,10 @@ import type {
   SpeakingScene,
   SubtitleGenerationProgress,
   SubtitleItem,
+  SubtitleSourceLanguage,
+  TranscriptModelId,
+  TranscriptProgress,
+  TranscriptResult,
   TranslationTone,
   VideoEditSettings,
   VideoProject,
@@ -67,7 +71,7 @@ import { ProjectTimelineEditor } from "./ProjectTimelineEditor";
 import { SubtitleStylePanel } from "./SubtitleStylePanel";
 import { SubtitleDesignPanel, isSubtitleDesignModified } from "./SubtitleDesignPanel";
 import { SubtitleClipEditor } from "./SubtitleClipEditor";
-import { SubtitleGeneratePanel } from "./SubtitleGeneratePanel";
+import { TranscriptPanel } from "./TranscriptPanel";
 import { SavedProjectsPanel } from "./SavedProjectsPanel";
 import { PasteTranscriptModal } from "./PasteTranscriptModal";
 import {
@@ -102,7 +106,7 @@ const NOOP_RESTORE_SNAPSHOT = () => {};
 
 export type WorkspaceTab = "youtube" | "studio" | "projects";
 
-export type StudioSectionId = "edit" | "visual" | "audio" | "subtitle";
+export type StudioSectionId = "edit" | "visual" | "audio" | "subtitle" | "transcript";
 
 interface WorkspaceSidebarProps {
   activeTab: WorkspaceTab;
@@ -143,15 +147,10 @@ interface WorkspaceSidebarProps {
   onResetToRecommended: () => void;
   onRefreshRecommended?: () => void;
   onDetectedYouTubeDuration: (dur: number) => void;
-  onGenerateSubtitles: () => void;
-  onConfirmGenerateSubtitles?: (config: import("../types").SubtitleGenerationConfig) => void;
+  onGenerateSubtitles?: () => void;
   onOpenImportSrt?: () => void;
   onExportAudio?: () => void;
   isExportingAudio?: boolean;
-  showSubtitleGenSettings?: boolean;
-  subtitleGenConfig?: import("../types").SubtitleGenerationConfig;
-  onChangeSubtitleGenConfig?: (next: import("../types").SubtitleGenerationConfig) => void;
-  onCloseSubtitleGenSettings?: () => void;
   processError?: string | null;
   onGenerateSingleClip?: (sceneId: string) => void;
   onCancelGenerateSubtitles?: () => void;
@@ -167,6 +166,7 @@ interface WorkspaceSidebarProps {
   onUpdateProjectScenes: (nextScenes: SpeakingScene[]) => void;
   onRestoreProjectSnapshot?: (scenes: SpeakingScene[], subtitles?: SubtitleItem[]) => void;
   onResetTimeline: () => void;
+  onAddMediaClip?: (files: FileList | File[]) => void;
   onUpdateSubtitle: (
     id: string,
     field: "thaiPhonetic" | "burmese" | "thaiScript",
@@ -189,6 +189,8 @@ interface WorkspaceSidebarProps {
     },
     opts?: { select?: boolean; seekToStart?: boolean }
   ) => void;
+  onOpenPasteTranscript?: () => void;
+  onClearAllSubtitles?: () => void;
   onDeleteSubtitle: (id: string) => void;
   onUpdateSubtitleTiming: (id: string, startTime: number, endTime: number) => void;
   onSplitSubtitle: (id: string) => void;
@@ -283,6 +285,20 @@ interface WorkspaceSidebarProps {
   onApplyPasteTranscriptSync?: (nextSubtitles: SubtitleItem[], changedCount: number) => void;
   onPreviewSourceSeek?: (sourceSec: number | null, opts?: { skipResync?: boolean }) => void;
   hideCaptions?: boolean;
+  transcriptModelId?: TranscriptModelId;
+  transcriptLanguage?: SubtitleSourceLanguage;
+  transcriptWordTimestamps?: boolean;
+  isTranscribingStandalone?: boolean;
+  transcriptProgress?: TranscriptProgress | null;
+  transcriptError?: string | null;
+  transcriptResult?: TranscriptResult | null;
+  onChangeTranscriptModel?: (modelId: TranscriptModelId) => void;
+  onChangeTranscriptLanguage?: (lang: SubtitleSourceLanguage) => void;
+  onChangeTranscriptWordTimestamps?: (enabled: boolean) => void;
+  onStartStandaloneTranscript?: () => void;
+  onCancelStandaloneTranscript?: () => void;
+  onClearTranscriptError?: () => void;
+  onUpdateTranscriptSegmentText?: (segmentId: string, text: string) => void;
 }
 
 const SUBTITLE_TONE_OPTIONS: { id: TranslationTone; label: string }[] = [
@@ -346,14 +362,9 @@ export function WorkspaceSidebar({
   onRefreshRecommended,
   onDetectedYouTubeDuration,
   onGenerateSubtitles,
-  onConfirmGenerateSubtitles,
   onOpenImportSrt,
   onExportAudio,
   isExportingAudio = false,
-  showSubtitleGenSettings = false,
-  subtitleGenConfig,
-  onChangeSubtitleGenConfig,
-  onCloseSubtitleGenSettings,
   processError = null,
   onGenerateSingleClip,
   onCancelGenerateSubtitles,
@@ -369,10 +380,13 @@ export function WorkspaceSidebar({
   onUpdateProjectScenes,
   onRestoreProjectSnapshot,
   onResetTimeline,
+  onAddMediaClip,
   onUpdateSubtitle,
   onUpdateWordGloss,
   onFindReplaceSubtitles,
   onAddSubtitle,
+  onOpenPasteTranscript,
+  onClearAllSubtitles,
   onDeleteSubtitle,
   onUpdateSubtitleTiming,
   onSplitSubtitle,
@@ -444,6 +458,20 @@ export function WorkspaceSidebar({
   onApplyPasteTranscriptSync,
   onPreviewSourceSeek,
   hideCaptions = false,
+  transcriptModelId = "whisper-base",
+  transcriptLanguage = "auto",
+  transcriptWordTimestamps = false,
+  isTranscribingStandalone = false,
+  transcriptProgress = null,
+  transcriptError = null,
+  transcriptResult = null,
+  onChangeTranscriptModel,
+  onChangeTranscriptLanguage,
+  onChangeTranscriptWordTimestamps,
+  onStartStandaloneTranscript,
+  onCancelStandaloneTranscript,
+  onClearTranscriptError,
+  onUpdateTranscriptSegmentText,
 }: WorkspaceSidebarProps) {
   const scrollRootRef = useRef<HTMLDivElement | null>(null);
   const loadMoreSentinelRef = useRef<HTMLDivElement | null>(null);
@@ -1016,8 +1044,7 @@ export function WorkspaceSidebar({
     isMobileStudio &&
       hideCaptions &&
       studioSection === "edit" &&
-      !editingSubtitle &&
-      !showSubtitleGenSettings
+      !editingSubtitle
   );
 
   const dirtyMap = getVideoEditDirtyMap(editSettings, voiceSettings);
@@ -1056,6 +1083,15 @@ export function WorkspaceSidebar({
       label: "Subtitle",
       icon: Captions,
       dirty: isSubtitleDesignModified(editSettings),
+    },
+    {
+      id: "transcript",
+      label: "Transcript",
+      icon: FileText,
+      count:
+        transcriptResult && transcriptResult.segments.length > 0
+          ? transcriptResult.segments.length
+          : undefined,
     },
   ];
 
@@ -1456,7 +1492,7 @@ export function WorkspaceSidebar({
             <div
               role="tablist"
               aria-label="Studio workspace groups"
-              className="h-full flex items-center gap-4 overflow-x-auto no-scrollbar"
+              className="h-full flex items-center gap-3 overflow-x-auto no-scrollbar"
             >
               {studioTabs.map((item) => {
                 const Icon = item.icon;
@@ -1581,7 +1617,6 @@ export function WorkspaceSidebar({
           <div
             className={
               studioSection === "edit" &&
-              !showSubtitleGenSettings &&
               !editingSubtitle &&
               hasSubtitles &&
               captionTab === "script"
@@ -1589,7 +1624,7 @@ export function WorkspaceSidebar({
                 : "@container flex-1 overflow-y-auto overscroll-y-contain studio-scrollbar min-h-0"
             }
           >
-            {!hideCaptions && !showSubtitleGenSettings && (isProcessing || Boolean(regeneratingClipId)) && (() => {
+            {!hideCaptions && (isProcessing || Boolean(regeneratingClipId)) && (() => {
               const stage = generationProgress?.stage ?? "extracting";
               const percent = Math.max(0, Math.min(100, generationProgress?.percent ?? 5));
               const label =
@@ -1673,41 +1708,6 @@ export function WorkspaceSidebar({
               );
             })()}
 
-            {studioSection === "edit" &&
-              showSubtitleGenSettings &&
-              !editingSubtitle &&
-              subtitleGenConfig &&
-              onChangeSubtitleGenConfig &&
-              onConfirmGenerateSubtitles &&
-              onCloseSubtitleGenSettings && (
-              <SubtitleGeneratePanel
-                config={subtitleGenConfig}
-                hasExistingSubtitles={hasProjectSubtitles}
-                existingSubtitleCount={project?.subtitles.length ?? 0}
-                clipCount={selectedScenes.length}
-                totalDurationSec={selectedScenes.reduce(
-                  (acc, s) => acc + Math.max(0, s.endSec - s.startSec),
-                  0
-                )}
-                canGenerate={Boolean(localMedia?.localFile && selectedScenes.length > 0)}
-                missingMediaReason={
-                  !localMedia?.localFile
-                    ? "Link or upload a local video file first to generate subtitles."
-                    : selectedScenes.length === 0
-                      ? "Add at least one clip on the timeline first."
-                      : null
-                }
-                isGenerating={isProcessing}
-                generationProgress={generationProgress}
-                processError={processError}
-                onChangeConfig={onChangeSubtitleGenConfig}
-                onStartGenerate={onConfirmGenerateSubtitles}
-                onOpenImportSrt={onOpenImportSrt}
-                onCancelGenerate={onCancelGenerateSubtitles}
-                onClose={onCloseSubtitleGenSettings}
-              />
-            )}
-
             {studioSection === "edit" && editingSubtitle && project && (
               <SubtitleClipEditor
                 subtitle={editingSubtitle}
@@ -1740,7 +1740,6 @@ export function WorkspaceSidebar({
 
             {studioSection === "edit" &&
               !editingSubtitle &&
-              !showSubtitleGenSettings &&
               !isMobileStudio &&
               hideCaptions &&
               hasStudioVideo && (
@@ -1758,14 +1757,13 @@ export function WorkspaceSidebar({
                   isExportingAudio={isExportingAudio}
                 />
                 <p className="text-[11px] text-[#4d597d] dark:text-[#919ec4] leading-relaxed">
-                  Use the timeline below to split, trim, reorder clips, or generate subtitles.
+                  Use the timeline below to split, trim, and reorder clips.
                 </p>
               </div>
             )}
 
             {studioSection === "edit" &&
               !editingSubtitle &&
-              !showSubtitleGenSettings &&
               !hasSubtitles &&
               !(hideCaptions && hasStudioVideo) && (
               <div className="px-3.5 py-3 flex flex-col gap-3.5 pb-6">
@@ -1792,7 +1790,7 @@ export function WorkspaceSidebar({
                         onChangeTranslationTone={(tone) =>
                           onChangeEditSettings({ ...editSettings, translationTone: tone })
                         }
-                        onGenerate={onGenerateSubtitles}
+                        onGenerate={() => onGenerateSubtitles?.()}
                         onImportSrt={onOpenImportSrt}
                         regeneratingClipId={regeneratingClipId}
                       />
@@ -1836,6 +1834,8 @@ export function WorkspaceSidebar({
                         onUpdateScenes={onUpdateProjectScenes}
                         onUpdateSubtitleTiming={onUpdateSubtitleTiming}
                         onAddSubtitle={onAddSubtitle}
+                        onOpenPasteTranscript={onOpenPasteTranscript}
+                        onClearAllSubtitles={onClearAllSubtitles}
                         onShiftAllSubtitles={onShiftAllSubtitles}
                         onUndo={onUndoProp ?? onUndoSubtitles}
                         onRedo={onRedoProp ?? onRedoSubtitles}
@@ -1843,6 +1843,7 @@ export function WorkspaceSidebar({
                         canRedo={canRedoProp ?? canRedoSubtitles}
                         onResetTimeline={onResetTimeline}
                         onGoToScenes={() => onChangeStudioSection("edit")}
+                        onAddMediaClip={onAddMediaClip}
                         cutSpeechRegions={cutSpeechRegions}
                         onTranscribeRange={onTranscribeRange}
                         transcribingRange={transcribingRange}
@@ -1850,7 +1851,6 @@ export function WorkspaceSidebar({
                         regeneratingClipId={regeneratingClipId}
                         regeneratingClipPercent={regeneratingClipPercent}
                         onGenerateSingleClip={onGenerateSingleClip}
-                        isBusy={isProcessing}
                         onPreviewSourceSeek={onPreviewSourceSeek}
                         selectedSubtitleId={selectedSubtitleId}
                         onSelectSubtitle={onSelectTimelineSubtitle ?? setSelectedSubtitleId}
@@ -1886,7 +1886,7 @@ export function WorkspaceSidebar({
                         onChangeTranslationTone={(tone) =>
                           onChangeEditSettings({ ...editSettings, translationTone: tone })
                         }
-                        onGenerate={onGenerateSubtitles}
+                        onGenerate={() => onGenerateSubtitles?.()}
                         onImportSrt={onOpenImportSrt}
                         regeneratingClipId={regeneratingClipId}
                       />
@@ -1898,7 +1898,6 @@ export function WorkspaceSidebar({
 
             {studioSection === "edit" &&
               !editingSubtitle &&
-              !showSubtitleGenSettings &&
               hasSubtitles &&
               project && (() => {
               const effectiveSpd = getEffectivePlaybackSpeed(
@@ -2360,7 +2359,7 @@ export function WorkspaceSidebar({
                                       onClick={() => {
                                         setSourceConfirmAction(null);
                                         setShowSourceMenu(false);
-                                        onGenerateSubtitles();
+                                        onGenerateSubtitles?.();
                                       }}
                                       className="h-6 px-2.5 rounded-sm bg-teal-700 hover:bg-teal-800 dark:bg-teal-400 text-white dark:text-[#060918] text-[11px] font-semibold cursor-pointer disabled:opacity-45"
                                     >
@@ -2445,6 +2444,8 @@ export function WorkspaceSidebar({
                         onUpdateScenes={onUpdateProjectScenes}
                         onUpdateSubtitleTiming={onUpdateSubtitleTiming}
                         onAddSubtitle={onAddSubtitle}
+                        onOpenPasteTranscript={onOpenPasteTranscript}
+                        onClearAllSubtitles={onClearAllSubtitles}
                         onEditSubtitle={onEditSubtitle}
                         onDeleteSubtitle={onDeleteSubtitle}
                         onSplitSubtitle={onSplitSubtitle}
@@ -2456,6 +2457,7 @@ export function WorkspaceSidebar({
                         canRedo={canRedoProp ?? canRedoSubtitles}
                         onResetTimeline={onResetTimeline}
                         onGoToScenes={() => onChangeStudioSection("edit")}
+                        onAddMediaClip={onAddMediaClip}
                         cutSpeechRegions={cutSpeechRegions}
                         onTranscribeRange={onTranscribeRange}
                         transcribingRange={transcribingRange}
@@ -2463,7 +2465,6 @@ export function WorkspaceSidebar({
                         regeneratingClipId={regeneratingClipId}
                         regeneratingClipPercent={regeneratingClipPercent}
                         onGenerateSingleClip={onGenerateSingleClip}
-                        isBusy={isProcessing}
                         onPreviewSourceSeek={onPreviewSourceSeek}
                         selectedSubtitleId={selectedSubtitleId}
                         onSelectSubtitle={onSelectTimelineSubtitle ?? setSelectedSubtitleId}
@@ -4330,15 +4331,48 @@ export function WorkspaceSidebar({
                 <SubtitleDesignPanel
                   settings={editSettings}
                   hasSubtitles={hasProjectSubtitles}
-                  subtitleCount={hasProjectSubtitles && project ? project.subtitles.length : 0}
-                  copiedTranscript={copiedTranscript}
-                  onCopyTranscript={handleCopyFullTranscript}
-                  onOpenPasteTranscript={
-                    onApplyPasteTranscriptSync
-                      ? () => setShowPasteSyncModal(true)
-                      : undefined
-                  }
                   onChange={onChangeEditSettings}
+                />
+              </div>
+            )}
+
+            {studioSection === "transcript" && (
+              <div
+                aria-label="Audio transcript"
+                className="min-h-full"
+              >
+                <TranscriptPanel
+                  hasVideo={hasStudioVideo}
+                  videoTitle={localMedia?.title || project?.title || "Video"}
+                  durationSec={
+                    hasGeneratedProject(project)
+                      ? project.targetDurationSec
+                      : selectedScenes.length > 0
+                        ? selectedScenes.reduce(
+                            (acc, sc) => acc + Math.max(0, sc.endSec - sc.startSec),
+                            0
+                          )
+                        : localMedia?.durationSec ?? 0
+                  }
+                  selectedModelId={transcriptModelId}
+                  selectedLanguage={transcriptLanguage}
+                  wordTimestamps={transcriptWordTimestamps}
+                  isTranscribing={isTranscribingStandalone}
+                  progress={transcriptProgress}
+                  error={transcriptError}
+                  result={transcriptResult}
+                  onChangeModel={(m) => onChangeTranscriptModel?.(m)}
+                  onChangeLanguage={(lang) => onChangeTranscriptLanguage?.(lang)}
+                  onChangeWordTimestamps={(enabled) =>
+                    onChangeTranscriptWordTimestamps?.(enabled)
+                  }
+                  onStartTranscribe={() => onStartStandaloneTranscript?.()}
+                  onCancelTranscribe={() => onCancelStandaloneTranscript?.()}
+                  onClearError={() => onClearTranscriptError?.()}
+                  onUpdateSegmentText={(segId, text) =>
+                    onUpdateTranscriptSegmentText?.(segId, text)
+                  }
+                  onSeek={(sec) => onSeek(sec)}
                 />
               </div>
             )}
@@ -4366,6 +4400,8 @@ export function WorkspaceSidebar({
                 onUpdateScenes={onUpdateProjectScenes}
                 onUpdateSubtitleTiming={onUpdateSubtitleTiming}
                 onAddSubtitle={onAddSubtitle}
+                onOpenPasteTranscript={onOpenPasteTranscript}
+                onClearAllSubtitles={onClearAllSubtitles}
                 onEditSubtitle={onEditSubtitle}
                 onDeleteSubtitle={onDeleteSubtitle}
                 onSplitSubtitle={onSplitSubtitle}
@@ -4377,6 +4413,7 @@ export function WorkspaceSidebar({
                 canRedo={canRedoProp ?? canRedoSubtitles}
                 onResetTimeline={onResetTimeline}
                 onGoToScenes={() => onChangeStudioSection("edit")}
+                onAddMediaClip={onAddMediaClip}
                 cutSpeechRegions={cutSpeechRegions}
                 onTranscribeRange={onTranscribeRange}
                 transcribingRange={transcribingRange}
@@ -4384,9 +4421,6 @@ export function WorkspaceSidebar({
                 regeneratingClipId={regeneratingClipId}
                 regeneratingClipPercent={regeneratingClipPercent}
                 onGenerateSingleClip={onGenerateSingleClip}
-                onGenerateSubtitles={onGenerateSubtitles}
-                generationProgress={generationProgress}
-                isBusy={isProcessing}
                 onPreviewSourceSeek={onPreviewSourceSeek}
                 selectedSubtitleId={selectedSubtitleId}
                 onSelectSubtitle={onSelectTimelineSubtitle ?? setSelectedSubtitleId}

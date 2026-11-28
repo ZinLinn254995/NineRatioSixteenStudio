@@ -40,6 +40,11 @@ export interface SpeakingScene {
   endSec: number;
   durationSec: number;
   summary: string;
+  mediaType?: "video" | "image";
+  mediaUrl?: string;
+  mediaFile?: File;
+  uploadId?: string;
+  sourceDurationSec?: number;
 }
 
 export interface SubtitleWord {
@@ -54,6 +59,7 @@ export interface SubtitleItem {
   id: string;
   sceneIndex: number;
   sceneId?: string;
+  mediaUrl?: string;
   startTime: number;
   endTime: number;
   sourceStartSec: number;
@@ -286,5 +292,61 @@ export interface SavedProjectRecord {
   createdAt: number;
   updatedAt: number;
 }
+
+export type TranscriptModelId =
+  | "whisper-tiny"
+  | "whisper-base"
+  | "whisper-small"
+  | "whisper-medium"
+  | "whisper-large-v3-turbo"
+  | "whisper-tiny-en"
+  | "gemini-cloud";
+
+export type TranscriptExportFormat =
+  | "txt_plain"
+  | "txt_timed"
+  | "srt"
+  | "vtt"
+  | "csv"
+  | "json"
+  | "md"
+  | "lrc";
+
+export interface TranscriptWord {
+  text: string;
+  startSec: number;
+  endSec: number;
+}
+
+export interface TranscriptSegment {
+  id: string;
+  index: number;
+  startSec: number;
+  endSec: number;
+  text: string;
+  words?: TranscriptWord[];
+}
+
+export interface TranscriptResult {
+  id: string;
+  title: string;
+  modelId: TranscriptModelId;
+  modelLabel: string;
+  language: SubtitleSourceLanguage;
+  durationSec: number;
+  text: string;
+  segments: TranscriptSegment[];
+  createdAt: number;
+}
+
+export interface TranscriptProgress {
+  phase: "extracting" | "downloading" | "loading" | "transcribing";
+  label: string;
+  percent: number;
+  file?: string;
+  loadedBytes?: number;
+  totalBytes?: number;
+}
+
 
 

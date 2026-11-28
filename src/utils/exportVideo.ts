@@ -1202,6 +1202,28 @@ function mapCutTimeToSourceTime(project: VideoProject, cutTime: number): number 
   return 0;
 }
 
+function mapCutTimeToSceneAndSource(
+  project: VideoProject,
+  cutTime: number
+): { scene: VideoProject["scenes"][number] | undefined; sourceSec: number } {
+  if (!project.scenes || project.scenes.length === 0) {
+    return { scene: undefined, sourceSec: Math.max(0, cutTime) };
+  }
+  let acc = 0;
+  for (let i = 0; i < project.scenes.length; i++) {
+    const scene = project.scenes[i];
+    const dur = getSceneDurationSec(scene);
+    if (cutTime <= acc + dur || i === project.scenes.length - 1) {
+      return {
+        scene,
+        sourceSec: Math.min(scene.endSec, scene.startSec + Math.max(0, cutTime - acc)),
+      };
+    }
+    acc += dur;
+  }
+  return { scene: project.scenes[0], sourceSec: 0 };
+}
+
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) {
     throw new DOMException("Video export cancelled.", "AbortError");
@@ -1347,7 +1369,17 @@ export async function exportProjectToMp4(
   const totalFrames = Math.max(1, Math.ceil(totalDuration * fps));
   const fileName = buildSafeMp4FileName(project.title);
 
-  if (!project.localUrl && !project.localFile) {
+  const hasMultiMediaScenes = project.scenes.some(
+    (sc) =>
+      sc.mediaType === "image" ||
+      (Boolean(sc.mediaUrl) && sc.mediaUrl !== project.localUrl)
+  );
+
+  if (
+    !project.localUrl &&
+    !project.localFile &&
+    !project.scenes.some((sc) => Boolean(sc.mediaUrl || sc.mediaFile))
+  ) {
     throw new Error("Local video file is not linked. Please re-link or upload the video first.");
   }
 
@@ -1357,6 +1389,9 @@ export async function exportProjectToMp4(
   let localVideoEl: HTMLVideoElement | null = null;
   let preparedClipUrl: string | null = null;
   let tempLocalUrl: string | null = null;
+  const extraVideoEls = new Map<string, HTMLVideoElement>();
+  const extraImageEls = new Map<string, HTMLImageElement>();
+  const extraTempUrls: string[] = [];
 
   try {
     throwIfAborted(signal);
@@ -1427,6 +1462,44 @@ export async function exportProjectToMp4(
       project.uploadId = resolvedUploadId;
     }
 
+    // Upload any secondary video clips needed for audio muxing in multi-clip timelines
+    if (hasMultiMediaScenes) {
+      const sceneUploadCache = new Map<string, string>();
+      for (const sc of project.scenes) {
+        if (sc.mediaType === "image" || !sc.mediaFile) continue;
+        if (sc.mediaUrl && sc.mediaUrl === project.localUrl) continue;
+        const cacheKey = sc.mediaUrl || `${sc.mediaFile.name}:${sc.mediaFile.size}`;
+        if (sceneUploadCache.has(cacheKey)) {
+          sc.uploadId = sceneUploadCache.get(cacheKey);
+          continue;
+        }
+        let scUploadId = sc.uploadId;
+        if (scUploadId) {
+          const existsTimed = makeTimedController(6000);
+          try {
+            const checkResp = await fetch(
+              `/api/upload-exists/${encodeURIComponent(scUploadId)}`,
+              { signal: existsTimed.signal }
+            );
+            if (checkResp.ok) {
+              const checkData = (await checkResp.json()) as { exists?: boolean };
+              if (!checkData.exists) scUploadId = undefined;
+            }
+          } catch {
+            throwIfAborted(signal);
+          } finally {
+            existsTimed.cleanup();
+          }
+        }
+        if (!scUploadId) {
+          throwIfAborted(signal);
+          scUploadId = await uploadBlobInChunks(sc.mediaFile, sc.mediaFile.name, signal);
+        }
+        sc.uploadId = scUploadId;
+        sceneUploadCache.set(cacheKey, scUploadId);
+      }
+    }
+
     throwIfAborted(signal);
 
     // Explicitly preload all font families, weights & Unicode subsets (Latin, Myanmar, Thai, Mono)
@@ -1457,7 +1530,7 @@ export async function exportProjectToMp4(
     // Eliminates downloading prepared clips & eliminates slow Android <video> frame-by-frame seeking!
     // Phone renders ONLY the lightweight 2D subtitle strip (if subtitles exist) at 15fps,
     // and server FFmpeg composites native source video + subtitle strip + voice audio in ONE fast pass.
-    if (resolvedUploadId && !useOverlaySubtitleLayout) {
+    if (resolvedUploadId && !useOverlaySubtitleLayout && !hasMultiMediaScenes) {
       let subtitleBase64: string | undefined;
       let subtitleUploadId: string | undefined;
       let subtitleFormat: "mp4" | "webm" = "mp4";
@@ -1835,10 +1908,11 @@ export async function exportProjectToMp4(
     const lastFrameCtx = lastFrameCanvas.getContext("2d", { alpha: false });
     let hasCapturedVideoFrame = false;
     let usingPreparedClip = false;
+    let lastFrameSourceKey: string | null = null;
 
     // Ask server ffmpeg to pre-extract an adaptive all-keyframe yuv420p H.264 clip (30s timeout)
     // so every browser frame seek completes in a few ms; fall back cleanly to localUrl if unavailable.
-    if (resolvedUploadId) {
+    if (resolvedUploadId && !hasMultiMediaScenes) {
       const prepTimed = makeTimedController(30_000);
       try {
         const prepResp = await fetch("/api/prepare-export-clip", {
@@ -1846,7 +1920,7 @@ export async function exportProjectToMp4(
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             uploadId: resolvedUploadId,
-            scenes: project.scenes,
+            scenes: project.scenes.map(({ mediaFile: _mf, mediaUrl: _mu, ...rest }) => rest),
           }),
           signal: prepTimed.signal,
         });
@@ -1876,18 +1950,24 @@ export async function exportProjectToMp4(
       activeVideoSrc = tempLocalUrl;
     }
 
+    const ensureHost = () => {
+      if (!hiddenVideoHost) {
+        hiddenVideoHost = document.createElement("div");
+        hiddenVideoHost.style.cssText =
+          "position:fixed;left:0;top:0;width:2px;height:2px;opacity:0.001;pointer-events:none;overflow:hidden;z-index:-1;";
+        document.body.appendChild(hiddenVideoHost);
+      }
+      return hiddenVideoHost;
+    };
+
     if (activeVideoSrc) {
-      hiddenVideoHost = document.createElement("div");
-      // Keep inside viewport at 2x2 opacity:0.001 so Android Chrome does not throttle offscreen <video> decoding
-      hiddenVideoHost.style.cssText =
-        "position:fixed;left:0;top:0;width:2px;height:2px;opacity:0.001;pointer-events:none;overflow:hidden;z-index:-1;";
+      const host = ensureHost();
       localVideoEl = document.createElement("video");
       localVideoEl.preload = "auto";
       localVideoEl.muted = true;
       localVideoEl.playsInline = true;
       localVideoEl.src = activeVideoSrc;
-      hiddenVideoHost.appendChild(localVideoEl);
-      document.body.appendChild(hiddenVideoHost);
+      host.appendChild(localVideoEl);
 
       await waitForVideoReady(localVideoEl, signal);
 
@@ -1925,6 +2005,55 @@ export async function exportProjectToMp4(
             lastFrameCanvas.height
           );
           hasCapturedVideoFrame = true;
+          lastFrameSourceKey = "__primary__";
+        }
+      }
+    }
+
+    // Preload any secondary image or video clips on multi-clip timelines
+    if (hasMultiMediaScenes) {
+      for (const sc of project.scenes) {
+        if (sc.mediaType === "image") {
+          let imgSrc = sc.mediaUrl || "";
+          if (!imgSrc && sc.mediaFile) {
+            imgSrc = URL.createObjectURL(sc.mediaFile);
+            extraTempUrls.push(imgSrc);
+          }
+          if (imgSrc && !extraImageEls.has(imgSrc)) {
+            const img = new Image();
+            await new Promise<void>((resolve) => {
+              const timer = window.setTimeout(resolve, 4000);
+              img.onload = () => {
+                window.clearTimeout(timer);
+                resolve();
+              };
+              img.onerror = () => {
+                window.clearTimeout(timer);
+                resolve();
+              };
+              img.src = imgSrc;
+            });
+            throwIfAborted(signal);
+            extraImageEls.set(imgSrc, img);
+            if (sc.mediaUrl) extraImageEls.set(sc.mediaUrl, img);
+          }
+        } else if (sc.mediaUrl && sc.mediaUrl !== project.localUrl && !extraVideoEls.has(sc.mediaUrl)) {
+          let vidSrc = sc.mediaUrl;
+          if (!vidSrc && sc.mediaFile) {
+            vidSrc = URL.createObjectURL(sc.mediaFile);
+            extraTempUrls.push(vidSrc);
+          }
+          if (vidSrc) {
+            const host = ensureHost();
+            const vid = document.createElement("video");
+            vid.preload = "auto";
+            vid.muted = true;
+            vid.playsInline = true;
+            vid.src = vidSrc;
+            host.appendChild(vid);
+            await waitForVideoReady(vid, signal);
+            extraVideoEls.set(sc.mediaUrl, vid);
+          }
         }
       }
     }
@@ -2008,38 +2137,56 @@ export async function exportProjectToMp4(
         }
       };
 
-      if (localVideoEl && localVideoEl.readyState >= 1) {
-        const targetSrcTime = usingPreparedClip ? t : mapCutTimeToSourceTime(project, t);
-        await seekVideoToTime(localVideoEl, targetSrcTime, signal);
-
-        if (
-          lastFrameCtx &&
-          localVideoEl.readyState >= 2 &&
-          !localVideoEl.seeking &&
-          localVideoEl.videoWidth > 0 &&
-          localVideoEl.videoHeight > 0
-        ) {
-          if (
-            lastFrameCanvas.width !== localVideoEl.videoWidth ||
-            lastFrameCanvas.height !== localVideoEl.videoHeight
-          ) {
-            lastFrameCanvas.width = localVideoEl.videoWidth;
-            lastFrameCanvas.height = localVideoEl.videoHeight;
-          }
-          lastFrameCtx.drawImage(
-            localVideoEl,
-            0,
-            0,
-            lastFrameCanvas.width,
-            lastFrameCanvas.height
-          );
-          hasCapturedVideoFrame = true;
+      const { scene: activeScene, sourceSec: mappedSourceSec } = mapCutTimeToSceneAndSource(
+        project,
+        t
+      );
+      if (activeScene?.mediaType === "image") {
+        const imgEl = activeScene.mediaUrl ? extraImageEls.get(activeScene.mediaUrl) : undefined;
+        if (imgEl && imgEl.naturalWidth > 0 && imgEl.naturalHeight > 0) {
+          drawEditedSource(imgEl, imgEl.naturalWidth, imgEl.naturalHeight);
         }
+      } else {
+        const sourceKey =
+          activeScene?.mediaUrl && extraVideoEls.has(activeScene.mediaUrl)
+            ? activeScene.mediaUrl
+            : "__primary__";
+        const targetVideoEl =
+          sourceKey !== "__primary__" ? extraVideoEls.get(sourceKey) ?? localVideoEl : localVideoEl;
+        if (targetVideoEl && targetVideoEl.readyState >= 1) {
+          const targetSrcTime = usingPreparedClip && sourceKey === "__primary__" ? t : mappedSourceSec;
+          await seekVideoToTime(targetVideoEl, targetSrcTime, signal);
 
-        if (hasCapturedVideoFrame && lastFrameCanvas.width > 0) {
-          drawEditedSource(lastFrameCanvas, lastFrameCanvas.width, lastFrameCanvas.height);
-        } else if (localVideoEl.readyState >= 2 && localVideoEl.videoWidth > 0) {
-          drawEditedSource(localVideoEl, localVideoEl.videoWidth, localVideoEl.videoHeight);
+          if (
+            lastFrameCtx &&
+            targetVideoEl.readyState >= 2 &&
+            !targetVideoEl.seeking &&
+            targetVideoEl.videoWidth > 0 &&
+            targetVideoEl.videoHeight > 0
+          ) {
+            if (
+              lastFrameCanvas.width !== targetVideoEl.videoWidth ||
+              lastFrameCanvas.height !== targetVideoEl.videoHeight
+            ) {
+              lastFrameCanvas.width = targetVideoEl.videoWidth;
+              lastFrameCanvas.height = targetVideoEl.videoHeight;
+            }
+            lastFrameCtx.drawImage(
+              targetVideoEl,
+              0,
+              0,
+              lastFrameCanvas.width,
+              lastFrameCanvas.height
+            );
+            hasCapturedVideoFrame = true;
+            lastFrameSourceKey = sourceKey;
+          }
+
+          if (hasCapturedVideoFrame && lastFrameSourceKey === sourceKey && lastFrameCanvas.width > 0) {
+            drawEditedSource(lastFrameCanvas, lastFrameCanvas.width, lastFrameCanvas.height);
+          } else if (targetVideoEl.readyState >= 2 && targetVideoEl.videoWidth > 0) {
+            drawEditedSource(targetVideoEl, targetVideoEl.videoWidth, targetVideoEl.videoHeight);
+          }
         }
       }
 
@@ -2424,7 +2571,7 @@ export async function exportProjectToMp4(
           renderedVideoUploadId,
           videoFormat,
           uploadId: resolvedUploadId,
-          scenes: project.scenes,
+          scenes: project.scenes.map(({ mediaFile: _mf, mediaUrl: _mu, ...rest }) => rest),
           voiceSettings: { ...voiceSettings, speed },
           targetDurationSec: totalDuration,
           expectedFrameCount: totalFrames,
@@ -2483,10 +2630,24 @@ export async function exportProjectToMp4(
         // ignore
       }
     }
+    for (const vid of extraVideoEls.values()) {
+      try {
+        vid.pause();
+        vid.removeAttribute("src");
+        vid.load();
+      } catch {
+        // ignore
+      }
+    }
+    extraVideoEls.clear();
+    extraImageEls.clear();
     if (hiddenVideoHost && hiddenVideoHost.parentNode) {
       hiddenVideoHost.parentNode.removeChild(hiddenVideoHost);
     }
     if (preparedClipUrl) URL.revokeObjectURL(preparedClipUrl);
     if (tempLocalUrl) URL.revokeObjectURL(tempLocalUrl);
+    for (const u of extraTempUrls) {
+      URL.revokeObjectURL(u);
+    }
   }
 }

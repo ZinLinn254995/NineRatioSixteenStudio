@@ -6,6 +6,8 @@ import {
   Check,
   ChevronDown,
   ChevronUp,
+  ClipboardPaste,
+  Eraser,
   Film,
   Flag,
   GripHorizontal,
@@ -18,7 +20,6 @@ import {
   Play,
   Plus,
   Redo2,
-  RefreshCw,
   RotateCcw,
   Scissors,
   Sparkles,
@@ -29,7 +30,6 @@ import {
 import type {
   SpeechRegion,
   SpeakingScene,
-  SubtitleGenerationProgress,
   SubtitleItem,
   VideoProject,
 } from "../types";
@@ -69,6 +69,8 @@ interface ProjectTimelineEditorProps {
     },
     opts?: { select?: boolean; seekToStart?: boolean }
   ) => void;
+  onOpenPasteTranscript?: () => void;
+  onClearAllSubtitles?: () => void;
   onEditSubtitle?: (id: string) => void;
   onDeleteSubtitle?: (id: string) => void;
   onSplitSubtitle?: (id: string) => void;
@@ -86,6 +88,7 @@ interface ProjectTimelineEditorProps {
   onRestoreSnapshot?: (scenes: SpeakingScene[], subtitles?: SubtitleItem[]) => void;
   onResetTimeline: () => void;
   onGoToScenes?: () => void;
+  onAddMediaClip?: (files: FileList | File[]) => void;
   dockMode?: boolean;
   isCollapsed?: boolean;
   onToggleCollapse?: () => void;
@@ -94,9 +97,6 @@ interface ProjectTimelineEditorProps {
   regeneratingClipId?: string | null;
   regeneratingClipPercent?: number | null;
   onGenerateSingleClip?: (sceneId: string) => void;
-  onGenerateSubtitles?: () => void;
-  generationProgress?: SubtitleGenerationProgress | null;
-  isBusy?: boolean;
   onPreviewSourceSeek?: (sourceSec: number | null, opts?: { skipResync?: boolean }) => void;
   selectedSubtitleId?: string | null;
   onSelectSubtitle?: (id: string | null, opts?: { scrollList?: boolean }) => void;
@@ -119,6 +119,7 @@ interface ClipSegment {
   clipDur: number;
   cutStart: number;
   cutEnd: number;
+  maxSourceSec: number;
 }
 
 interface TimelineThumbFrame {
@@ -145,6 +146,7 @@ type DragMode =
       origStartSec: number;
       origEndSec: number;
       origCutStart: number;
+      isImage?: boolean;
     }
   | {
       type: "trim-end";
@@ -153,6 +155,8 @@ type DragMode =
       origStartSec: number;
       origEndSec: number;
       origCutStart: number;
+      maxEndSec: number;
+      isImage?: boolean;
     }
   | {
       type: "sub-move";
@@ -266,6 +270,8 @@ export function ProjectTimelineEditor({
   onUpdateScenes,
   onUpdateSubtitleTiming,
   onAddSubtitle,
+  onOpenPasteTranscript,
+  onClearAllSubtitles,
   onEditSubtitle,
   onDeleteSubtitle,
   onSplitSubtitle,
@@ -279,13 +285,11 @@ export function ProjectTimelineEditor({
   canRedo = false,
   onResetTimeline,
   onGoToScenes,
+  onAddMediaClip,
   dockMode = false,
   isCollapsed = false,
   onToggleCollapse,
   cutSpeechRegions: controlledCutSpeechRegions,
-  onGenerateSubtitles,
-  generationProgress = null,
-  isBusy = false,
   onPreviewSourceSeek,
   selectedSubtitleId,
   onSelectSubtitle,
@@ -302,6 +306,7 @@ export function ProjectTimelineEditor({
   const trackSlideRef = useRef<HTMLDivElement | null>(null);
   const rulerCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const tracksScrollRef = useRef<HTMLDivElement | null>(null);
+  const addMediaInputRef = useRef<HTMLInputElement | null>(null);
   const userScrolledTracksYRef = useRef(false);
   const isUserScrubbingRef = useRef(false);
   const timeReadoutRef = useRef<HTMLSpanElement | null>(null);
@@ -313,6 +318,8 @@ export function ProjectTimelineEditor({
   const [pxPerSec, setPxPerSec] = useState(32);
   const [viewportWidth, setViewportWidth] = useState(560);
   const [viewportHeight, setViewportHeight] = useState(224);
+  const [trackScrollTop, setTrackScrollTop] = useState<number>(82);
+  const [, setThumbBusVersion] = useState(0);
   const [activeSceneId, setActiveSceneId] = useState<string | null>(null);
   const [localActiveSubId, setLocalActiveSubId] = useState<string | null>(null);
   const activeSubId =
@@ -425,8 +432,11 @@ export function ProjectTimelineEditor({
 
   const sourceDuration = useMemo(() => {
     if (!activeTimelineProject) return 1;
-    const maxSceneEnd = normalizedScenes.reduce((m, s) => Math.max(m, s.endSec), 0);
-    return Math.max(1, activeTimelineProject.sourceDurationSec || 0, maxSceneEnd);
+    const maxPrimaryEnd = normalizedScenes.reduce(
+      (m, s) => (!s.mediaUrl || s.mediaUrl === activeTimelineProject.localUrl ? Math.max(m, s.endSec) : m),
+      0
+    );
+    return Math.max(1, activeTimelineProject.sourceDurationSec || 0, maxPrimaryEnd);
   }, [activeTimelineProject, normalizedScenes]);
 
   const { segments, totalCutDuration } = useMemo(() => {
@@ -437,6 +447,14 @@ export function ProjectTimelineEditor({
       const cutStart = cursor;
       const cutEnd = cursor + dur;
       const sceneId = sc.id || `proj-sc-${idx}`;
+      const maxSourceSec =
+        typeof sc.sourceDurationSec === "number" && Number.isFinite(sc.sourceDurationSec) && sc.sourceDurationSec > 0
+          ? Math.max(sc.endSec, sc.sourceDurationSec)
+          : sc.mediaType === "image"
+            ? Math.max(60, sc.endSec)
+            : !sc.mediaUrl || sc.mediaUrl === activeTimelineProject?.localUrl
+              ? sourceDuration
+              : Math.max(0.5, sc.endSec);
       list.push({
         scene: sc,
         sceneId,
@@ -446,11 +464,12 @@ export function ProjectTimelineEditor({
         clipDur: dur,
         cutStart,
         cutEnd,
+        maxSourceSec,
       });
       cursor = cutEnd;
     });
     return { segments: list, totalCutDuration: cursor };
-  }, [normalizedScenes]);
+  }, [normalizedScenes, activeTimelineProject?.localUrl, sourceDuration]);
 
   const segmentsRef = useRef(segments);
   segmentsRef.current = segments;
@@ -789,37 +808,76 @@ export function ProjectTimelineEditor({
     const scroller = tracksScrollRef.current;
     if (!scroller) return;
     scroller.scrollTop = initialTrackScrollTop;
+    setTrackScrollTop(initialTrackScrollTop);
   }, [isCollapsed, initialTrackScrollTop, projectIdentity]);
 
-  // Subscribe to passive filmstrip frames captured directly from the primary <video> player.
-  // Avoids spawning a second <video> decoder that competes for Android hardware MediaCodec & blob I/O.
+  // Subscribe to passive filmstrip frames captured directly from the primary <video> player
+  // as well as any secondary uploaded video clips.
   useEffect(() => {
     if (!activeTimelineProject) {
       setThumbnails([]);
       return;
     }
 
-    if (!activeTimelineProject.localUrl) {
-      const fallback = activeTimelineProject.keyframeUrls[0] || "";
-      setThumbnails(fallback ? [{ sourceSec: 0, url: fallback }] : []);
-      return;
-    }
+    const extraVideoUrls = Array.from(
+      new Set(
+        normalizedScenes
+          .filter(
+            (sc) =>
+              sc.mediaType !== "image" &&
+              Boolean(sc.mediaUrl) &&
+              sc.mediaUrl !== activeTimelineProject.localUrl
+          )
+          .map((sc) => sc.mediaUrl as string)
+      )
+    );
 
     const currentLocalUrl = activeTimelineProject.localUrl;
     const syncFromBus = () => {
-      const { aspect, frames } = getPassiveTimelineThumbs(currentLocalUrl);
-      if (frames.length > 0) {
-        setThumbAspect(aspect);
-        setThumbnails(frames);
+      if (currentLocalUrl) {
+        const { aspect, frames } = getPassiveTimelineThumbs(currentLocalUrl);
+        if (frames.length > 0) {
+          setThumbAspect(aspect);
+          setThumbnails(frames);
+        } else {
+          const fallback = activeTimelineProject.keyframeUrls[0] || "";
+          setThumbnails(fallback ? [{ sourceSec: 0, url: fallback }] : []);
+        }
       } else {
         const fallback = activeTimelineProject.keyframeUrls[0] || "";
         setThumbnails(fallback ? [{ sourceSec: 0, url: fallback }] : []);
       }
+      setThumbBusVersion((v) => v + 1);
     };
 
     syncFromBus();
-    return subscribePassiveTimelineThumbs(currentLocalUrl, syncFromBus);
-  }, [activeTimelineProject?.localUrl, activeTimelineProject?.keyframeUrls]);
+    const unsubs: (() => void)[] = [];
+    if (currentLocalUrl) {
+      unsubs.push(subscribePassiveTimelineThumbs(currentLocalUrl, syncFromBus));
+    }
+    for (const extraUrl of extraVideoUrls) {
+      unsubs.push(subscribePassiveTimelineThumbs(extraUrl, syncFromBus));
+    }
+    return () => {
+      for (const fn of unsubs) fn();
+    };
+  }, [activeTimelineProject?.localUrl, activeTimelineProject?.keyframeUrls, normalizedScenes]);
+
+  const getClipThumbInfo = useCallback(
+    (seg: ClipSegment): { aspect: number; frames: TimelineThumbFrame[] } => {
+      if (seg.scene.mediaType === "image" && seg.scene.mediaUrl) {
+        return {
+          aspect: 1,
+          frames: [{ sourceSec: 0, url: seg.scene.mediaUrl }],
+        };
+      }
+      if (seg.scene.mediaUrl && seg.scene.mediaUrl !== activeTimelineProject?.localUrl) {
+        return getPassiveTimelineThumbs(seg.scene.mediaUrl);
+      }
+      return { aspect: thumbAspect, frames: thumbnails };
+    },
+    [activeTimelineProject?.localUrl, thumbAspect, thumbnails]
+  );
 
   // Smoothly throttle rapid drag seeks on Stage9x16 so local video playback stays fluid
   const dispatchSeek = useCallback(
@@ -1674,17 +1732,34 @@ export function ProjectTimelineEditor({
       nextStartSec: seg.startSec,
       nextEndSec: seg.endSec,
     };
+    const isImageClip = seg.scene.mediaType === "image";
     trimPreviewRef.current = initTrim;
     setTrimPreview(initTrim);
-    updateDragState({
-      type: mode,
-      sceneId: seg.sceneId,
-      startClientX: e.clientX,
-      origStartSec: seg.startSec,
-      origEndSec: seg.endSec,
-      origCutStart: seg.cutStart,
-    });
-    dispatchPreviewSourceSeek(mode === "trim-start" ? seg.startSec : seg.endSec, true);
+    if (mode === "trim-start") {
+      updateDragState({
+        type: "trim-start",
+        sceneId: seg.sceneId,
+        startClientX: e.clientX,
+        origStartSec: seg.startSec,
+        origEndSec: seg.endSec,
+        origCutStart: seg.cutStart,
+        isImage: isImageClip,
+      });
+    } else {
+      updateDragState({
+        type: "trim-end",
+        sceneId: seg.sceneId,
+        startClientX: e.clientX,
+        origStartSec: seg.startSec,
+        origEndSec: seg.endSec,
+        origCutStart: seg.cutStart,
+        maxEndSec: seg.maxSourceSec,
+        isImage: isImageClip,
+      });
+    }
+    if (!isImageClip) {
+      dispatchPreviewSourceSeek(mode === "trim-start" ? seg.startSec : seg.endSec, true);
+    }
   };
 
   const handlePointerDownSubInteraction = (
@@ -1879,14 +1954,16 @@ export function ProjectTimelineEditor({
       trimPreviewRef.current = nextPreview;
       setTrimPreview(nextPreview);
       setDragBadge({ label: "In", sec: nextStart });
-      dispatchPreviewSourceSeek(nextStart);
+      if (!activeDrag.isImage) {
+        dispatchPreviewSourceSeek(nextStart);
+      }
       return;
     }
 
     if (activeDrag.type === "trim-end") {
       const nextEnd = roundTenth(
         Math.min(
-          sourceDuration,
+          activeDrag.maxEndSec,
           Math.max(activeDrag.origStartSec + 0.5, activeDrag.origEndSec + dt)
         )
       );
@@ -1903,7 +1980,9 @@ export function ProjectTimelineEditor({
       trimPreviewRef.current = nextPreview;
       setTrimPreview(nextPreview);
       setDragBadge({ label: "Out", sec: nextEnd });
-      dispatchPreviewSourceSeek(nextEnd);
+      if (!activeDrag.isImage) {
+        dispatchPreviewSourceSeek(nextEnd);
+      }
       return;
     }
 
@@ -2565,26 +2644,6 @@ export function ProjectTimelineEditor({
         </div>
       )}
 
-      {/* Compact Subtitle Generation Progress Bar */}
-      {isBusy && generationProgress && (
-        <div className="px-3.5 py-1 bg-[#eef2fc] dark:bg-[#10152e] border-b border-[#d2dcf0] dark:border-[#21284c] flex items-center gap-2.5">
-          <span className="text-[11px] font-medium text-[#1c3db8] dark:text-[#93b5fa] truncate flex-1">
-            {generationProgress.label || "Generating subtitles…"}
-          </span>
-          <div className="w-24 h-1.5 rounded-full bg-[#d2dcf0] dark:bg-[#21284c] overflow-hidden shrink-0">
-            <div
-              style={{
-                width: `${Math.max(4, Math.min(100, Math.round(generationProgress.percent || 5)))}%`,
-              }}
-              className="h-full bg-[#1c3db8] dark:bg-[#4e7ef7] transition-[width] duration-300"
-            />
-          </div>
-          <span className="text-[10px] font-mono-tabular font-semibold text-[#1c3db8] dark:text-[#93b5fa] shrink-0">
-            {Math.max(0, Math.min(100, Math.round(generationProgress.percent || 0)))}%
-          </span>
-        </div>
-      )}
-
       {!isDraft && !hideCaptions && onTranscribeRange && showRangeFill && (
         <div
           className={`flex flex-wrap items-center gap-2 text-xs bg-[#eef2fc] dark:bg-[#10152e] border-b border-[#d2dcf0] dark:border-[#21284c] ${
@@ -2687,13 +2746,6 @@ export function ProjectTimelineEditor({
         const hasVisibleSubTrack =
           showFullSubTrack || showSubtitleClipsOnly || newSubMarkStartSec !== null;
 
-        const hasExistingSubtitles =
-          !isDraft && activeTimelineProject.subtitles.length > 0;
-        const genPct =
-          typeof generationProgress?.percent === "number"
-            ? Math.max(0, Math.min(100, Math.round(generationProgress.percent)))
-            : null;
-
         return (
         <div
           className={`relative overflow-hidden bg-[#e7ecf8] dark:bg-[#050712] ${
@@ -2777,7 +2829,9 @@ export function ProjectTimelineEditor({
         <div
           ref={tracksScrollRef}
           onScroll={(e) => {
-            if (Math.abs(e.currentTarget.scrollTop - initialTrackScrollTop) > 2) {
+            const top = e.currentTarget.scrollTop;
+            setTrackScrollTop(top);
+            if (Math.abs(top - initialTrackScrollTop) > 2) {
               userScrolledTracksYRef.current = true;
             }
           }}
@@ -2842,35 +2896,38 @@ export function ProjectTimelineEditor({
                 : seg.clipDur;
               const isSelected = seg.sceneId === activeSceneId;
 
-              const naturalTileW = Math.max(36, Math.min(114, Math.round(64 * thumbAspect)));
+              const { aspect: segAspect, frames: segFrames } = getClipThumbInfo(seg);
+              const naturalTileW = Math.max(36, Math.min(114, Math.round(64 * segAspect)));
               const rawTileCount = Math.max(1, Math.ceil(widthPx / naturalTileW));
               const useExactTileW = rawTileCount <= 64;
               const slotCount = useExactTileW ? rawTileCount : 64;
 
               const clipThumbs =
-                thumbnails.length > 0
-                  ? Array.from({ length: slotCount }, (_, slotIdx) => {
-                      const effectiveStart = activeTrim ? activeTrim.nextStartSec : seg.startSec;
-                      const slotFrac = useExactTileW
-                        ? Math.min(1, ((slotIdx + 0.5) * naturalTileW) / Math.max(1, widthPx))
-                        : (slotIdx + 0.5) / slotCount;
-                      const sampleSourceSec = effectiveStart + slotFrac * displayDur;
+                seg.scene.mediaType === "image" && seg.scene.mediaUrl
+                  ? Array.from({ length: slotCount }, () => seg.scene.mediaUrl!)
+                  : segFrames.length > 0
+                    ? Array.from({ length: slotCount }, (_, slotIdx) => {
+                        const effectiveStart = activeTrim ? activeTrim.nextStartSec : seg.startSec;
+                        const slotFrac = useExactTileW
+                          ? Math.min(1, ((slotIdx + 0.5) * naturalTileW) / Math.max(1, widthPx))
+                          : (slotIdx + 0.5) / slotCount;
+                        const sampleSourceSec = effectiveStart + slotFrac * displayDur;
 
-                      // Pick nearest captured thumbnail frame by source timestamp
-                      let best = thumbnails[0];
-                      let bestDiff = Math.abs(best.sourceSec - sampleSourceSec);
-                      for (let k = 1; k < thumbnails.length; k++) {
-                        const diff = Math.abs(thumbnails[k].sourceSec - sampleSourceSec);
-                        if (diff < bestDiff) {
-                          best = thumbnails[k];
-                          bestDiff = diff;
-                        } else if (thumbnails[k].sourceSec > sampleSourceSec) {
-                          break;
+                        // Pick nearest captured thumbnail frame by source timestamp
+                        let best = segFrames[0];
+                        let bestDiff = Math.abs(best.sourceSec - sampleSourceSec);
+                        for (let k = 1; k < segFrames.length; k++) {
+                          const diff = Math.abs(segFrames[k].sourceSec - sampleSourceSec);
+                          if (diff < bestDiff) {
+                            best = segFrames[k];
+                            bestDiff = diff;
+                          } else if (segFrames[k].sourceSec > sampleSourceSec) {
+                            break;
+                          }
                         }
-                      }
-                      return best.url;
-                    })
-                  : [];
+                        return best.url;
+                      })
+                    : [];
 
               return (
                 <div
@@ -2968,7 +3025,7 @@ export function ProjectTimelineEditor({
                         role="slider"
                         aria-label={`Scene ${idx + 1} end handle`}
                         aria-valuemin={seg.startSec}
-                        aria-valuemax={sourceDuration}
+                        aria-valuemax={seg.maxSourceSec}
                         aria-valuenow={seg.endSec}
                         onPointerDown={(e) => handlePointerDownTrimHandle(e, "trim-end", seg)}
                         className="absolute left-full -top-[2px] -bottom-[2px] w-6 rounded-r-lg bg-teal-600 hover:bg-teal-700 active:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 text-white dark:text-[#060918] shadow-md flex items-center justify-center cursor-ew-resize touch-none z-30"
@@ -3421,11 +3478,54 @@ export function ProjectTimelineEditor({
           </div>
         </div>
 
+        {/* Floating Add Video/Image Clip Button Pinned at Far-Right Edge of Video Track Row */}
+        {onAddMediaClip && (
+          <input
+            ref={addMediaInputRef}
+            type="file"
+            accept="video/*,image/*"
+            multiple
+            className="hidden"
+            onChange={(e) => {
+              const files = e.target.files;
+              if (files && files.length > 0) {
+                onAddMediaClip(files);
+              }
+              e.currentTarget.value = "";
+            }}
+          />
+        )}
+        {onAddMediaClip && !clipReorder && segments.length > 0 && (
+          <div className="pointer-events-none absolute inset-x-0 top-6 bottom-0 overflow-hidden z-[25]">
+            <div
+              style={{ top: `${trackTopBufferPx - trackScrollTop}px` }}
+              className="pointer-events-none absolute right-2.5 h-16 flex items-center"
+            >
+              <button
+                type="button"
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  e.currentTarget.blur();
+                  addMediaInputRef.current?.click();
+                }}
+                title="Add Video or Image Clip"
+                aria-label="Add Video or Image Clip"
+                className="pointer-events-auto w-9 h-9 rounded-xl bg-white hover:bg-[#f3f5fc] active:scale-95 text-[#0c1026] border border-black/10 dark:border-white/20 shadow-[0_4px_14px_rgba(0,0,0,0.34)] flex items-center justify-center cursor-pointer transition-transform transition-colors"
+              >
+                <Plus className="w-5 h-5 stroke-[2.5]" />
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Fixed Center Playhead Line */}
         {!clipReorder && (
           <div
             aria-hidden="true"
-            className="pointer-events-none absolute inset-y-0 left-1/2 -translate-x-1/2 z-30 flex flex-col items-center"
+            className={`pointer-events-none absolute top-0 left-1/2 -translate-x-1/2 z-30 flex flex-col items-center ${
+              segments.length > 0 ? "bottom-14" : "bottom-0"
+            }`}
           >
             <div className="w-3 h-3 rounded-b-sm bg-teal-700 dark:bg-teal-400 shadow-sm" />
             <div className="w-[2px] flex-1 bg-teal-700 dark:bg-teal-400 shadow-[0_0_5px_rgba(28,61,184,0.38)]" />
@@ -3450,16 +3550,20 @@ export function ProjectTimelineEditor({
         {clipReorder && (() => {
           const draggedSeg = segments[clipReorder.fromIndex] ?? null;
           const getMidThumb = (seg: ClipSegment): string | null => {
-            if (thumbnails.length === 0) return null;
+            if (seg.scene.mediaType === "image" && seg.scene.mediaUrl) {
+              return seg.scene.mediaUrl;
+            }
+            const { frames: segFrames } = getClipThumbInfo(seg);
+            if (segFrames.length === 0) return null;
             const midSec = (seg.startSec + seg.endSec) / 2;
-            let best = thumbnails[0];
+            let best = segFrames[0];
             let bestDiff = Math.abs(best.sourceSec - midSec);
-            for (let k = 1; k < thumbnails.length; k++) {
-              const diff = Math.abs(thumbnails[k].sourceSec - midSec);
+            for (let k = 1; k < segFrames.length; k++) {
+              const diff = Math.abs(segFrames[k].sourceSec - midSec);
               if (diff < bestDiff) {
-                best = thumbnails[k];
+                best = segFrames[k];
                 bestDiff = diff;
-              } else if (thumbnails[k].sourceSec > midSec) {
+              } else if (segFrames[k].sourceSec > midSec) {
                 break;
               }
             }
@@ -3714,10 +3818,12 @@ export function ProjectTimelineEditor({
                   }}
                   title="Edit selected subtitle clip"
                   aria-label="Edit selected subtitle clip"
-                  className="min-w-[64px] h-11 px-3.5 rounded-xl border border-[#5d82f0]/55 dark:border-[#4e7ef7]/55 bg-[#e6ecfc]/95 dark:bg-[#1a2554]/95 backdrop-blur-md shadow-[0_4px_14px_rgba(10,16,40,0.12)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.45)] flex flex-col items-center justify-center gap-1 shrink-0 whitespace-nowrap text-[#1c3db8] dark:text-[#93b5fa] hover:bg-[#d7e2fc] dark:hover:bg-[#22306b] active:scale-95 cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-teal-500"
+                  className="w-[96px] h-11 px-1.5 rounded-xl border border-[#5d82f0]/55 dark:border-[#4e7ef7]/55 bg-[#e6ecfc]/95 dark:bg-[#1a2554]/95 backdrop-blur-md shadow-[0_4px_14px_rgba(10,16,40,0.12)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.45)] flex flex-col items-center justify-center gap-1 shrink-0 whitespace-nowrap text-[#1c3db8] dark:text-[#93b5fa] hover:bg-[#d7e2fc] dark:hover:bg-[#22306b] active:scale-95 cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-teal-500"
                 >
-                  <Pencil className="w-[16px] h-[16px] shrink-0" />
-                  <span className="text-[10px] font-semibold leading-none">Edit</span>
+                  <Pencil className="w-4 h-4 shrink-0" />
+                  <span className="text-[10px] font-semibold leading-none truncate max-w-full">
+                    Edit
+                  </span>
                 </button>
               )}
 
@@ -3739,10 +3845,12 @@ export function ProjectTimelineEditor({
                     ? "Split selected subtitle clip"
                     : "Split selected video clip at center playhead"
                 }
-                className="min-w-[64px] h-11 px-3.5 rounded-xl border border-teal-600/35 dark:border-teal-400/35 bg-white/92 dark:bg-[#0d1126]/92 backdrop-blur-md shadow-[0_4px_14px_rgba(10,16,40,0.12)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.45)] flex flex-col items-center justify-center gap-1 shrink-0 whitespace-nowrap text-teal-700 dark:text-teal-300 hover:bg-teal-50/95 dark:hover:bg-[#112438] hover:border-teal-600/60 dark:hover:border-teal-400/60 active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-teal-500"
+                className="w-[96px] h-11 px-1.5 rounded-xl border border-teal-600/35 dark:border-teal-400/35 bg-white/92 dark:bg-[#0d1126]/92 backdrop-blur-md shadow-[0_4px_14px_rgba(10,16,40,0.12)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.45)] flex flex-col items-center justify-center gap-1 shrink-0 whitespace-nowrap text-teal-700 dark:text-teal-300 hover:bg-teal-50/95 dark:hover:bg-[#112438] hover:border-teal-600/60 dark:hover:border-teal-400/60 active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-teal-500"
               >
-                <Scissors className="w-[17px] h-[17px] shrink-0" />
-                <span className="text-[10px] font-semibold leading-none">Split</span>
+                <Scissors className="w-4 h-4 shrink-0" />
+                <span className="text-[10px] font-semibold leading-none truncate max-w-full">
+                  Split
+                </span>
               </button>
 
               {selectedSubtitleItem && onMergeSubtitleWithNext && (
@@ -3764,14 +3872,16 @@ export function ProjectTimelineEditor({
                           : "No adjacent subtitle clip to merge"
                   }
                   aria-label="Merge adjacent subtitle clip"
-                  className={`min-w-[64px] h-11 px-3.5 rounded-xl border backdrop-blur-md shadow-[0_4px_14px_rgba(10,16,40,0.12)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.45)] flex flex-col items-center justify-center gap-1 shrink-0 whitespace-nowrap active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-teal-500 ${
+                  className={`w-[96px] h-11 px-1.5 rounded-xl border backdrop-blur-md shadow-[0_4px_14px_rgba(10,16,40,0.12)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.45)] flex flex-col items-center justify-center gap-1 shrink-0 whitespace-nowrap active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-teal-500 ${
                     showMergeChoice
                       ? "border-[#1c3db8] dark:border-[#4e7ef7] bg-[#1c3db8] dark:bg-[#4e7ef7] text-white dark:text-[#060918]"
                       : "border-[#5d82f0]/45 dark:border-[#4e7ef7]/45 bg-white/92 dark:bg-[#0d1126]/92 text-[#1c3db8] dark:text-[#93b5fa] hover:bg-[#e6ecfc]/95 dark:hover:bg-[#1a2554]/95 hover:border-[#4e7ef7]/75"
                   }`}
                 >
-                  <Merge className="w-[16px] h-[16px] shrink-0" />
-                  <span className="text-[10px] font-semibold leading-none">Merge</span>
+                  <Merge className="w-4 h-4 shrink-0" />
+                  <span className="text-[10px] font-semibold leading-none truncate max-w-full">
+                    Merge
+                  </span>
                 </button>
               )}
 
@@ -3793,10 +3903,12 @@ export function ProjectTimelineEditor({
                     ? "Delete selected subtitle clip"
                     : "Delete selected video clip"
                 }
-                className="min-w-[64px] h-11 px-3.5 rounded-xl border border-[#c6d2ec]/90 dark:border-[#2a3466]/90 bg-white/92 dark:bg-[#0d1126]/92 backdrop-blur-md shadow-[0_4px_14px_rgba(10,16,40,0.12)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.45)] flex flex-col items-center justify-center gap-1 shrink-0 whitespace-nowrap text-[#2a3559] dark:text-[#dce4fb] hover:bg-red-50/95 dark:hover:bg-[#2a1424] hover:border-red-400/60 dark:hover:border-red-500/60 hover:text-red-600 dark:hover:text-red-400 active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-teal-500"
+                className="w-[96px] h-11 px-1.5 rounded-xl border border-[#c6d2ec]/90 dark:border-[#2a3466]/90 bg-white/92 dark:bg-[#0d1126]/92 backdrop-blur-md shadow-[0_4px_14px_rgba(10,16,40,0.12)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.45)] flex flex-col items-center justify-center gap-1 shrink-0 whitespace-nowrap text-[#2a3559] dark:text-[#dce4fb] hover:bg-red-50/95 dark:hover:bg-[#2a1424] hover:border-red-400/60 dark:hover:border-red-500/60 hover:text-red-600 dark:hover:text-red-400 active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-teal-500"
               >
-                <Trash2 className="w-[17px] h-[17px] shrink-0" />
-                <span className="text-[10px] font-medium leading-none">Delete</span>
+                <Trash2 className="w-4 h-4 shrink-0" />
+                <span className="text-[10px] font-semibold leading-none truncate max-w-full">
+                  Delete
+                </span>
               </button>
             </>
           ) : newSubMarkStartSec !== null ? (
@@ -3809,10 +3921,10 @@ export function ProjectTimelineEditor({
                 }}
                 title="Re-mark start time at current playhead"
                 aria-label="Re-mark subtitle start time at current playhead"
-                className="min-w-[78px] h-11 px-3 rounded-xl border border-emerald-600/45 dark:border-emerald-400/45 bg-white/92 dark:bg-[#0d1126]/92 backdrop-blur-md shadow-[0_4px_14px_rgba(10,16,40,0.12)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.45)] flex flex-col items-center justify-center gap-1 shrink-0 whitespace-nowrap text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50/95 dark:hover:bg-[#0f2924] active:scale-95 cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-emerald-500"
+                className="w-[96px] h-11 px-1.5 rounded-xl border border-emerald-600/45 dark:border-emerald-400/45 bg-white/92 dark:bg-[#0d1126]/92 backdrop-blur-md shadow-[0_4px_14px_rgba(10,16,40,0.12)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.45)] flex flex-col items-center justify-center gap-1 shrink-0 whitespace-nowrap text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50/95 dark:hover:bg-[#0f2924] active:scale-95 cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-emerald-500"
               >
-                <Flag className="w-[15px] h-[15px] shrink-0" />
-                <span className="text-[10px] font-mono-tabular font-semibold leading-none">
+                <Flag className="w-4 h-4 shrink-0" />
+                <span className="text-[10px] font-mono-tabular font-semibold leading-none truncate max-w-full">
                   Start {formatTimePrecise(newSubMarkStartSec)}
                 </span>
               </button>
@@ -3825,12 +3937,12 @@ export function ProjectTimelineEditor({
                 }}
                 title="Set end time at current playhead and add empty subtitle"
                 aria-label="Set subtitle end time at current playhead"
-                className="min-w-[96px] h-11 px-4 rounded-xl border border-emerald-600 dark:border-emerald-400 bg-emerald-600 hover:bg-emerald-700 dark:bg-emerald-500 dark:hover:bg-emerald-400 text-white dark:text-[#052e16] backdrop-blur-md shadow-[0_4px_14px_rgba(16,185,129,0.28)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.45)] flex flex-col items-center justify-center gap-1 shrink-0 whitespace-nowrap active:scale-95 cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-emerald-400"
+                className="w-[96px] h-11 px-1.5 rounded-xl border border-emerald-600 dark:border-emerald-400 bg-emerald-600 hover:bg-emerald-700 dark:bg-emerald-500 dark:hover:bg-emerald-400 text-white dark:text-[#052e16] backdrop-blur-md shadow-[0_4px_14px_rgba(16,185,129,0.28)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.45)] flex flex-col items-center justify-center gap-1 shrink-0 whitespace-nowrap active:scale-95 cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-emerald-400"
               >
-                <Check className="w-[17px] h-[17px] shrink-0" />
+                <Check className="w-4 h-4 shrink-0" />
                 <span
                   ref={newSubEndDurRef}
-                  className="text-[10px] font-mono-tabular font-semibold leading-none"
+                  className="text-[10px] font-mono-tabular font-semibold leading-none truncate max-w-full"
                 >
                   Set End
                 </span>
@@ -3844,10 +3956,12 @@ export function ProjectTimelineEditor({
                 }}
                 title="Cancel adding subtitle"
                 aria-label="Cancel adding subtitle"
-                className="min-w-[64px] h-11 px-3 rounded-xl border border-[#c6d2ec]/90 dark:border-[#2a3466]/90 bg-white/92 dark:bg-[#0d1126]/92 backdrop-blur-md shadow-[0_4px_14px_rgba(10,16,40,0.12)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.45)] flex flex-col items-center justify-center gap-1 shrink-0 whitespace-nowrap text-[#4d597d] dark:text-[#919ec4] hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50/95 dark:hover:bg-[#2a1424] hover:border-red-400/60 dark:hover:border-red-500/60 active:scale-95 cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-teal-500"
+                className="w-[96px] h-11 px-1.5 rounded-xl border border-[#c6d2ec]/90 dark:border-[#2a3466]/90 bg-white/92 dark:bg-[#0d1126]/92 backdrop-blur-md shadow-[0_4px_14px_rgba(10,16,40,0.12)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.45)] flex flex-col items-center justify-center gap-1 shrink-0 whitespace-nowrap text-[#4d597d] dark:text-[#919ec4] hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50/95 dark:hover:bg-[#2a1424] hover:border-red-400/60 dark:hover:border-red-500/60 active:scale-95 cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-teal-500"
               >
-                <X className="w-[16px] h-[16px] shrink-0" />
-                <span className="text-[10px] font-medium leading-none">Cancel</span>
+                <X className="w-4 h-4 shrink-0" />
+                <span className="text-[10px] font-semibold leading-none truncate max-w-full">
+                  Cancel
+                </span>
               </button>
             </>
           ) : (
@@ -3862,61 +3976,54 @@ export function ProjectTimelineEditor({
                   }}
                   title="Mark start at playhead to add an empty subtitle"
                   aria-label="Add subtitle at playhead"
-                  className="min-w-[76px] h-11 px-3.5 rounded-xl border border-emerald-600/45 dark:border-emerald-400/45 bg-white/92 dark:bg-[#0d1126]/92 backdrop-blur-md shadow-[0_4px_14px_rgba(10,16,40,0.12)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.45)] flex flex-col items-center justify-center gap-1 shrink-0 whitespace-nowrap text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50/95 dark:hover:bg-[#0f2924] hover:border-emerald-600/70 dark:hover:border-emerald-400/70 active:scale-95 disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-emerald-500"
+                  className="w-[96px] h-11 px-1.5 rounded-xl border border-emerald-600/45 dark:border-emerald-400/45 bg-white/92 dark:bg-[#0d1126]/92 backdrop-blur-md shadow-[0_4px_14px_rgba(10,16,40,0.12)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.45)] flex flex-col items-center justify-center gap-1 shrink-0 whitespace-nowrap text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50/95 dark:hover:bg-[#0f2924] hover:border-emerald-600/70 dark:hover:border-emerald-400/70 active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-emerald-500"
                 >
-                  <Plus className="w-[17px] h-[17px] shrink-0" />
-                  <span className="text-[10px] font-semibold leading-none">Add Subtitle</span>
+                  <Plus className="w-4 h-4 shrink-0" />
+                  <span className="text-[10px] font-semibold leading-none truncate max-w-full">
+                    Add Subtitle
+                  </span>
                 </button>
               )}
 
-              {onGenerateSubtitles && (
+              {onOpenPasteTranscript && (
                 <button
                   type="button"
-                  disabled={isBusy || segments.length === 0 || Boolean(transcribingRange)}
+                  disabled={segments.length === 0}
                   onClick={(e) => {
                     e.currentTarget.blur();
-                    onGenerateSubtitles();
+                    onOpenPasteTranscript();
+                  }}
+                  title="Paste formatted transcript to add subtitles"
+                  aria-label="Paste structured transcript to add subtitles"
+                  className="w-[96px] h-11 px-1.5 rounded-xl border border-teal-600/45 dark:border-teal-400/45 bg-white/92 dark:bg-[#0d1126]/92 backdrop-blur-md shadow-[0_4px_14px_rgba(10,16,40,0.12)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.45)] flex flex-col items-center justify-center gap-1 shrink-0 whitespace-nowrap text-teal-700 dark:text-teal-300 hover:bg-teal-50/95 dark:hover:bg-[#0f2433] hover:border-teal-600/70 dark:hover:border-teal-400/70 active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-teal-500"
+                >
+                  <ClipboardPaste className="w-4 h-4 shrink-0" />
+                  <span className="text-[10px] font-semibold leading-none truncate max-w-full">
+                    Paste Transcript
+                  </span>
+                </button>
+              )}
+
+              {onClearAllSubtitles && (
+                <button
+                  type="button"
+                  disabled={segments.length === 0 || activeTimelineProject.subtitles.length === 0}
+                  onClick={(e) => {
+                    e.currentTarget.blur();
+                    onClearAllSubtitles();
                   }}
                   title={
-                    hasExistingSubtitles
-                      ? "Regenerate subtitles for timeline clips"
-                      : "Generate subtitles for timeline clips"
+                    activeTimelineProject.subtitles.length > 0
+                      ? "Clear all subtitles"
+                      : "No subtitles to clear"
                   }
-                  aria-label={
-                    hasExistingSubtitles
-                      ? "Regenerate subtitles for timeline clips"
-                      : "Generate subtitles for timeline clips"
-                  }
-                  className={`min-w-[76px] h-11 px-3.5 rounded-xl border backdrop-blur-md shadow-[0_4px_14px_rgba(10,16,40,0.12)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.45)] flex flex-col items-center justify-center gap-1 shrink-0 whitespace-nowrap active:scale-95 disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-teal-500 ${
-                    isBusy
-                      ? "border-[#5d82f0]/60 dark:border-[#5d82f0]/60 bg-[#e6ecfc]/95 dark:bg-[#1a2554]/95 text-[#1c3db8] dark:text-[#93b5fa]"
-                      : hasExistingSubtitles
-                        ? "border-[#9ab2f0]/80 dark:border-[#354c9e]/90 bg-white/92 dark:bg-[#0d1126]/92 text-[#1c3db8] dark:text-[#89aefb] hover:bg-[#e6ecfc]/95 dark:hover:bg-[#1a2554]/95"
-                        : "border-[#5d82f0]/55 dark:border-[#4e7ef7]/55 bg-[#e6ecfc]/95 dark:bg-[#1a2554]/95 text-[#1c3db8] dark:text-[#93b5fa] hover:bg-[#d7e2fc] dark:hover:bg-[#22306b]"
-                  }`}
+                  aria-label="Clear all subtitles"
+                  className="w-[96px] h-11 px-1.5 rounded-xl border border-[#c6d2ec]/90 dark:border-[#2a3466]/90 bg-white/92 dark:bg-[#0d1126]/92 backdrop-blur-md shadow-[0_4px_14px_rgba(10,16,40,0.12)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.45)] flex flex-col items-center justify-center gap-1 shrink-0 whitespace-nowrap text-[#2a3559] dark:text-[#dce4fb] hover:bg-red-50/95 dark:hover:bg-[#2a1424] hover:border-red-400/60 dark:hover:border-red-500/60 hover:text-red-600 dark:hover:text-red-400 active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-teal-500"
                 >
-                  {isBusy ? (
-                    <>
-                      <Loader2 className="w-[17px] h-[17px] animate-spin shrink-0" />
-                      <span className="text-[10px] font-mono-tabular font-semibold leading-none">
-                        {genPct !== null ? `${genPct}%` : "Generating…"}
-                      </span>
-                    </>
-                  ) : hasExistingSubtitles ? (
-                    <>
-                      <RefreshCw className="w-[17px] h-[17px] shrink-0" />
-                      <span className="text-[10px] font-semibold leading-none">
-                        Regenerate Subtitle
-                      </span>
-                    </>
-                  ) : (
-                    <>
-                      <Sparkles className="w-[17px] h-[17px] shrink-0" />
-                      <span className="text-[10px] font-semibold leading-none">
-                        Generate Subtitle
-                      </span>
-                    </>
-                  )}
+                  <Eraser className="w-4 h-4 shrink-0" />
+                  <span className="text-[10px] font-semibold leading-none truncate max-w-full">
+                    Clear All
+                  </span>
                 </button>
               )}
 
@@ -3928,10 +4035,12 @@ export function ProjectTimelineEditor({
                 }}
                 title="Reset timeline edits"
                 aria-label="Reset timeline edits"
-                className="min-w-[64px] h-11 px-3.5 rounded-xl border border-[#c6d2ec]/90 dark:border-[#2a3466]/90 bg-white/92 dark:bg-[#0d1126]/92 backdrop-blur-md shadow-[0_4px_14px_rgba(10,16,40,0.12)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.45)] flex flex-col items-center justify-center gap-1 shrink-0 whitespace-nowrap text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] hover:bg-[#eef2fc] dark:hover:bg-[#171f42] hover:border-[#9eb1de] dark:hover:border-[#3e4e91] active:scale-95 cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-teal-500"
+                className="w-[96px] h-11 px-1.5 rounded-xl border border-[#c6d2ec]/90 dark:border-[#2a3466]/90 bg-white/92 dark:bg-[#0d1126]/92 backdrop-blur-md shadow-[0_4px_14px_rgba(10,16,40,0.12)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.45)] flex flex-col items-center justify-center gap-1 shrink-0 whitespace-nowrap text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] hover:bg-[#eef2fc] dark:hover:bg-[#171f42] hover:border-[#9eb1de] dark:hover:border-[#3e4e91] active:scale-95 cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-teal-500"
               >
-                <RotateCcw className="w-[16px] h-[16px] shrink-0" />
-                <span className="text-[10px] font-medium leading-none">Reset</span>
+                <RotateCcw className="w-4 h-4 shrink-0" />
+                <span className="text-[10px] font-semibold leading-none truncate max-w-full">
+                  Reset
+                </span>
               </button>
             </>
           )}

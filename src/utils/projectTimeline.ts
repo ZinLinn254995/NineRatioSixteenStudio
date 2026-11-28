@@ -93,6 +93,8 @@ interface BlockSceneRef {
 }
 
 interface ContiguousBlock {
+  mediaUrl: string;
+  mediaType: "video" | "image";
   startSec: number;
   endSec: number;
   cutStart: number;
@@ -126,8 +128,17 @@ export function remapSubtitlesToScenes(
     if (!Number.isFinite(sc.startSec) || !Number.isFinite(sc.endSec) || sc.endSec <= sc.startSec) {
       continue;
     }
+    const scMediaUrl = sc.mediaUrl || "";
+    const scMediaType = sc.mediaType === "image" ? "image" : "video";
     const prev = blocks[blocks.length - 1];
-    if (prev && Math.abs(prev.endSec - sc.startSec) < 0.03 && sc.endSec > prev.startSec) {
+    if (
+      prev &&
+      prev.mediaUrl === scMediaUrl &&
+      prev.mediaType === scMediaType &&
+      scMediaType !== "image" &&
+      Math.abs(prev.endSec - sc.startSec) < 0.03 &&
+      sc.endSec > prev.startSec
+    ) {
       prev.endSec = sc.endSec;
       prev.sceneRefs.push({
         sceneIndex: i,
@@ -136,6 +147,8 @@ export function remapSubtitlesToScenes(
       });
     } else {
       blocks.push({
+        mediaUrl: scMediaUrl,
+        mediaType: scMediaType,
         startSec: sc.startSec,
         endSec: sc.endSec,
         cutStart: sceneCutStarts[i],
@@ -168,10 +181,12 @@ export function remapSubtitlesToScenes(
     if (!Number.isFinite(subSrcStart) || !Number.isFinite(subSrcEnd) || subSrcEnd <= subSrcStart) {
       continue;
     }
+    const subMediaUrl = sub.mediaUrl || "";
     const subSrcDur = Math.max(0.15, subSrcEnd - subSrcStart);
     const baseWords = Array.isArray(sub.words) ? sub.words : [];
 
     blocks.forEach((block, bIdx) => {
+      if (block.mediaUrl !== subMediaUrl) return;
       const ovStart = Math.max(subSrcStart, block.startSec);
       const ovEnd = Math.min(subSrcEnd, block.endSec);
       if (ovEnd - ovStart < 0.15) return;

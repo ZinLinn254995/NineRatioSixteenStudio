@@ -6164,66 +6164,78 @@ app.post("/api/mux-mp4", async (req, res) => {
           Number.isFinite(rawEnd) && rawEnd > startSec
             ? Math.max(0.1, rawEnd - startSec)
             : Math.max(0.1, Number.isFinite(rawDur) ? rawDur : 0.1);
-        return { startSec, durationSec };
+        const mediaType = sc.mediaType === "image" ? "image" : "video";
+        const scUploadId =
+          typeof sc.uploadId === "string" && sc.uploadId.trim() ? sc.uploadId.trim() : uploadId;
+        return { startSec, durationSec, mediaType, uploadId: scUploadId };
       })
       .filter((sc) => Number.isFinite(sc.startSec) && Number.isFinite(sc.durationSec));
 
     let muxedWithAudio = false;
-    if (uploadId && normalizedScenes.length > 0) {
-      await withUploadSessionLock(
-        uploadId,
-        async (uploadedPath) => {
-          const sourceProbe = await probeMediaInfo(uploadedPath);
-          if (!sourceProbe.hasAudio) {
-            return;
-          }
+    const hasAnyAudioUpload =
+      Boolean(uploadId) || normalizedScenes.some((sc) => sc.mediaType !== "image" && Boolean(sc.uploadId));
+    if (hasAnyAudioUpload && normalizedScenes.length > 0) {
+      const segResults: (string | null)[] = new Array(normalizedScenes.length).fill(null);
+      const hasAudioByUploadId = new Map<string, boolean>();
+      let hasAnyRealAudio = false;
 
-          // Extract scene audio segments in parallel batches of 4 for faster multi-scene muxing
-          const segResults: (string | null)[] = new Array(normalizedScenes.length).fill(null);
-          const extractOne = async (i: number) => {
-            const sc = normalizedScenes[i];
-            const segOut = path.join(tmpDir, `seg-${i}.wav`);
-            let extracted = false;
-            try {
-              await execFileAsync(
-                "ffmpeg",
-                [
-                  "-y",
-                  "-vn",
-                  "-ss",
-                  String(sc.startSec),
-                  "-t",
-                  String(sc.durationSec),
-                  "-i",
-                  uploadedPath,
-                  "-af",
-                  `aresample=44100:async=1,apad,atrim=0:${sc.durationSec.toFixed(4)}`,
-                  "-ac",
-                  "2",
-                  "-ar",
-                  "44100",
-                  segOut,
-                ],
-                FFMPEG_EXEC_OPTS
-              );
-              extracted = fs.existsSync(segOut) && fs.statSync(segOut).size > 44;
-            } catch {
-              extracted = false;
-            }
+      const writeSilenceSegment = async (segOut: string, durationSec: number): Promise<boolean> => {
+        try {
+          await execFileAsync(
+            "ffmpeg",
+            [
+              "-y",
+              "-f",
+              "lavfi",
+              "-i",
+              "anullsrc=r=44100:cl=stereo",
+              "-t",
+              durationSec.toFixed(4),
+              "-ac",
+              "2",
+              "-ar",
+              "44100",
+              segOut,
+            ],
+            FFMPEG_EXEC_OPTS
+          );
+          return fs.existsSync(segOut) && fs.statSync(segOut).size > 44;
+        } catch {
+          return false;
+        }
+      };
 
-            if (!extracted) {
-              // Pad exact silence duration so subsequent scenes never shift out of sync
+      const extractOne = async (i: number) => {
+        const sc = normalizedScenes[i];
+        const segOut = path.join(tmpDir, `seg-${i}.wav`);
+        let extracted = false;
+
+        if (sc.mediaType !== "image" && sc.uploadId) {
+          await withUploadSessionLock(
+            sc.uploadId,
+            async (uploadedPath) => {
+              let hasAudio = hasAudioByUploadId.get(sc.uploadId!);
+              if (hasAudio === undefined) {
+                const sourceProbe = await probeMediaInfo(uploadedPath);
+                hasAudio = sourceProbe.hasAudio;
+                hasAudioByUploadId.set(sc.uploadId!, hasAudio);
+              }
+              if (!hasAudio) return;
+
               try {
                 await execFileAsync(
                   "ffmpeg",
                   [
                     "-y",
-                    "-f",
-                    "lavfi",
-                    "-i",
-                    "anullsrc=r=44100:cl=stereo",
+                    "-vn",
+                    "-ss",
+                    String(sc.startSec),
                     "-t",
-                    sc.durationSec.toFixed(4),
+                    String(sc.durationSec),
+                    "-i",
+                    uploadedPath,
+                    "-af",
+                    `aresample=44100:async=1,apad,atrim=0:${sc.durationSec.toFixed(4)}`,
                     "-ac",
                     "2",
                     "-ar",
@@ -6233,106 +6245,112 @@ app.post("/api/mux-mp4", async (req, res) => {
                   FFMPEG_EXEC_OPTS
                 );
                 extracted = fs.existsSync(segOut) && fs.statSync(segOut).size > 44;
+                if (extracted) hasAnyRealAudio = true;
               } catch {
                 extracted = false;
               }
-            }
+            },
+            { markFinalized: true }
+          );
+        }
 
-            if (extracted) {
-              segResults[i] = segOut;
-            }
-          };
+        if (!extracted) {
+          extracted = await writeSilenceSegment(segOut, sc.durationSec);
+        }
 
-          for (let batchStart = 0; batchStart < normalizedScenes.length; batchStart += 4) {
-            const batch: Promise<void>[] = [];
-            for (
-              let idx = batchStart;
-              idx < Math.min(normalizedScenes.length, batchStart + 4);
-              idx++
-            ) {
-              batch.push(extractOne(idx));
-            }
-            await Promise.all(batch);
+        if (extracted) {
+          segResults[i] = segOut;
+        }
+      };
+
+      for (let batchStart = 0; batchStart < normalizedScenes.length; batchStart += 4) {
+        const batch: Promise<void>[] = [];
+        for (
+          let idx = batchStart;
+          idx < Math.min(normalizedScenes.length, batchStart + 4);
+          idx++
+        ) {
+          batch.push(extractOne(idx));
+        }
+        await Promise.all(batch);
+      }
+
+      const segFiles = segResults.filter((s): s is string => Boolean(s));
+      if (segFiles.length > 0 && hasAnyRealAudio) {
+        let origWavPath = segFiles[0];
+        if (segFiles.length > 1) {
+          origWavPath = path.join(tmpDir, "original-cuts.wav");
+          const concatInputArgs: string[] = [];
+          const concatLabels: string[] = [];
+          for (let i = 0; i < segFiles.length; i++) {
+            concatInputArgs.push("-i", segFiles[i]);
+            concatLabels.push(`[${i}:a]`);
           }
+          await execFileAsync(
+            "ffmpeg",
+            [
+              "-y",
+              ...concatInputArgs,
+              "-filter_complex",
+              `${concatLabels.join("")}concat=n=${segFiles.length}:v=0:a=1[outa]`,
+              "-map",
+              "[outa]",
+              "-ac",
+              "2",
+              "-ar",
+              "44100",
+              origWavPath,
+            ],
+            FFMPEG_EXEC_OPTS
+          );
+        }
 
-          const segFiles = segResults.filter((s): s is string => Boolean(s));
-          if (segFiles.length === 0) {
-            return;
-          }
+        const audioFilters = buildVoiceAudioFilters(voiceSettings);
+        const buildMuxWithAudioArgs = (vArgs: string[]) => [
+          "-y",
+          "-i",
+          inputVideoPath,
+          "-i",
+          origWavPath,
+          "-map",
+          "0:v:0",
+          "-map",
+          "1:a:0",
+          ...vArgs,
+          "-af",
+          audioFilters.join(","),
+          "-c:a",
+          "aac",
+          "-b:a",
+          "192k",
+          "-ar",
+          "44100",
+          "-ac",
+          "2",
+          "-movflags",
+          "+faststart",
+          "-shortest",
+          outputMp4Path,
+        ];
 
-          let origWavPath = segFiles[0];
-          if (segFiles.length > 1) {
-            origWavPath = path.join(tmpDir, "original-cuts.wav");
-            const concatInputArgs: string[] = [];
-            const concatLabels: string[] = [];
-            for (let i = 0; i < segFiles.length; i++) {
-              concatInputArgs.push("-i", segFiles[i]);
-              concatLabels.push(`[${i}:a]`);
+        let muxDone = false;
+        if (canStreamCopyVideo) {
+          try {
+            await execFileAsync("ffmpeg", buildMuxWithAudioArgs(videoCopyArgs), FFMPEG_EXEC_OPTS);
+            if (fs.existsSync(outputMp4Path) && fs.statSync(outputMp4Path).size > 512) {
+              muxDone = true;
+              muxedWithAudio = true;
             }
-            await execFileAsync(
-              "ffmpeg",
-              [
-                "-y",
-                ...concatInputArgs,
-                "-filter_complex",
-                `${concatLabels.join("")}concat=n=${segFiles.length}:v=0:a=1[outa]`,
-                "-map",
-                "[outa]",
-                "-ac",
-                "2",
-                "-ar",
-                "44100",
-                origWavPath,
-              ],
-              FFMPEG_EXEC_OPTS
-            );
+          } catch {
+            // Fall back to re-encode below
           }
+        }
 
-          const audioFilters = buildVoiceAudioFilters(voiceSettings);
-          const buildMuxWithAudioArgs = (vArgs: string[]) => [
-            "-y",
-            "-i",
-            inputVideoPath,
-            "-i",
-            origWavPath,
-            "-map",
-            "0:v:0",
-            "-map",
-            "1:a:0",
-            ...vArgs,
-            "-af",
-            audioFilters.join(","),
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            "-ar",
-            "44100",
-            "-ac",
-            "2",
-            "-movflags",
-            "+faststart",
-            "-shortest",
-            outputMp4Path,
-          ];
-
-          if (canStreamCopyVideo) {
-            try {
-              await execFileAsync("ffmpeg", buildMuxWithAudioArgs(videoCopyArgs), FFMPEG_EXEC_OPTS);
-              if (fs.existsSync(outputMp4Path) && fs.statSync(outputMp4Path).size > 512) {
-                muxedWithAudio = true;
-                return;
-              }
-            } catch {
-              // Fall back to re-encode below
-            }
-          }
-
+        if (!muxDone) {
           await execFileAsync("ffmpeg", buildMuxWithAudioArgs(videoReencodeArgs), FFMPEG_EXEC_OPTS);
           muxedWithAudio = true;
-        },
-        { markFinalized: true }
-      );
+        }
+      }
     }
 
     if (!muxedWithAudio) {
@@ -6924,6 +6942,337 @@ app.get("/api/download-export/:exportId", (req, res) => {
     }
   });
   stream.pipe(res);
+});
+
+app.post("/api/extract-audio-pcm", async (req, res) => {
+  const { uploadId, scenes = [] } = (req.body || {}) as {
+    uploadId?: string;
+    scenes?: Array<{ startSec: number; endSec: number }>;
+  };
+
+  if (!uploadId) {
+    res.status(400).json({ error: "Missing uploadId for audio extraction." });
+    return;
+  }
+
+  const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pcm-extract-"));
+  try {
+    const pcmResult = await withUploadSessionLock(uploadId, async (videoPath) => {
+      const info = await probeMediaInfo(videoPath);
+      if (!info.hasAudio) {
+        return { error: "This video file does not contain an audio track." as const };
+      }
+      const totalDur = Math.max(0.5, info.durationSec || 120);
+      const validScenes =
+        Array.isArray(scenes) && scenes.length > 0
+          ? scenes
+              .map((sc) => {
+                const startSec = Math.max(0, Math.min(totalDur, Number(sc.startSec) || 0));
+                const endSec = Math.max(startSec + 0.1, Math.min(totalDur, Number(sc.endSec) || totalDur));
+                return { startSec, endSec, durationSec: endSec - startSec };
+              })
+              .filter((sc) => sc.durationSec > 0.05)
+          : [{ startSec: 0, endSec: totalDur, durationSec: totalDur }];
+
+      const pcmBuffers: Buffer[] = [];
+      for (let i = 0; i < validScenes.length; i++) {
+        const sc = validScenes[i];
+        const outPcmPath = path.join(tmpDir, `scene-${i}.pcm`);
+        await execFileAsync(
+          "ffmpeg",
+          [
+            "-y",
+            "-ss",
+            sc.startSec.toFixed(3),
+            "-i",
+            videoPath,
+            "-t",
+            sc.durationSec.toFixed(3),
+            "-vn",
+            "-sn",
+            "-dn",
+            "-af",
+            "aresample=async=1:first_pts=0",
+            "-f",
+            "s16le",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            outPcmPath,
+          ],
+          FFMPEG_EXEC_OPTS
+        );
+        if (fs.existsSync(outPcmPath)) {
+          pcmBuffers.push(await fs.promises.readFile(outPcmPath));
+        }
+      }
+      return { wav: pcmToWavBuffer(Buffer.concat(pcmBuffers), 16000) };
+    });
+
+    if (!pcmResult) {
+      res.status(404).json({ error: "Uploaded video session expired. Please re-select the file." });
+      return;
+    }
+    if ("error" in pcmResult) {
+      res.status(422).json({ error: pcmResult.error });
+      return;
+    }
+
+    res.setHeader("Content-Type", "audio/wav");
+    res.setHeader("Content-Length", String(pcmResult.wav.length));
+    res.send(pcmResult.wav);
+  } catch (err) {
+    console.error("Extract audio PCM error:", err);
+    res.status(500).json({
+      error: err instanceof Error ? err.message : "Failed to extract audio from video.",
+    });
+  } finally {
+    await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
+app.post("/api/transcript-only", async (req, res) => {
+  const {
+    uploadId,
+    clips = [],
+    scenes = [],
+    language = "auto",
+  } = (req.body || {}) as {
+    uploadId?: string;
+    clips?: Array<{
+      startSec: number;
+      endSec: number;
+      trimLeadSec?: number;
+      durationSec?: number;
+      audioBase64: string;
+      mimeType?: string;
+    }>;
+    scenes?: Array<{ startSec: number; endSec: number }>;
+    language?: string;
+  };
+
+  const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "tr-only-"));
+  try {
+    const ai = getGeminiClient();
+    const clipPcms: Array<{ pcm: Buffer; durationSec: number }> = [];
+
+    if (Array.isArray(clips) && clips.length > 0) {
+      for (let i = 0; i < clips.length; i++) {
+        const clip = clips[i];
+        const rawBuf = clip?.audioBase64 ? Buffer.from(clip.audioBase64, "base64") : null;
+        if (!rawBuf || rawBuf.length < 32) continue;
+        const ext = clip.mimeType?.includes("wav") ? ".wav" : ".m4a";
+        const inPath = path.join(tmpDir, `clip-${i}${ext}`);
+        const outPcmPath = path.join(tmpDir, `clip-${i}.pcm`);
+        await fs.promises.writeFile(inPath, rawBuf);
+        const trimLead = Math.max(0, Number(clip.trimLeadSec) || 0);
+        const dur = Math.max(0.25, Number(clip.durationSec) || Math.max(0.25, clip.endSec - clip.startSec));
+        await execFileAsync(
+          "ffmpeg",
+          [
+            "-y",
+            "-ss",
+            trimLead.toFixed(4),
+            "-i",
+            inPath,
+            "-t",
+            dur.toFixed(4),
+            "-vn",
+            "-sn",
+            "-dn",
+            "-af",
+            "aresample=async=1:first_pts=0",
+            "-f",
+            "s16le",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            outPcmPath,
+          ],
+          FFMPEG_EXEC_OPTS
+        );
+        if (fs.existsSync(outPcmPath)) {
+          const pcm = await fs.promises.readFile(outPcmPath);
+          clipPcms.push({ pcm, durationSec: pcm.length / 32000 });
+        }
+      }
+    } else if (uploadId) {
+      const extracted = await withUploadSessionLock(uploadId, async (videoPath) => {
+        const info = await probeMediaInfo(videoPath);
+        if (!info.hasAudio) return { error: "Video has no audio track." as const };
+        const totalDur = Math.max(0.5, info.durationSec || 120);
+        const targetScenes =
+          Array.isArray(scenes) && scenes.length > 0
+            ? scenes
+            : [{ startSec: 0, endSec: totalDur }];
+        const items: Array<{ pcm: Buffer; durationSec: number }> = [];
+        for (let i = 0; i < targetScenes.length; i++) {
+          const s = Math.max(0, Math.min(totalDur, Number(targetScenes[i].startSec) || 0));
+          const e = Math.max(s + 0.1, Math.min(totalDur, Number(targetScenes[i].endSec) || totalDur));
+          const outPcmPath = path.join(tmpDir, `up-${i}.pcm`);
+          await execFileAsync(
+            "ffmpeg",
+            [
+              "-y",
+              "-ss",
+              s.toFixed(3),
+              "-i",
+              videoPath,
+              "-t",
+              (e - s).toFixed(3),
+              "-vn",
+              "-sn",
+              "-dn",
+              "-af",
+              "aresample=async=1:first_pts=0",
+              "-f",
+              "s16le",
+              "-ac",
+              "1",
+              "-ar",
+              "16000",
+              outPcmPath,
+            ],
+            FFMPEG_EXEC_OPTS
+          );
+          if (fs.existsSync(outPcmPath)) {
+            const pcm = await fs.promises.readFile(outPcmPath);
+            items.push({ pcm, durationSec: pcm.length / 32000 });
+          }
+        }
+        return { items };
+      });
+      if (!extracted) {
+        res.status(404).json({ error: "Uploaded video session expired. Please re-select the file." });
+        return;
+      }
+      if ("error" in extracted) {
+        res.status(422).json({ error: extracted.error });
+        return;
+      }
+      clipPcms.push(...extracted.items);
+    } else {
+      res.status(400).json({ error: "No audio clips or uploadId provided." });
+      return;
+    }
+
+    if (clipPcms.length === 0) {
+      res.status(422).json({ error: "No audio found to transcribe." });
+      return;
+    }
+
+    const fullPcm = Buffer.concat(clipPcms.map((c) => c.pcm));
+    const totalDurationSec = fullPcm.length / 32000;
+    const chunkSec = 45;
+    const bytesPerChunk = chunkSec * 32000;
+
+    const transcriptSchema = {
+      type: Type.OBJECT,
+      properties: {
+        segments: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              startSec: { type: Type.NUMBER },
+              endSec: { type: Type.NUMBER },
+              text: { type: Type.STRING },
+            },
+            required: ["startSec", "endSec", "text"],
+          },
+        },
+      },
+      required: ["segments"],
+    };
+
+    const allSegments: Array<{
+      id: string;
+      index: number;
+      startSec: number;
+      endSec: number;
+      text: string;
+    }> = [];
+
+    for (let offsetBytes = 0; offsetBytes < fullPcm.length; offsetBytes += bytesPerChunk) {
+      const slice = fullPcm.subarray(
+        offsetBytes,
+        Math.min(fullPcm.length, offsetBytes + bytesPerChunk)
+      );
+      if (slice.length < 3200) continue;
+      const chunkStartSec = offsetBytes / 32000;
+      const chunkDurSec = slice.length / 32000;
+
+      const wavBuf = await enhanceSpeechWavBuffer(pcmToWavBuffer(slice, 16000));
+      const wavBase64 = wavBuf.toString("base64");
+      const verbatimHint = await transcribeAudioVerbatimWithDedicatedModel(
+        ai,
+        wavBase64,
+        language
+      );
+
+      const promptLines = [
+        `Transcribe ONLY the actual spoken human dialogue in this ${chunkDurSec.toFixed(2)}-second audio clip into timestamped segments.`,
+        language && language !== "auto"
+          ? `Spoken language code: ${language}. Write verbatim in that language's natural script. Do NOT translate.`
+          : "Write verbatim in the original spoken language's natural script. Do NOT translate.",
+        "Return relative timestamps inside [0, " + chunkDurSec.toFixed(2) + "] seconds.",
+        "Skip silence, music, or background noise without inventing words.",
+        verbatimHint
+          ? `Verbatim speech reference from dedicated transcriber:\n${verbatimHint}`
+          : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
+
+      const resp = await generateGroundedWithFailover(
+        ai,
+        {
+          parts: [
+            { inlineData: { mimeType: "audio/wav", data: wavBase64 } },
+            { text: promptLines },
+          ],
+        },
+        transcriptSchema,
+        ThinkingLevel.LOW
+      );
+
+      let parsed: { segments?: Array<{ startSec?: number; endSec?: number; text?: string }> } = {};
+      try {
+        parsed = JSON.parse(resp.text || "{}");
+      } catch {
+        parsed = {};
+      }
+
+      const rawSegs = Array.isArray(parsed.segments) ? parsed.segments : [];
+      for (const seg of rawSegs) {
+        const text = String(seg.text || "").trim();
+        if (!text) continue;
+        const relStart = Math.max(0, Math.min(chunkDurSec, Number(seg.startSec) || 0));
+        const relEnd = Math.max(relStart + 0.15, Math.min(chunkDurSec, Number(seg.endSec) || relStart + 2));
+        allSegments.push({
+          id: `tr-${allSegments.length + 1}`,
+          index: allSegments.length + 1,
+          startSec: Number((chunkStartSec + relStart).toFixed(2)),
+          endSec: Number((chunkStartSec + relEnd).toFixed(2)),
+          text,
+        });
+      }
+    }
+
+    res.json({
+      durationSec: Number(totalDurationSec.toFixed(2)),
+      text: allSegments.map((s) => s.text).join(" "),
+      segments: allSegments,
+    });
+  } catch (err) {
+    console.error("Transcript-only error:", err);
+    const formatted = formatGeminiError(err, "Failed to transcribe audio.");
+    res.status(formatted.status).json({ error: formatted.message });
+  } finally {
+    await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
 });
 
 // Ensure unknown /api/* routes and Express middleware errors always return JSON (never HTML)
