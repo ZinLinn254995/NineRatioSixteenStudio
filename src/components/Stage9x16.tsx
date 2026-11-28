@@ -14,6 +14,7 @@ import { findActiveSubtitle, getScrollAnchorSubtitle } from "../utils/projectTim
 import { hasGeneratedProject, hasProjectMedia } from "../utils/projectState";
 import {
   VIDEO_ASPECT_RATIO_OPTIONS,
+  resolveOverlaySubtitleNormalizedPosition,
   resolveStageCanvasGeometry,
   resolveSubtitleFontMultiplier,
   resolveSubtitleFontStack,
@@ -92,6 +93,7 @@ interface Stage9x16Props {
   previewScale?: number;
   onChangePreviewScale?: (scale: number) => void;
   onChangeVideoHeightPct?: (pct: number) => void;
+  onChangeSubtitleOverlayPos?: (xPct: number, yPct: number) => void;
   onChangeAspectRatio?: (ratio: VideoAspectRatio) => void;
   onUploadVideo?: (file: File) => void;
   onDetectedDuration?: (dur: number) => void;
@@ -138,6 +140,7 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
     previewScale = DEFAULT_STAGE_PREVIEW_SCALE,
     onChangePreviewScale,
     onChangeVideoHeightPct,
+    onChangeSubtitleOverlayPos,
     onChangeAspectRatio,
     onUploadVideo,
     onDetectedDuration,
@@ -204,6 +207,15 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
   onChangeVideoHeightPctRef.current = onChangeVideoHeightPct;
   const dragVideoHeightPctRef = useRef<number | null>(null);
   dragVideoHeightPctRef.current = dragVideoHeightPct;
+  const overlaySafeBoxRef = useRef<HTMLDivElement | null>(null);
+  const [dragOverlayPos, setDragOverlayPos] = useState<{ xPct: number; yPct: number } | null>(null);
+  const [isDraggingOverlay, setIsDraggingOverlay] = useState(false);
+  const dragOverlayPosRef = useRef<{ xPct: number; yPct: number } | null>(null);
+  dragOverlayPosRef.current = dragOverlayPos;
+  const overlayDragCleanupRef = useRef<(() => void) | null>(null);
+  const suppressOverlayClickRef = useRef(false);
+  const onChangeSubtitleOverlayPosRef = useRef(onChangeSubtitleOverlayPos);
+  onChangeSubtitleOverlayPosRef.current = onChangeSubtitleOverlayPos;
   const [viewportMetrics, setViewportMetrics] = useState<{
     width: number;
     height: number;
@@ -776,6 +788,7 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
   useEffect(() => {
     return () => {
       splitDragCleanupRef.current?.();
+      overlayDragCleanupRef.current?.();
       if (splitRafRef.current !== null) {
         cancelAnimationFrame(splitRafRef.current);
       }
@@ -1156,10 +1169,87 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
                 (lineSpacing === "compact" ? 6 : lineSpacing === "relaxed" ? 11 : 8) *
                   logicalBaseScale
               );
-              const bottomMarginPx = Math.round(
-                stageGeometry.logicalHeight * (isPortraitOverlay ? 0.055 : 0.04)
-              );
-              const scrimTopPadPx = Math.round(stageGeometry.logicalHeight * 0.1);
+              const { xPct, yPct, tX, tY, padX: safePadX, padTop: safePadTop, padBottom: safePadBottom } =
+                resolveOverlaySubtitleNormalizedPosition(
+                  stageGeometry.logicalWidth,
+                  stageGeometry.logicalHeight,
+                  dragOverlayPos ? dragOverlayPos.xPct : editSettings.subtitleOverlayX,
+                  dragOverlayPos ? dragOverlayPos.yPct : editSettings.subtitleOverlayY
+                );
+              const scrimAlpha = Math.max(0, Math.min(1, (yPct - 55) / 20));
+              const scrimHeightPx = Math.round(stageGeometry.logicalHeight * 0.34);
+
+              const handleOverlayPointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
+                if (!onChangeSubtitleOverlayPos) return;
+                if (e.button !== 0 && e.pointerType === "mouse") return;
+                const safeEl = overlaySafeBoxRef.current;
+                if (!safeEl) return;
+                const safeRect = safeEl.getBoundingClientRect();
+                const btnRect = e.currentTarget.getBoundingClientRect();
+                const availW = Math.max(24, safeRect.width - btnRect.width);
+                const availH = Math.max(24, safeRect.height - btnRect.height);
+                const pointerId = e.pointerId;
+                const startClientX = e.clientX;
+                const startClientY = e.clientY;
+                const startX = xPct;
+                const startY = yPct;
+                let moved = false;
+
+                overlayDragCleanupRef.current?.();
+                suppressOverlayClickRef.current = false;
+
+                const updateFromClient = (clientX: number, clientY: number) => {
+                  const dx = clientX - startClientX;
+                  const dy = clientY - startClientY;
+                  if (!moved && Math.hypot(dx, dy) > 4) {
+                    moved = true;
+                    setIsDraggingOverlay(true);
+                  }
+                  if (!moved) return;
+                  let nextX = Math.max(-50, Math.min(50, Math.round(startX + (dx / availW) * 100)));
+                  let nextY = Math.max(0, Math.min(100, Math.round(startY + (dy / availH) * 100)));
+                  if (Math.abs(nextX) <= 2) nextX = 0;
+                  if (Math.abs(nextY - 50) <= 2) nextY = 50;
+                  const nextPos = { xPct: nextX, yPct: nextY };
+                  dragOverlayPosRef.current = nextPos;
+                  setDragOverlayPos(nextPos);
+                };
+
+                const finish = () => {
+                  overlayDragCleanupRef.current?.();
+                  overlayDragCleanupRef.current = null;
+                  const committed = dragOverlayPosRef.current;
+                  dragOverlayPosRef.current = null;
+                  setDragOverlayPos(null);
+                  setIsDraggingOverlay(false);
+                  if (moved && committed) {
+                    suppressOverlayClickRef.current = true;
+                    onChangeSubtitleOverlayPosRef.current?.(committed.xPct, committed.yPct);
+                    window.setTimeout(() => {
+                      suppressOverlayClickRef.current = false;
+                    }, 80);
+                  }
+                };
+
+                const onWinMove = (ev: PointerEvent) => {
+                  if (ev.pointerId !== pointerId) return;
+                  if (ev.cancelable) ev.preventDefault();
+                  updateFromClient(ev.clientX, ev.clientY);
+                };
+                const onWinUp = (ev: PointerEvent) => {
+                  if (ev.pointerId !== pointerId) return;
+                  finish();
+                };
+
+                window.addEventListener("pointermove", onWinMove, { passive: false });
+                window.addEventListener("pointerup", onWinUp);
+                window.addEventListener("pointercancel", onWinUp);
+                overlayDragCleanupRef.current = () => {
+                  window.removeEventListener("pointermove", onWinMove);
+                  window.removeEventListener("pointerup", onWinUp);
+                  window.removeEventListener("pointercancel", onWinUp);
+                };
+              };
 
               return (
                 <div className="pointer-events-none absolute inset-0 z-10 overflow-hidden">
@@ -1170,27 +1260,70 @@ export const Stage9x16 = forwardRef<Stage9x16Handle, Stage9x16Props>(function St
                       transform: `scale(${stageScale}) translateZ(0)`,
                       transformOrigin: "top left",
                     }}
-                    className="absolute top-0 left-0 flex flex-col justify-end items-center"
+                    className="absolute top-0 left-0"
                   >
+                    {scrimAlpha > 0.01 && (
+                      <div
+                        aria-hidden="true"
+                        style={{
+                          height: `${scrimHeightPx}px`,
+                          opacity: scrimAlpha,
+                        }}
+                        className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/75 via-black/32 to-transparent"
+                      />
+                    )}
                     <div
+                      ref={overlaySafeBoxRef}
                       style={{
-                        paddingLeft: "28px",
-                        paddingRight: "28px",
-                        paddingTop: `${scrimTopPadPx}px`,
-                        paddingBottom: `${bottomMarginPx}px`,
+                        left: `${safePadX}px`,
+                        right: `${safePadX}px`,
+                        top: `${safePadTop}px`,
+                        bottom: `${safePadBottom}px`,
                       }}
-                      className="w-full bg-gradient-to-t from-black/75 via-black/32 to-transparent flex justify-center"
+                      className="pointer-events-none absolute"
                     >
+                      {isDraggingOverlay && (
+                        <>
+                          {xPct === 0 && (
+                            <div
+                              aria-hidden="true"
+                              className="pointer-events-none absolute inset-y-0 left-1/2 -translate-x-1/2 border-l border-dashed border-amber-400/80"
+                            />
+                          )}
+                          {yPct === 50 && (
+                            <div
+                              aria-hidden="true"
+                              className="pointer-events-none absolute inset-x-0 top-1/2 -translate-y-1/2 border-t border-dashed border-amber-400/80"
+                            />
+                          )}
+                          <div className="pointer-events-none absolute top-2 left-1/2 -translate-x-1/2 px-2.5 py-1 rounded bg-black/80 text-white text-[18px] font-mono-tabular font-semibold whitespace-nowrap">
+                            X: {xPct > 0 ? `+${xPct}` : xPct}% · Y: {yPct}%
+                          </div>
+                        </>
+                      )}
                       <button
                         type="button"
-                        onClick={() => onSelectSubtitle?.(activeSub.id, activeSub.startTime)}
+                        onPointerDown={handleOverlayPointerDown}
+                        onClick={() => {
+                          if (suppressOverlayClickRef.current) return;
+                          onSelectSubtitle?.(activeSub.id, activeSub.startTime);
+                        }}
                         style={{
+                          position: "absolute",
+                          left: `${tX * 100}%`,
+                          top: `${tY * 100}%`,
+                          transform: `translate(-${tX * 100}%, -${tY * 100}%)`,
+                          width: "max-content",
+                          maxWidth: "100%",
                           fontFamily: fontStack,
                           borderRadius: cardStyle === "minimal" ? "0px" : `${overlayRadius}px`,
                           padding: `${boxPadY}px ${boxPadX}px`,
-                          maxWidth: "92%",
                         }}
-                        className={`pointer-events-auto shadow-xl cursor-pointer transition-colors ${
+                        className={`pointer-events-auto shadow-xl transition-colors ${
+                          onChangeSubtitleOverlayPos
+                            ? "touch-none cursor-grab active:cursor-grabbing"
+                            : "cursor-pointer"
+                        } ${
                           align === "left" ? "text-left" : "text-center"
                         } ${boxClass}`}
                       >

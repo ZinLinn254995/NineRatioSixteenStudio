@@ -13,7 +13,11 @@ import type {
   VideoFilterPresetId,
   VoiceSettings,
 } from "../types";
-import { DEFAULT_VIDEO_EDIT } from "./videoFilters";
+import {
+  DEFAULT_SUBTITLE_OVERLAY_X,
+  DEFAULT_SUBTITLE_OVERLAY_Y,
+  DEFAULT_VIDEO_EDIT,
+} from "./videoFilters";
 import { DEFAULT_VOICE_SETTINGS } from "./voicePresets";
 
 export type CustomPresetCategory = "visual" | "audio" | "subtitle";
@@ -60,6 +64,8 @@ export interface SubtitlePresetValues {
   showWordGloss: boolean;
   showBurmeseLine: boolean;
   videoHeightPct: number;
+  subtitleOverlayX?: number;
+  subtitleOverlayY?: number;
 }
 
 export interface CustomPresetValueMap {
@@ -327,6 +333,16 @@ export function extractSubtitlePresetValues(
     videoHeightPct: Math.round(
       settings.videoHeightPct ?? DEFAULT_VIDEO_EDIT.videoHeightPct
     ),
+    subtitleOverlayX:
+      typeof settings.subtitleOverlayX === "number" &&
+      Number.isFinite(settings.subtitleOverlayX)
+        ? Math.max(-50, Math.min(50, Math.round(settings.subtitleOverlayX)))
+        : DEFAULT_SUBTITLE_OVERLAY_X,
+    subtitleOverlayY:
+      typeof settings.subtitleOverlayY === "number" &&
+      Number.isFinite(settings.subtitleOverlayY)
+        ? Math.max(0, Math.min(100, Math.round(settings.subtitleOverlayY)))
+        : DEFAULT_SUBTITLE_OVERLAY_Y,
   };
 }
 
@@ -415,6 +431,10 @@ export function isSubtitlePresetMatch(
     c.showThaiScript === values.showThaiScript &&
     c.showWordGloss === values.showWordGloss &&
     c.showBurmeseLine === values.showBurmeseLine &&
-    c.videoHeightPct === values.videoHeightPct
+    c.videoHeightPct === values.videoHeightPct &&
+    (c.subtitleOverlayX ?? DEFAULT_SUBTITLE_OVERLAY_X) ===
+      (values.subtitleOverlayX ?? DEFAULT_SUBTITLE_OVERLAY_X) &&
+    (c.subtitleOverlayY ?? DEFAULT_SUBTITLE_OVERLAY_Y) ===
+      (values.subtitleOverlayY ?? DEFAULT_SUBTITLE_OVERLAY_Y)
   );
 }

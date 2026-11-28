@@ -5283,6 +5283,13 @@ export default function App() {
                   videoHeightPct: Math.max(26, Math.min(52, Math.round(pct))),
                 }))
               }
+              onChangeSubtitleOverlayPos={(xPct, yPct) =>
+                setVideoEdit((prev) => ({
+                  ...prev,
+                  subtitleOverlayX: Math.max(-50, Math.min(50, Math.round(xPct))),
+                  subtitleOverlayY: Math.max(0, Math.min(100, Math.round(yPct))),
+                }))
+              }
               onChangeAspectRatio={(aspectRatio) =>
                 setVideoEdit((prev) => ({ ...prev, aspectRatio }))
               }

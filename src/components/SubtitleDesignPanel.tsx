@@ -16,7 +16,13 @@ import type {
   SubtitleWordStyle,
   VideoEditSettings,
 } from "../types";
-import { DEFAULT_VIDEO_EDIT, resolveSubtitleFontStack } from "../utils/videoFilters";
+import {
+  DEFAULT_SUBTITLE_OVERLAY_X,
+  DEFAULT_SUBTITLE_OVERLAY_Y,
+  DEFAULT_VIDEO_EDIT,
+  resolveStageCanvasGeometry,
+  resolveSubtitleFontStack,
+} from "../utils/videoFilters";
 import {
   applySubtitlePresetValues,
   extractSubtitlePresetValues,
@@ -262,7 +268,11 @@ export function isSubtitleDesignModified(settings: VideoEditSettings): boolean {
       DEFAULT_VIDEO_EDIT.subtitleLineSpacing ||
     settings.showThaiScript !== DEFAULT_VIDEO_EDIT.showThaiScript ||
     settings.showWordGloss !== DEFAULT_VIDEO_EDIT.showWordGloss ||
-    settings.showBurmeseLine !== DEFAULT_VIDEO_EDIT.showBurmeseLine
+    settings.showBurmeseLine !== DEFAULT_VIDEO_EDIT.showBurmeseLine ||
+    (settings.subtitleOverlayX ?? DEFAULT_SUBTITLE_OVERLAY_X) !==
+      DEFAULT_SUBTITLE_OVERLAY_X ||
+    (settings.subtitleOverlayY ?? DEFAULT_SUBTITLE_OVERLAY_Y) !==
+      DEFAULT_SUBTITLE_OVERLAY_Y
   );
 }
 
@@ -295,6 +305,17 @@ export function SubtitleDesignPanel({
   const showBurmeseLine = settings.showBurmeseLine !== false;
   const showThaiScript = Boolean(settings.showThaiScript);
   const videoHeightPct = Math.round(settings.videoHeightPct ?? 35);
+  const overlayX =
+    typeof settings.subtitleOverlayX === "number" && Number.isFinite(settings.subtitleOverlayX)
+      ? Math.max(-50, Math.min(50, Math.round(settings.subtitleOverlayX)))
+      : DEFAULT_SUBTITLE_OVERLAY_X;
+  const overlayY =
+    typeof settings.subtitleOverlayY === "number" && Number.isFinite(settings.subtitleOverlayY)
+      ? Math.max(0, Math.min(100, Math.round(settings.subtitleOverlayY)))
+      : DEFAULT_SUBTITLE_OVERLAY_Y;
+  const isOverlayLayout = !resolveStageCanvasGeometry(settings.aspectRatio).isPortraitSplitFriendly;
+  const overlayModified =
+    overlayX !== DEFAULT_SUBTITLE_OVERLAY_X || overlayY !== DEFAULT_SUBTITLE_OVERLAY_Y;
 
   const modified = isSubtitleDesignModified(settings);
 
@@ -331,6 +352,8 @@ export function SubtitleDesignPanel({
       showWordGloss: DEFAULT_VIDEO_EDIT.showWordGloss,
       showBurmeseLine: DEFAULT_VIDEO_EDIT.showBurmeseLine,
       videoHeightPct: DEFAULT_VIDEO_EDIT.videoHeightPct,
+      subtitleOverlayX: DEFAULT_SUBTITLE_OVERLAY_X,
+      subtitleOverlayY: DEFAULT_SUBTITLE_OVERLAY_Y,
     });
   };
 
@@ -854,6 +877,149 @@ export function SubtitleDesignPanel({
               onChange={(e) => update({ videoHeightPct: Number(e.target.value) })}
               className="w-full h-1.5 cursor-pointer"
             />
+          </div>
+        </div>
+
+        {/* Overlay Subtitle X / Y Position */}
+        <div className="p-2.5 rounded-xl border border-[#d2dcf0] dark:border-[#21284c] bg-[#f8faff] dark:bg-[#0d1022]/80 space-y-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <div className="min-w-0">
+              <p className="text-[11px] font-semibold text-[#0c1026] dark:text-[#f3f5fc]">
+                Overlay Subtitle Position (X / Y)
+              </p>
+              <p className="text-[10px] text-[#4d597d] dark:text-[#919ec4]">
+                {isOverlayLayout
+                  ? "Drag subtitle on preview or fine-tune X/Y"
+                  : "Used in Overlay aspect ratios (e.g. 9:16 Overlay)"}
+              </p>
+            </div>
+            {overlayModified && (
+              <button
+                type="button"
+                onClick={() =>
+                  update({
+                    subtitleOverlayX: DEFAULT_SUBTITLE_OVERLAY_X,
+                    subtitleOverlayY: DEFAULT_SUBTITLE_OVERLAY_Y,
+                  })
+                }
+                className="h-6 px-2 rounded border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] text-[10px] font-medium text-[#4d597d] dark:text-[#919ec4] hover:text-teal-700 dark:hover:text-teal-300 inline-flex items-center gap-1 shrink-0 cursor-pointer"
+              >
+                <RotateCcw className="w-2.5 h-2.5" />
+                <span>Reset</span>
+              </button>
+            )}
+          </div>
+
+          {!isOverlayLayout && (
+            <div className="flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg bg-[#edf1fb] dark:bg-[#141933] border border-[#d2dcf0]/80 dark:border-[#21284c]">
+              <span className="text-[10.5px] text-[#4d597d] dark:text-[#919ec4]">
+                Currently using Scroll layout
+              </span>
+              <button
+                type="button"
+                onClick={() => update({ aspectRatio: "9:16-overlay" })}
+                className="h-6 px-2 rounded bg-teal-700 hover:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 text-white dark:text-[#060918] text-[10.5px] font-semibold whitespace-nowrap cursor-pointer transition-colors"
+              >
+                Use 9:16 Overlay
+              </button>
+            </div>
+          )}
+
+          {/* Quick Position Presets */}
+          <div className="grid grid-cols-4 gap-1">
+            {[
+              {
+                label: "Top",
+                active: overlayX === 0 && overlayY <= 12,
+                onClick: () => update({ subtitleOverlayX: 0, subtitleOverlayY: 8 }),
+              },
+              {
+                label: "Middle",
+                active: overlayX === 0 && Math.abs(overlayY - 50) <= 2,
+                onClick: () => update({ subtitleOverlayX: 0, subtitleOverlayY: 50 }),
+              },
+              {
+                label: "Bottom",
+                active: overlayX === 0 && overlayY >= 92,
+                onClick: () =>
+                  update({
+                    subtitleOverlayX: 0,
+                    subtitleOverlayY: DEFAULT_SUBTITLE_OVERLAY_Y,
+                  }),
+              },
+              {
+                label: "Center X",
+                active: overlayX === 0,
+                onClick: () => update({ subtitleOverlayX: 0 }),
+              },
+            ].map((btn) => (
+              <button
+                key={btn.label}
+                type="button"
+                onClick={btn.onClick}
+                className={`h-7 px-1.5 rounded-md border text-[10.5px] font-medium whitespace-nowrap cursor-pointer transition-colors ${
+                  btn.active
+                    ? "border-teal-600 dark:border-teal-400 bg-teal-50/80 dark:bg-teal-950/45 text-teal-800 dark:text-teal-200 font-semibold"
+                    : "border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-white"
+                }`}
+              >
+                {btn.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="grid grid-cols-1 @sm:grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-medium text-[#4d597d] dark:text-[#919ec4]">
+                  Horizontal (X)
+                </span>
+                <button
+                  type="button"
+                  onClick={() => update({ subtitleOverlayX: DEFAULT_SUBTITLE_OVERLAY_X })}
+                  title="Center X (0%)"
+                  className="text-[11px] font-mono-tabular font-semibold text-[#0c1026] dark:text-[#f3f5fc] hover:text-teal-700 dark:hover:text-teal-300 cursor-pointer"
+                >
+                  {overlayX > 0 ? `+${overlayX}%` : overlayX === 0 ? "0% (Center)" : `${overlayX}%`}
+                </button>
+              </div>
+              <input
+                type="range"
+                min={-50}
+                max={50}
+                step={1}
+                value={overlayX}
+                aria-label="Overlay subtitle horizontal X position"
+                onChange={(e) => update({ subtitleOverlayX: Number(e.target.value) })}
+                className="w-full h-1.5 cursor-pointer"
+              />
+            </div>
+
+            <div className="space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-medium text-[#4d597d] dark:text-[#919ec4]">
+                  Vertical (Y)
+                </span>
+                <button
+                  type="button"
+                  onClick={() => update({ subtitleOverlayY: DEFAULT_SUBTITLE_OVERLAY_Y })}
+                  title="Reset Y to 96%"
+                  className="text-[11px] font-mono-tabular font-semibold text-[#0c1026] dark:text-[#f3f5fc] hover:text-teal-700 dark:hover:text-teal-300 cursor-pointer"
+                >
+                  {overlayY}%
+                </button>
+              </div>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={1}
+                value={overlayY}
+                aria-label="Overlay subtitle vertical Y position"
+                onChange={(e) => update({ subtitleOverlayY: Number(e.target.value) })}
+                className="w-full h-1.5 cursor-pointer"
+              />
+            </div>
           </div>
         </div>
 

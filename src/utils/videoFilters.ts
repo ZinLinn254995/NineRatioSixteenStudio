@@ -146,6 +146,39 @@ export function resolveStageCanvasGeometry(
   };
 }
 
+export const DEFAULT_SUBTITLE_OVERLAY_X = 0;
+export const DEFAULT_SUBTITLE_OVERLAY_Y = 96;
+
+export function resolveOverlaySubtitleNormalizedPosition(
+  width: number,
+  height: number,
+  rawX?: number,
+  rawY?: number
+): {
+  xPct: number;
+  yPct: number;
+  tX: number;
+  tY: number;
+  padX: number;
+  padTop: number;
+  padBottom: number;
+} {
+  const xPct =
+    typeof rawX === "number" && Number.isFinite(rawX)
+      ? Math.max(-50, Math.min(50, Math.round(rawX)))
+      : DEFAULT_SUBTITLE_OVERLAY_X;
+  const yPct =
+    typeof rawY === "number" && Number.isFinite(rawY)
+      ? Math.max(0, Math.min(100, Math.round(rawY)))
+      : DEFAULT_SUBTITLE_OVERLAY_Y;
+  const tX = (xPct + 50) / 100;
+  const tY = yPct / 100;
+  const padX = Math.round(width * 0.04);
+  const padTop = Math.round(height * 0.03);
+  const padBottom = Math.round(height * 0.03);
+  return { xPct, yPct, tX, tY, padX, padTop, padBottom };
+}
+
 export const DEFAULT_VIDEO_EDIT: VideoEditSettings = {
   filterPreset: "normal",
   playbackSpeed: 1,
@@ -183,6 +216,8 @@ export const DEFAULT_VIDEO_EDIT: VideoEditSettings = {
   subtitleCardRadius: 18,
   subtitleTextWeight: "semibold",
   subtitleLineSpacing: "normal",
+  subtitleOverlayX: DEFAULT_SUBTITLE_OVERLAY_X,
+  subtitleOverlayY: DEFAULT_SUBTITLE_OVERLAY_Y,
 };
 
 export function resolveSubtitleFontMultiplier(settings: VideoEditSettings): number {

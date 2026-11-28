@@ -337,6 +337,18 @@ export function sanitizeEditSettings(raw: unknown): VideoEditSettings {
       rec.subtitleLineSpacing === "relaxed"
         ? rec.subtitleLineSpacing
         : DEFAULT_VIDEO_EDIT.subtitleLineSpacing,
+    subtitleOverlayX: clampFinite(
+      rec.subtitleOverlayX,
+      -50,
+      50,
+      DEFAULT_VIDEO_EDIT.subtitleOverlayX ?? 0
+    ),
+    subtitleOverlayY: clampFinite(
+      rec.subtitleOverlayY,
+      0,
+      100,
+      DEFAULT_VIDEO_EDIT.subtitleOverlayY ?? 96
+    ),
   };
 }
 

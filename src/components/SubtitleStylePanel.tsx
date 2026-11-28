@@ -6,7 +6,12 @@ import type {
   SubtitleTheme,
   VideoEditSettings,
 } from "../types";
-import { DEFAULT_VIDEO_EDIT } from "../utils/videoFilters";
+import {
+  DEFAULT_SUBTITLE_OVERLAY_X,
+  DEFAULT_SUBTITLE_OVERLAY_Y,
+  DEFAULT_VIDEO_EDIT,
+  resolveStageCanvasGeometry,
+} from "../utils/videoFilters";
 
 export interface SubtitleStylePreset {
   id: "study_pro" | "clean_social" | "minimal_phonetic";
@@ -137,6 +142,19 @@ export function SubtitleStylePanel({
     setPresetToast(null);
   };
 
+  const overlayX =
+    typeof editSettings.subtitleOverlayX === "number" &&
+    Number.isFinite(editSettings.subtitleOverlayX)
+      ? Math.max(-50, Math.min(50, Math.round(editSettings.subtitleOverlayX)))
+      : DEFAULT_SUBTITLE_OVERLAY_X;
+  const overlayY =
+    typeof editSettings.subtitleOverlayY === "number" &&
+    Number.isFinite(editSettings.subtitleOverlayY)
+      ? Math.max(0, Math.min(100, Math.round(editSettings.subtitleOverlayY)))
+      : DEFAULT_SUBTITLE_OVERLAY_Y;
+  const isOverlayLayout =
+    !resolveStageCanvasGeometry(editSettings.aspectRatio).isPortraitSplitFriendly;
+
   const styleCustomized =
     editSettings.subtitleFontScale !== DEFAULT_VIDEO_EDIT.subtitleFontScale ||
     editSettings.subtitleTheme !== DEFAULT_VIDEO_EDIT.subtitleTheme ||
@@ -144,7 +162,9 @@ export function SubtitleStylePanel({
     editSettings.showThaiScript !== DEFAULT_VIDEO_EDIT.showThaiScript ||
     editSettings.showWordGloss !== DEFAULT_VIDEO_EDIT.showWordGloss ||
     editSettings.showBurmeseLine !== DEFAULT_VIDEO_EDIT.showBurmeseLine ||
-    editSettings.videoHeightPct !== DEFAULT_VIDEO_EDIT.videoHeightPct;
+    editSettings.videoHeightPct !== DEFAULT_VIDEO_EDIT.videoHeightPct ||
+    overlayX !== DEFAULT_SUBTITLE_OVERLAY_X ||
+    overlayY !== DEFAULT_SUBTITLE_OVERLAY_Y;
 
   const isPresetActive = (preset: SubtitleStylePreset) =>
     editSettings.subtitleTheme === preset.values.subtitleTheme &&
@@ -209,6 +229,8 @@ export function SubtitleStylePanel({
                   showWordGloss: DEFAULT_VIDEO_EDIT.showWordGloss,
                   showBurmeseLine: DEFAULT_VIDEO_EDIT.showBurmeseLine,
                   videoHeightPct: DEFAULT_VIDEO_EDIT.videoHeightPct,
+                  subtitleOverlayX: DEFAULT_SUBTITLE_OVERLAY_X,
+                  subtitleOverlayY: DEFAULT_SUBTITLE_OVERLAY_Y,
                 })
               }
               className="text-[11px] font-medium text-[#4d597d] dark:text-[#919ec4] hover:text-teal-700 dark:hover:text-teal-400 inline-flex items-center gap-1 cursor-pointer"
@@ -434,6 +456,129 @@ export function SubtitleStylePanel({
         <div className="flex items-center justify-between text-[10px] font-mono-tabular text-[#4d597d] dark:text-[#919ec4]">
           <span>26% Compact video</span>
           <span>52% Tall video</span>
+        </div>
+      </div>
+
+      {/* Overlay Subtitle X / Y Position */}
+      <div className="pt-3 border-t border-[#d2dcf0] dark:border-[#21284c] space-y-2.5">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs font-medium text-[#4d597d] dark:text-[#919ec4]">
+            Overlay Position (X / Y)
+          </span>
+          <div className="flex items-center gap-1.5">
+            {!isOverlayLayout && (
+              <button
+                type="button"
+                onClick={() =>
+                  onChangeEditSettings({
+                    ...editSettings,
+                    aspectRatio: "9:16-overlay",
+                  })
+                }
+                className="h-6 px-2 rounded-xs bg-teal-700 hover:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 text-white dark:text-[#060918] text-[10px] font-semibold cursor-pointer"
+              >
+                Use 9:16 Overlay
+              </button>
+            )}
+            {(overlayX !== DEFAULT_SUBTITLE_OVERLAY_X || overlayY !== DEFAULT_SUBTITLE_OVERLAY_Y) && (
+              <button
+                type="button"
+                onClick={() =>
+                  onChangeEditSettings({
+                    ...editSettings,
+                    subtitleOverlayX: DEFAULT_SUBTITLE_OVERLAY_X,
+                    subtitleOverlayY: DEFAULT_SUBTITLE_OVERLAY_Y,
+                  })
+                }
+                className="text-[11px] font-medium text-[#4d597d] dark:text-[#919ec4] hover:text-teal-700 dark:hover:text-teal-400 inline-flex items-center gap-1 cursor-pointer"
+              >
+                <RotateCcw className="w-3 h-3" />
+                <span>Reset</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-4 gap-1">
+          {[
+            { label: "Top", x: 0, y: 8 },
+            { label: "Middle", x: 0, y: 50 },
+            { label: "Bottom", x: 0, y: DEFAULT_SUBTITLE_OVERLAY_Y },
+            { label: "Center X", x: 0, y: overlayY },
+          ].map((preset) => (
+            <button
+              key={preset.label}
+              type="button"
+              onClick={() =>
+                onChangeEditSettings({
+                  ...editSettings,
+                  subtitleOverlayX: preset.x,
+                  subtitleOverlayY: preset.y,
+                })
+              }
+              className="h-7 rounded-xs border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] hover:border-teal-600/60 dark:hover:border-teal-400/60 text-[10.5px] font-medium text-[#0c1026] dark:text-[#f3f5fc] cursor-pointer"
+            >
+              {preset.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between text-xs">
+            <span className="font-medium text-[#4d597d] dark:text-[#919ec4]">
+              Horizontal (X)
+            </span>
+            <span className="font-mono-tabular font-semibold text-[#0c1026] dark:text-[#f3f5fc]">
+              {overlayX > 0 ? `+${overlayX}%` : `${overlayX}%`}
+            </span>
+          </div>
+          <input
+            type="range"
+            min={-50}
+            max={50}
+            step={1}
+            value={overlayX}
+            onChange={(e) => {
+              const next = parseInt(e.target.value, 10);
+              if (Number.isFinite(next)) {
+                onChangeEditSettings({
+                  ...editSettings,
+                  subtitleOverlayX: Math.max(-50, Math.min(50, next)),
+                });
+              }
+            }}
+            aria-label="Overlay subtitle horizontal X position"
+            className="w-full h-1.5 rounded-full appearance-none bg-[#d2dcf0] dark:bg-[#21284c] cursor-pointer"
+          />
+        </div>
+
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between text-xs">
+            <span className="font-medium text-[#4d597d] dark:text-[#919ec4]">
+              Vertical (Y)
+            </span>
+            <span className="font-mono-tabular font-semibold text-[#0c1026] dark:text-[#f3f5fc]">
+              {overlayY}%
+            </span>
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            step={1}
+            value={overlayY}
+            onChange={(e) => {
+              const next = parseInt(e.target.value, 10);
+              if (Number.isFinite(next)) {
+                onChangeEditSettings({
+                  ...editSettings,
+                  subtitleOverlayY: Math.max(0, Math.min(100, next)),
+                });
+              }
+            }}
+            aria-label="Overlay subtitle vertical Y position"
+            className="w-full h-1.5 rounded-full appearance-none bg-[#d2dcf0] dark:bg-[#21284c] cursor-pointer"
+          />
         </div>
       </div>
     </div>

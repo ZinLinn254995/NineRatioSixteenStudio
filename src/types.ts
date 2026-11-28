@@ -278,6 +278,8 @@ export interface VideoEditSettings {
   subtitleCardRadius?: number;
   subtitleTextWeight?: SubtitleTextWeight;
   subtitleLineSpacing?: SubtitleLineSpacing;
+  subtitleOverlayX?: number;
+  subtitleOverlayY?: number;
 }
 
 export interface SavedProjectRecord {

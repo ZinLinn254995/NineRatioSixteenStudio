@@ -4,6 +4,7 @@ import {
   applyAdversarialPerturbationToImageData,
   buildCssFilterString,
   createAdversarialPerturbationTile,
+  resolveOverlaySubtitleNormalizedPosition,
   resolveStageCanvasGeometry,
   resolveSubtitleFontMultiplier,
   resolveSubtitleFontStack,
@@ -1047,20 +1048,37 @@ function renderOverlaySubtitleFrame(
   if (burmeseLines.length > 0) contentH += 8 + burmeseLines.length * burmeseLineH;
 
   const boxH = contentH + padY * 2;
-  const bottomMargin = isPortrait ? Math.round(height * 0.055) : Math.round(height * 0.04);
-  const boxX = Math.round((width - boxW) / 2);
-  const boxY = Math.max(24, height - bottomMargin - boxH);
+  const {
+    yPct: overlayYPct,
+    tX: overlayTX,
+    tY: overlayTY,
+    padX: safePadX,
+    padTop: safePadTop,
+    padBottom: safePadBottom,
+  } = resolveOverlaySubtitleNormalizedPosition(
+    width,
+    height,
+    editSettings.subtitleOverlayX,
+    editSettings.subtitleOverlayY
+  );
+  const availW = Math.max(0, width - safePadX * 2 - boxW);
+  const availH = Math.max(0, height - safePadTop - safePadBottom - boxH);
+  const boxX = Math.round(safePadX + overlayTX * availW);
+  const boxY = Math.round(safePadTop + overlayTY * availH);
 
   ctx.save();
 
-  // Soft bottom readability gradient scrim
-  const scrimTop = Math.max(0, boxY - Math.round(height * 0.1));
-  const scrim = ctx.createLinearGradient(0, scrimTop, 0, height);
-  scrim.addColorStop(0, "rgba(0,0,0,0)");
-  scrim.addColorStop(0.45, "rgba(0,0,0,0.34)");
-  scrim.addColorStop(1, "rgba(0,0,0,0.72)");
-  ctx.fillStyle = scrim;
-  ctx.fillRect(0, scrimTop, width, height - scrimTop);
+  // Soft bottom readability gradient scrim when subtitle sits in lower area
+  const scrimAlpha = Math.max(0, Math.min(1, (overlayYPct - 55) / 20));
+  if (scrimAlpha > 0.01) {
+    const scrimTop = Math.max(Math.round(height * 0.55), boxY - Math.round(height * 0.1));
+    const scrim = ctx.createLinearGradient(0, scrimTop, 0, height);
+    scrim.addColorStop(0, "rgba(0,0,0,0)");
+    scrim.addColorStop(0.45, `rgba(0,0,0,${(0.34 * scrimAlpha).toFixed(3)})`);
+    scrim.addColorStop(1, `rgba(0,0,0,${(0.72 * scrimAlpha).toFixed(3)})`);
+    ctx.fillStyle = scrim;
+    ctx.fillRect(0, scrimTop, width, height - scrimTop);
+  }
 
   const isLightBox = (subTheme === "light" || subTheme === "warm") && cardStyle !== "minimal";
 
