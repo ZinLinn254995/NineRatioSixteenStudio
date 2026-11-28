@@ -1190,9 +1190,19 @@ export default function App() {
     });
 
     try {
+      const projectScenesById = new Map(
+        (projectRef.current?.scenes ?? []).map((sc, idx) => [
+          sc.id || `sc-${idx}-${sc.startSec}-${sc.endSec}`,
+          sc,
+        ])
+      );
+      const videoOnlyScenes = selectedScenes.filter((sel) => {
+        const matched = projectScenesById.get(sel.id);
+        return !matched || matched.mediaType !== "image";
+      });
       const activeScenes =
-        selectedScenes.length > 0
-          ? selectedScenes
+        videoOnlyScenes.length > 0
+          ? videoOnlyScenes
           : [
               {
                 id: "sc-full",
@@ -4076,7 +4086,8 @@ export default function App() {
 
   const canSaveCurrent = Boolean(
     hasGeneratedProject(project) ||
-      ((hasProjectMedia(project) || localMedia) && selectedScenes.length > 0)
+      ((hasProjectMedia(project) || localMedia) &&
+        (selectedScenes.length > 0 || Boolean(transcriptResult)))
   );
 
   const handleSaveProject = useCallback(
@@ -4104,13 +4115,17 @@ export default function App() {
                   (acc, sc) => acc + Math.max(0, sc.endSec - sc.startSec),
                   0
                 ),
-                scenes: selectedScenes.map((sc, i) => ({
-                  index: i,
-                  startSec: sc.startSec,
-                  endSec: sc.endSec,
-                  durationSec: Math.max(0, sc.endSec - sc.startSec),
-                  summary: `Scene ${i + 1}`,
-                })),
+                scenes:
+                  project && project.scenes.length > 0
+                    ? project.scenes
+                    : selectedScenes.map((sc, i) => ({
+                        id: sc.id,
+                        index: i,
+                        startSec: sc.startSec,
+                        endSec: sc.endSec,
+                        durationSec: Math.max(0, sc.endSec - sc.startSec),
+                        summary: `Scene ${i + 1}`,
+                      })),
                 subtitles: [],
                 keyframeUrls: mediaForSave.thumbnail ? [mediaForSave.thumbnail] : [],
               }
@@ -4125,6 +4140,7 @@ export default function App() {
           selectedScenes,
           voiceSettings,
           editSettings: videoEdit,
+          transcriptResult,
         });
 
         setActiveSavedId(record.id);
@@ -4158,6 +4174,7 @@ export default function App() {
       activeSavedId,
       voiceSettings,
       videoEdit,
+      transcriptResult,
     ]
   );
 
@@ -4392,7 +4409,12 @@ export default function App() {
     setIsTranscribingStandalone(false);
     setTranscriptProgress(null);
     setTranscriptError(null);
-    setTranscriptResult(null);
+    const restoredTranscript = record.transcriptResult ?? null;
+    setTranscriptResult(restoredTranscript);
+    if (restoredTranscript) {
+      setTranscriptModelId(restoredTranscript.modelId);
+      setTranscriptLanguage(restoredTranscript.language);
+    }
 
     let localFile: File | undefined;
     let localUrl: string | undefined;

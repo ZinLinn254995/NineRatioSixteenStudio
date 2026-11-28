@@ -81,6 +81,7 @@ export function SavedProjectsPanel({
       (p) =>
         p.title.toLowerCase().includes(q) ||
         p.channel.toLowerCase().includes(q) ||
+        (p.transcriptResult?.text ?? "").toLowerCase().includes(q) ||
         p.subtitles.some(
           (s) =>
             s.thaiPhonetic.toLowerCase().includes(q) ||
@@ -335,6 +336,15 @@ export function SavedProjectsPanel({
                         {record.subtitles.length}{" "}
                         {record.subtitles.length === 1 ? "subtitle" : "subtitles"}
                       </span>
+                      {record.transcriptResult && record.transcriptResult.segments.length > 0 && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span>
+                            {record.transcriptResult.segments.length} transcript{" "}
+                            {record.transcriptResult.segments.length === 1 ? "line" : "lines"}
+                          </span>
+                        </>
+                      )}
                       <span aria-hidden="true">·</span>
                       <span>{formatShortDate(record.updatedAt)}</span>
                       {!isLegacy && (

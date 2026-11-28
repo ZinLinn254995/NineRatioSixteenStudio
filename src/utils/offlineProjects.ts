@@ -4,7 +4,12 @@ import type {
   SceneSelection,
   SpeakingScene,
   SubtitleItem,
+  SubtitleSourceLanguage,
   SubtitleWord,
+  TranscriptModelId,
+  TranscriptResult,
+  TranscriptSegment,
+  TranscriptWord,
   VideoEditSettings,
   VideoProject,
   VoiceSettings,
@@ -335,6 +340,112 @@ export function sanitizeEditSettings(raw: unknown): VideoEditSettings {
   };
 }
 
+const VALID_TRANSCRIPT_MODELS = new Set<TranscriptModelId>([
+  "whisper-tiny",
+  "whisper-base",
+  "whisper-small",
+  "whisper-medium",
+  "whisper-large-v3-turbo",
+  "whisper-tiny-en",
+  "gemini-cloud",
+]);
+
+const VALID_SOURCE_LANGUAGES = new Set<SubtitleSourceLanguage>([
+  "auto",
+  "th",
+  "my",
+  "en",
+  "zh",
+  "ja",
+  "ko",
+  "vi",
+  "lo",
+  "km",
+  "id",
+  "hi",
+  "es",
+  "fr",
+]);
+
+export function sanitizeTranscriptResult(raw: unknown): TranscriptResult | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const rec = raw as Partial<TranscriptResult>;
+  if (!Array.isArray(rec.segments)) return undefined;
+
+  const segments: TranscriptSegment[] = rec.segments
+    .filter((s): s is TranscriptSegment => Boolean(s && typeof s === "object"))
+    .map((s, idx) => {
+      const startSec = Number.isFinite(Number(s.startSec))
+        ? Math.max(0, Number(s.startSec))
+        : 0;
+      const rawEnd = Number(s.endSec);
+      const endSec = Number.isFinite(rawEnd) && rawEnd >= startSec ? rawEnd : startSec;
+      const words: TranscriptWord[] | undefined = Array.isArray(s.words)
+        ? s.words
+            .filter((w): w is TranscriptWord => Boolean(w && typeof w === "object"))
+            .map((w) => {
+              const ws = Number.isFinite(Number(w.startSec))
+                ? Math.max(0, Number(w.startSec))
+                : startSec;
+              const we = Number.isFinite(Number(w.endSec)) && Number(w.endSec) >= ws
+                ? Number(w.endSec)
+                : ws;
+              return {
+                text: typeof w.text === "string" ? w.text : String(w.text ?? ""),
+                startSec: ws,
+                endSec: we,
+              };
+            })
+        : undefined;
+
+      return {
+        id: typeof s.id === "string" && s.id.trim() ? s.id : `tr-${idx + 1}`,
+        index: Number.isInteger(Number(s.index)) && Number(s.index) > 0 ? Number(s.index) : idx + 1,
+        startSec,
+        endSec,
+        text: typeof s.text === "string" ? s.text : "",
+        ...(words && words.length > 0 ? { words } : {}),
+      };
+    });
+
+  const modelId: TranscriptModelId =
+    typeof rec.modelId === "string" && VALID_TRANSCRIPT_MODELS.has(rec.modelId as TranscriptModelId)
+      ? (rec.modelId as TranscriptModelId)
+      : "whisper-base";
+
+  const language: SubtitleSourceLanguage =
+    typeof rec.language === "string" &&
+    VALID_SOURCE_LANGUAGES.has(rec.language as SubtitleSourceLanguage)
+      ? (rec.language as SubtitleSourceLanguage)
+      : "auto";
+
+  const text =
+    typeof rec.text === "string"
+      ? rec.text
+      : segments
+          .map((s) => s.text.trim())
+          .filter(Boolean)
+          .join(" ");
+
+  return {
+    id: typeof rec.id === "string" && rec.id.trim() ? rec.id : `tr-${Date.now()}`,
+    title: typeof rec.title === "string" ? rec.title : "Audio Transcript",
+    modelId,
+    modelLabel: typeof rec.modelLabel === "string" && rec.modelLabel.trim() ? rec.modelLabel : "Base",
+    language,
+    durationSec:
+      typeof rec.durationSec === "number" && Number.isFinite(rec.durationSec) && rec.durationSec >= 0
+        ? rec.durationSec
+        : 0,
+    text,
+    segments,
+    createdAt:
+      typeof rec.createdAt === "number" && Number.isFinite(rec.createdAt) && rec.createdAt > 0
+        ? rec.createdAt
+        : Date.now(),
+  };
+}
+
 export async function captureLocalVideoThumbnail(localUrl: string): Promise<string | undefined> {
   if (typeof document === "undefined" || !localUrl) return undefined;
   return new Promise((resolve) => {
@@ -445,6 +556,9 @@ export async function listSavedProjects(): Promise<SavedProjectRecord[]> {
           keyframeUrls: Array.isArray(item.keyframeUrls) ? item.keyframeUrls : [],
           voiceSettings: sanitizeVoiceSettings(item.voiceSettings),
           editSettings: sanitizeEditSettings(item.editSettings),
+          ...(item.transcriptResult
+            ? { transcriptResult: sanitizeTranscriptResult(item.transcriptResult) }
+            : {}),
         };
       })
       .sort((a, b) => b.updatedAt - a.updatedAt);
@@ -502,12 +616,13 @@ export interface SaveOfflineProjectInput {
   selectedScenes: SceneSelection[];
   voiceSettings: VoiceSettings;
   editSettings: VideoEditSettings;
+  transcriptResult?: TranscriptResult | null;
 }
 
 export async function saveOfflineProject(
   input: SaveOfflineProjectInput
 ): Promise<{ record: SavedProjectRecord; blobSaved: boolean }> {
-  const { existingId, project, activeMedia, selectedScenes, voiceSettings, editSettings } = input;
+  const { existingId, project, activeMedia, selectedScenes, voiceSettings, editSettings, transcriptResult } = input;
   const now = Date.now();
   let id =
     existingId || `proj-${now}-${Math.random().toString(36).slice(2, 8)}`;
@@ -582,6 +697,8 @@ export async function saveOfflineProject(
             endSec: sc.endSec,
           }));
 
+    const sanitizedTranscript = sanitizeTranscriptResult(transcriptResult);
+
     const baseRecord: SavedProjectRecord = {
       id,
       title: (input.title ?? project.title).trim() || "Untitled Project",
@@ -608,6 +725,7 @@ export async function saveOfflineProject(
       keyframeUrls: [...project.keyframeUrls],
       voiceSettings: sanitizeVoiceSettings(voiceSettings),
       editSettings: sanitizeEditSettings(editSettings),
+      ...(sanitizedTranscript ? { transcriptResult: sanitizedTranscript } : {}),
       hasLocalVideoBlob: Boolean(localFile || existingBlobValid),
       localFileName: localFile?.name || existingRecord?.localFileName,
       localFileType: resolvedMimeType,
@@ -1030,6 +1148,9 @@ export async function importProjectFromJsonText(
       : [],
     voiceSettings: sanitizeVoiceSettings(raw.voiceSettings),
     editSettings: sanitizeEditSettings(raw.editSettings),
+    ...(raw.transcriptResult
+      ? { transcriptResult: sanitizeTranscriptResult(raw.transcriptResult) }
+      : {}),
     hasLocalVideoBlob: false,
     localFileName: typeof raw.localFileName === "string" ? raw.localFileName : undefined,
     localFileType: typeof raw.localFileType === "string" ? raw.localFileType : undefined,

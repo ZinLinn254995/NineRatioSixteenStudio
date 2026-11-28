@@ -2896,38 +2896,65 @@ export function ProjectTimelineEditor({
                 : seg.clipDur;
               const isSelected = seg.sceneId === activeSceneId;
 
+              const safePxPerSec = Math.max(0.01, pxPerSec);
+              const effectiveStart = activeTrim ? activeTrim.nextStartSec : seg.startSec;
+              const effectiveEnd = Math.max(
+                effectiveStart + 0.01,
+                activeTrim ? activeTrim.nextEndSec : seg.endSec
+              );
               const { aspect: segAspect, frames: segFrames } = getClipThumbInfo(seg);
               const naturalTileW = Math.max(36, Math.min(114, Math.round(64 * segAspect)));
               const rawTileCount = Math.max(1, Math.ceil(widthPx / naturalTileW));
-              const useExactTileW = rawTileCount <= 64;
-              const slotCount = useExactTileW ? rawTileCount : 64;
+              const MAX_FILMSTRIP_TILES = 200;
+              const tileMul =
+                rawTileCount > MAX_FILMSTRIP_TILES
+                  ? Math.pow(2, Math.ceil(Math.log2(rawTileCount / MAX_FILMSTRIP_TILES)))
+                  : 1;
+              const tileW = naturalTileW * tileMul;
+              const tileDur = tileW / safePxPerSec;
+              const startOffsetPx = effectiveStart * safePxPerSec;
+              const firstTileIdx = Math.max(0, Math.floor(effectiveStart / tileDur + 1e-6));
+              const lastTileIdx = Math.max(
+                firstTileIdx,
+                Math.ceil(effectiveEnd / tileDur - 1e-6) - 1
+              );
+              const tileCount = Math.min(
+                MAX_FILMSTRIP_TILES + 2,
+                lastTileIdx - firstTileIdx + 1
+              );
+              const isImageTile = Boolean(seg.scene.mediaType === "image" && seg.scene.mediaUrl);
+              const hasFilmstrip = isImageTile || segFrames.length > 0;
 
-              const clipThumbs =
-                seg.scene.mediaType === "image" && seg.scene.mediaUrl
-                  ? Array.from({ length: slotCount }, () => seg.scene.mediaUrl!)
-                  : segFrames.length > 0
-                    ? Array.from({ length: slotCount }, (_, slotIdx) => {
-                        const effectiveStart = activeTrim ? activeTrim.nextStartSec : seg.startSec;
-                        const slotFrac = useExactTileW
-                          ? Math.min(1, ((slotIdx + 0.5) * naturalTileW) / Math.max(1, widthPx))
-                          : (slotIdx + 0.5) / slotCount;
-                        const sampleSourceSec = effectiveStart + slotFrac * displayDur;
+              const clipTiles = hasFilmstrip
+                ? Array.from({ length: tileCount }, (_, i) => {
+                    const k = firstTileIdx + i;
+                    const tileLeftPx = k * tileW - startOffsetPx;
+                    let src: string;
+                    if (isImageTile) {
+                      src = seg.scene.mediaUrl!;
+                    } else {
+                      const sampleSourceSec = Math.max(
+                        0,
+                        Math.min(seg.maxSourceSec, (k + 0.5) * tileDur)
+                      );
 
-                        // Pick nearest captured thumbnail frame by source timestamp
-                        let best = segFrames[0];
-                        let bestDiff = Math.abs(best.sourceSec - sampleSourceSec);
-                        for (let k = 1; k < segFrames.length; k++) {
-                          const diff = Math.abs(segFrames[k].sourceSec - sampleSourceSec);
-                          if (diff < bestDiff) {
-                            best = segFrames[k];
-                            bestDiff = diff;
-                          } else if (segFrames[k].sourceSec > sampleSourceSec) {
-                            break;
-                          }
+                      // Pick nearest captured thumbnail frame by source timestamp
+                      let best = segFrames[0];
+                      let bestDiff = Math.abs(best.sourceSec - sampleSourceSec);
+                      for (let f = 1; f < segFrames.length; f++) {
+                        const diff = Math.abs(segFrames[f].sourceSec - sampleSourceSec);
+                        if (diff < bestDiff) {
+                          best = segFrames[f];
+                          bestDiff = diff;
+                        } else if (segFrames[f].sourceSec > sampleSourceSec) {
+                          break;
                         }
-                        return best.url;
-                      })
-                    : [];
+                      }
+                      src = best.url;
+                    }
+                    return { k, leftPx: tileLeftPx, src };
+                  })
+                : [];
 
               return (
                 <div
@@ -2958,18 +2985,23 @@ export function ProjectTimelineEditor({
                     }`}
                   >
                     {/* Clip Filmstrip Frames */}
-                    <div className="absolute inset-0 bg-neutral-950 flex overflow-hidden">
-                      {clipThumbs.length > 0 ? (
-                        clipThumbs.map((src, tIdx) => (
+                    <div className="absolute inset-0 bg-neutral-950 overflow-hidden">
+                      {clipTiles.length > 0 ? (
+                        clipTiles.map((tile, tIdx) => (
                           <img
-                            key={tIdx}
-                            src={src}
+                            key={tile.k}
+                            src={tile.src}
                             alt=""
                             draggable={false}
                             referrerPolicy="no-referrer"
-                            style={useExactTileW ? { width: `${naturalTileW}px` } : undefined}
-                            className={`h-full object-cover border-r border-black/30 last:border-r-0 pointer-events-none ${
-                              useExactTileW ? "shrink-0" : "flex-1 min-w-0"
+                            style={{
+                              left: `${tile.leftPx}px`,
+                              width: `${tileW}px`,
+                            }}
+                            className={`absolute inset-y-0 h-full object-cover pointer-events-none ${
+                              tIdx === clipTiles.length - 1
+                                ? ""
+                                : "border-r border-black/30"
                             }`}
                           />
                         ))

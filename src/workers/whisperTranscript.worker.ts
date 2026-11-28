@@ -1,4 +1,10 @@
-import { pipeline, env, type AutomaticSpeechRecognitionPipeline } from "@huggingface/transformers";
+import {
+  pipeline,
+  env,
+  Tensor,
+  type AutomaticSpeechRecognitionPipeline,
+} from "@huggingface/transformers";
+import { getWhisperDtypeConfig } from "../utils/whisperDtypes";
 
 env.allowLocalModels = false;
 env.useBrowserCache = true;
@@ -24,7 +30,10 @@ interface WorkerRequest {
 interface FileProgressState {
   loaded: number;
   total: number;
+  cached: boolean;
 }
+
+const TRANSFORMERS_CACHE_NAME = "transformers-cache";
 
 let cachedKey: string | null = null;
 let cachedPipeline: AutomaticSpeechRecognitionPipeline | null = null;
@@ -83,13 +92,25 @@ async function hasUsableWebGpu(): Promise<boolean> {
   }
 }
 
-function getDtypeForRun(device: "webgpu" | "wasm", isLargeModel: boolean) {
-  if (device === "webgpu") {
-    return isLargeModel
-      ? ({ encoder_model: "fp16", decoder_model_merged: "q4" } as const)
-      : ({ encoder_model: "fp32", decoder_model_merged: "q4" } as const);
+async function getCachedUrlsForModel(hfModelId: string): Promise<string[]> {
+  if (typeof caches === "undefined") return [];
+  try {
+    const cache = await caches.open(TRANSFORMERS_CACHE_NAME);
+    const keys = await cache.keys();
+    const needle = `/${hfModelId}/`;
+    return keys.map((req) => req.url).filter((url) => url.includes(needle));
+  } catch {
+    return [];
   }
-  return isLargeModel ? ("q4" as const) : ("q8" as const);
+}
+
+function isFileInCachedUrls(cachedUrls: string[], file?: string): boolean {
+  if (!file || cachedUrls.length === 0) return false;
+  const cleanFile = file.replace(/^\/+/, "");
+  const encodedFile = encodeURI(cleanFile);
+  return cachedUrls.some(
+    (url) => url.endsWith(`/${cleanFile}`) || url.endsWith(`/${encodedFile}`)
+  );
 }
 
 async function getWhisperPipeline(
@@ -101,40 +122,66 @@ async function getWhisperPipeline(
   const preferWebGpu = !forceWasm && (await hasUsableWebGpu());
   const devicesToTry: ("webgpu" | "wasm")[] = preferWebGpu ? ["webgpu", "wasm"] : ["wasm"];
 
+  const cachedUrls = await getCachedUrlsForModel(hfModelId);
   const fileProgress = new Map<string, FileProgressState>();
+
   const reportDownloadProgress = (info: Record<string, unknown>) => {
     const status = String(info.status || "");
     const file = typeof info.file === "string" ? info.file : undefined;
+    const fileCached = isFileInCachedUrls(cachedUrls, file);
+
     if (file && typeof info.total === "number" && info.total > 0) {
       fileProgress.set(file, {
         loaded: typeof info.loaded === "number" ? info.loaded : 0,
         total: info.total,
+        cached: fileCached,
       });
     } else if (file && status === "done") {
       const prev = fileProgress.get(file);
       if (prev && prev.total > 0) {
-        fileProgress.set(file, { loaded: prev.total, total: prev.total });
+        fileProgress.set(file, {
+          loaded: prev.total,
+          total: prev.total,
+          cached: prev.cached,
+        });
       }
     }
 
-    let sumLoaded = 0;
-    let sumTotal = 0;
+    let downloadLoaded = 0;
+    let downloadTotal = 0;
+    let hasUncachedTransfer = false;
+    let allLoaded = 0;
+    let allTotal = 0;
+
     for (const entry of fileProgress.values()) {
-      sumLoaded += entry.loaded;
-      sumTotal += entry.total;
+      allLoaded += entry.loaded;
+      allTotal += entry.total;
+      if (!entry.cached) {
+        hasUncachedTransfer = true;
+        downloadLoaded += entry.loaded;
+        downloadTotal += entry.total;
+      }
     }
+
+    // Transformers.js still fires "download" / "progress" events while reading bytes from Cache API.
+    // Emit "loading" instead of "downloading" when reading cached files.
+    const isDownloading = status !== "ready" && (hasUncachedTransfer || (file ? !fileCached : false));
+    const sumLoaded = isDownloading ? downloadLoaded : allLoaded;
+    const sumTotal = isDownloading ? downloadTotal : allTotal;
 
     const rawPct =
       sumTotal > 0
         ? Math.round((sumLoaded / sumTotal) * 100)
         : typeof info.progress === "number"
           ? Math.round(info.progress)
-          : 0;
+          : status === "ready"
+            ? 100
+            : 0;
 
     self.postMessage({
       type: "progress",
       requestId,
-      phase: status === "ready" ? "loading" : "downloading",
+      phase: isDownloading ? "downloading" : "loading",
       file,
       loadedBytes: sumLoaded > 0 ? sumLoaded : undefined,
       totalBytes: sumTotal > 0 ? sumTotal : undefined,
@@ -154,7 +201,7 @@ async function getWhisperPipeline(
     }
 
     try {
-      const dtype = getDtypeForRun(device, isLargeModel);
+      const dtype = getWhisperDtypeConfig(device, isLargeModel);
       const instance = (await (pipeline as unknown as (
         task: string,
         model: string,
@@ -187,7 +234,169 @@ async function getWhisperPipeline(
     : new Error(String(lastError || "Failed to load Whisper model."));
 }
 
-function buildTranscribeOptions(msg: WorkerRequest): Record<string, unknown> {
+function pickSpeechWindowForLangDetect(audio: Float32Array, sampleRate = 16000): Float32Array {
+  const windowSamples = sampleRate * 30;
+  if (audio.length <= windowSamples) {
+    return audio;
+  }
+
+  const hopSamples = sampleRate * 5;
+  const maxStart = audio.length - windowSamples;
+  const scanLimit = Math.min(maxStart, sampleRate * 240);
+  let bestStart = 0;
+  let bestScore = -1;
+
+  for (let start = 0; start <= scanLimit; start += hopSamples) {
+    let activeFrames = 0;
+    let energySum = 0;
+    const secStep = sampleRate;
+    for (let secOffset = 0; secOffset < windowSamples; secOffset += secStep) {
+      let frameSq = 0;
+      let count = 0;
+      const frameEnd = Math.min(start + secOffset + secStep, audio.length);
+      for (let i = start + secOffset; i < frameEnd; i += 16) {
+        const v = audio[i];
+        frameSq += v * v;
+        count++;
+      }
+      const rms = count > 0 ? Math.sqrt(frameSq / count) : 0;
+      energySum += rms;
+      if (rms > 0.012) {
+        activeFrames++;
+      }
+    }
+    const score = activeFrames * 10 + energySum;
+    if (score > bestScore) {
+      bestScore = score;
+      bestStart = start;
+    }
+  }
+
+  return audio.subarray(bestStart, bestStart + windowSamples);
+}
+
+interface WhisperInternals {
+  processor?: (audio: Float32Array) => Promise<{ input_features?: Tensor }>;
+  model?: {
+    config?: { decoder_start_token_id?: number };
+    generation_config?: {
+      is_multilingual?: boolean;
+      decoder_start_token_id?: number;
+      lang_to_id?: Record<string, number>;
+    };
+    forward?: (inputs: Record<string, unknown>) => Promise<{
+      logits?: Tensor;
+      past_key_values?: unknown;
+    }>;
+  };
+}
+
+function disposeTensorLike(val: unknown): void {
+  if (!val || typeof val !== "object") return;
+  const maybeTensor = val as { dispose?: () => void };
+  if (typeof maybeTensor.dispose === "function") {
+    try {
+      maybeTensor.dispose();
+    } catch {
+      // ignore dispose errors
+    }
+  }
+}
+
+async function detectSpokenLanguage(
+  instance: AutomaticSpeechRecognitionPipeline,
+  audio: Float32Array
+): Promise<string | null> {
+  const internals = instance as unknown as WhisperInternals;
+  const processor = internals.processor;
+  const model = internals.model;
+  const genConfig = model?.generation_config;
+  const langToId = genConfig?.lang_to_id;
+
+  if (
+    !genConfig?.is_multilingual ||
+    !langToId ||
+    typeof processor !== "function" ||
+    typeof model?.forward !== "function"
+  ) {
+    return null;
+  }
+
+  let inputFeatures: Tensor | undefined;
+  let decoderInputIds: Tensor | undefined;
+  let outLogits: Tensor | undefined;
+  let floatLogits: Tensor | undefined;
+  let pastKeyValues: unknown;
+
+  try {
+    const speechWindow = pickSpeechWindowForLangDetect(audio);
+    const feature = await processor(speechWindow);
+    inputFeatures = feature?.input_features;
+    if (!inputFeatures) return null;
+
+    const decoderStartTokenId = Number(
+      genConfig.decoder_start_token_id ?? model.config?.decoder_start_token_id ?? 50258
+    );
+    decoderInputIds = new Tensor(
+      "int64",
+      new BigInt64Array([BigInt(decoderStartTokenId)]),
+      [1, 1]
+    );
+
+    const out = await model.forward({
+      input_features: inputFeatures,
+      decoder_input_ids: decoderInputIds,
+    });
+    outLogits = out?.logits;
+    pastKeyValues = out?.past_key_values;
+    if (!outLogits) return null;
+
+    floatLogits = outLogits.type === "float32" ? outLogits : outLogits.to("float32");
+    const data = floatLogits.data as Float32Array | number[];
+    const dims = floatLogits.dims;
+    const vocabSize = dims.length > 0 ? dims[dims.length - 1] : data.length;
+    const offset = Math.max(0, data.length - vocabSize);
+
+    let bestLangCode: string | null = null;
+    let bestScore = -Infinity;
+
+    for (const [token, tokenId] of Object.entries(langToId)) {
+      if (
+        typeof tokenId !== "number" ||
+        tokenId < 0 ||
+        offset + tokenId >= data.length ||
+        !token.startsWith("<|") ||
+        !token.endsWith("|>")
+      ) {
+        continue;
+      }
+      const score = Number(data[offset + tokenId]);
+      if (Number.isFinite(score) && score > bestScore) {
+        bestScore = score;
+        bestLangCode = token.slice(2, -2);
+      }
+    }
+
+    return bestLangCode;
+  } finally {
+    disposeTensorLike(inputFeatures);
+    disposeTensorLike(decoderInputIds);
+    if (floatLogits && floatLogits !== outLogits) {
+      disposeTensorLike(floatLogits);
+    }
+    disposeTensorLike(outLogits);
+    if (pastKeyValues && typeof pastKeyValues === "object") {
+      for (const entry of Object.values(pastKeyValues as Record<string, unknown>)) {
+        disposeTensorLike(entry);
+      }
+    }
+  }
+}
+
+function buildTranscribeOptions(
+  msg: WorkerRequest,
+  detectedLanguage?: string | null
+): Record<string, unknown> {
   const transcribeOpts: Record<string, unknown> = {
     return_timestamps: msg.wordTimestamps ? "word" : true,
     chunk_length_s: 30,
@@ -198,6 +407,8 @@ function buildTranscribeOptions(msg: WorkerRequest): Record<string, unknown> {
     transcribeOpts.task = "transcribe";
     if (msg.language && msg.language !== "auto") {
       transcribeOpts.language = msg.language;
+    } else if (detectedLanguage) {
+      transcribeOpts.language = detectedLanguage;
     }
   }
   return transcribeOpts;
@@ -229,8 +440,6 @@ self.addEventListener("message", async (event: MessageEvent<WorkerRequest>) => {
       throw new Error("No audio samples found to transcribe.");
     }
 
-    const transcribeOpts = buildTranscribeOptions(msg);
-
     self.postMessage({
       type: "progress",
       requestId: msg.requestId,
@@ -239,10 +448,18 @@ self.addEventListener("message", async (event: MessageEvent<WorkerRequest>) => {
       device,
     });
 
+    const needsAutoDetect =
+      !msg.isEnglishOnly && (!msg.language || msg.language === "auto");
+
     let result: unknown;
     let usedDevice: "webgpu" | "wasm" = device;
+    let detectedLang: string | null = null;
 
     try {
+      if (needsAutoDetect) {
+        detectedLang = await detectSpokenLanguage(instance, msg.audio).catch(() => null);
+      }
+      const transcribeOpts = buildTranscribeOptions(msg, detectedLang);
       result = await instance(msg.audio, transcribeOpts);
     } catch (inferErr) {
       // WebGPU ORT inference failures (e.g. WGPUBuffer / external Instance reference lost on mobile/Chrome)
@@ -273,8 +490,14 @@ self.addEventListener("message", async (event: MessageEvent<WorkerRequest>) => {
           device: "wasm",
         });
 
+        if (needsAutoDetect && !detectedLang) {
+          detectedLang = await detectSpokenLanguage(wasmPipe.instance, msg.audio).catch(
+            () => null
+          );
+        }
+        const wasmTranscribeOpts = buildTranscribeOptions(msg, detectedLang);
         usedDevice = wasmPipe.device;
-        result = await wasmPipe.instance(msg.audio, transcribeOpts);
+        result = await wasmPipe.instance(msg.audio, wasmTranscribeOpts);
       } else {
         throw inferErr;
       }
@@ -286,6 +509,7 @@ self.addEventListener("message", async (event: MessageEvent<WorkerRequest>) => {
       type: "complete",
       requestId: msg.requestId,
       device: usedDevice,
+      detectedLanguage: detectedLang ?? undefined,
       output: normalized,
     });
   } catch (err) {

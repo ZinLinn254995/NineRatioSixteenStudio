@@ -285,6 +285,7 @@ export interface SavedProjectRecord {
   keyframeUrls: string[];
   voiceSettings: VoiceSettings;
   editSettings: VideoEditSettings;
+  transcriptResult?: TranscriptResult;
   hasLocalVideoBlob: boolean;
   localFileName?: string;
   localFileType?: string;

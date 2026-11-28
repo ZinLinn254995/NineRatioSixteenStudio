@@ -9,6 +9,7 @@ import type {
 } from "../types";
 import { extractMp4AudioClips } from "./mp4ClipAudio";
 import { safeReadJson, uploadBlobInChunks } from "./uploadFile";
+import { getRequiredWhisperOnnxFiles } from "./whisperDtypes";
 
 export interface TranscriptModelSpec {
   id: TranscriptModelId;
@@ -30,8 +31,8 @@ export const TRANSCRIPT_MODELS: TranscriptModelSpec[] = [
     hfModelId: "onnx-community/whisper-tiny",
     label: "Tiny",
     scopeLabel: "multilingual",
-    sizeLabel: "≈43 MB",
-    approxBytes: 43 * 1024 * 1024,
+    sizeLabel: "≈61 MB",
+    approxBytes: 61 * 1024 * 1024,
     description: "Fastest on-device model. Best for quick drafts on any phone or PC.",
   },
   {
@@ -39,8 +40,8 @@ export const TRANSCRIPT_MODELS: TranscriptModelSpec[] = [
     hfModelId: "onnx-community/whisper-base",
     label: "Base",
     scopeLabel: "multilingual",
-    sizeLabel: "≈81 MB",
-    approxBytes: 81 * 1024 * 1024,
+    sizeLabel: "≈130 MB",
+    approxBytes: 130 * 1024 * 1024,
     recommended: true,
     description: "Balanced speed and accuracy for browser transcription.",
   },
@@ -49,8 +50,8 @@ export const TRANSCRIPT_MODELS: TranscriptModelSpec[] = [
     hfModelId: "onnx-community/whisper-small",
     label: "Small",
     scopeLabel: "multilingual",
-    sizeLabel: "≈264 MB",
-    approxBytes: 264 * 1024 * 1024,
+    sizeLabel: "≈486 MB",
+    approxBytes: 486 * 1024 * 1024,
     description: "Strong multilingual accuracy for Thai, English, Japanese, and Korean.",
   },
   {
@@ -78,8 +79,8 @@ export const TRANSCRIPT_MODELS: TranscriptModelSpec[] = [
     hfModelId: "onnx-community/whisper-tiny.en",
     label: "Tiny (English)",
     scopeLabel: "english-only",
-    sizeLabel: "≈43 MB",
-    approxBytes: 43 * 1024 * 1024,
+    sizeLabel: "≈61 MB",
+    approxBytes: 61 * 1024 * 1024,
     isEnglishOnly: true,
     description: "Lightweight English-only model for fast English speech.",
   },
@@ -148,16 +149,25 @@ export async function getCachedWhisperModelIds(): Promise<Set<TranscriptModelId>
   const cached = new Set<TranscriptModelId>();
   if (typeof caches === "undefined") return cached;
   try {
+    const webGpuReady = !forceWasmSession && (await detectWebGpuSupport());
+    const targetDevice = webGpuReady ? "webgpu" : "wasm";
+
     const cache = await caches.open(TRANSFORMERS_CACHE_NAME);
     const keys = await cache.keys();
     const urls = keys.map((req) => req.url);
     for (const model of TRANSCRIPT_MODELS) {
       if (!model.hfModelId) continue;
       const needle = `/${model.hfModelId}/`;
-      const hasOnnxWeight = urls.some(
-        (u) => u.includes(needle) && u.toLowerCase().includes(".onnx")
+      const modelUrls = urls.filter((u) => u.includes(needle));
+      if (modelUrls.length === 0) continue;
+
+      const [encoderFile, decoderFile] = getRequiredWhisperOnnxFiles(
+        targetDevice,
+        Boolean(model.isLargeModel)
       );
-      if (hasOnnxWeight) {
+      const hasEncoder = modelUrls.some((u) => u.endsWith(`/${encoderFile}`));
+      const hasDecoder = modelUrls.some((u) => u.endsWith(`/${decoderFile}`));
+      if (hasEncoder && hasDecoder) {
         cached.add(model.id);
       }
     }
@@ -282,7 +292,46 @@ export async function extractTimelineAudio16kMono(
     percent: 10,
   });
 
-  // Fast path 1: extract only AAC audio chunks from MP4 container
+  // Fast path 1: decode whole file directly in browser for <= 150 MB files
+  // (avoids MP4 AAC re-mux priming/edit-list/HE-AAC quirks for cleanest speech audio)
+  if (file.size <= 150 * 1024 * 1024) {
+    try {
+      const buf = await file.arrayBuffer();
+      if (options.signal?.aborted) {
+        throw new DOMException("Aborted", "AbortError");
+      }
+      const decoded = await decodeWithAudioContext(buf);
+      const pcmParts: Float32Array[] = [];
+      let totalDur = 0;
+      for (let i = 0; i < effectiveScenes.length; i++) {
+        if (options.signal?.aborted) {
+          throw new DOMException("Aborted", "AbortError");
+        }
+        const sc = effectiveScenes[i];
+        const s = Math.max(0, Math.min(decoded.duration, sc.startSec));
+        const e = Math.max(s + 0.1, Math.min(decoded.duration, sc.endSec));
+        const resampled = await resampleBufferSegmentTo16k(decoded, s, e - s);
+        pcmParts.push(resampled);
+        totalDur += resampled.length / 16000;
+        options.onProgress?.({
+          phase: "extracting",
+          label: `Preparing audio (${i + 1}/${effectiveScenes.length})...`,
+          percent: Math.round(12 + ((i + 1) / effectiveScenes.length) * 18),
+        });
+      }
+      if (totalDur > 0.05) {
+        return {
+          samples: concatFloat32Arrays(pcmParts),
+          durationSec: Number(totalDur.toFixed(2)),
+        };
+      }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") throw err;
+      // Fall through to MP4 track extraction / server ffmpeg
+    }
+  }
+
+  // Fast path 2: extract only AAC audio chunks from large MP4 containers
   try {
     const mp4Clips = await extractMp4AudioClips(file, effectiveScenes, {
       maxTotalAudioBytes: 48 * 1024 * 1024,
@@ -319,37 +368,7 @@ export async function extractTimelineAudio16kMono(
     }
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") throw err;
-    // Fall through to full-file browser decode
-  }
-
-  // Fast path 2: decode whole file directly in browser (WebM, WAV, MP3, modest MP4/MOV)
-  if (file.size <= 220 * 1024 * 1024) {
-    try {
-      const buf = await file.arrayBuffer();
-      if (options.signal?.aborted) {
-        throw new DOMException("Aborted", "AbortError");
-      }
-      const decoded = await decodeWithAudioContext(buf);
-      const pcmParts: Float32Array[] = [];
-      let totalDur = 0;
-      for (let i = 0; i < effectiveScenes.length; i++) {
-        const sc = effectiveScenes[i];
-        const s = Math.max(0, Math.min(decoded.duration, sc.startSec));
-        const e = Math.max(s + 0.1, Math.min(decoded.duration, sc.endSec));
-        const resampled = await resampleBufferSegmentTo16k(decoded, s, e - s);
-        pcmParts.push(resampled);
-        totalDur += resampled.length / 16000;
-      }
-      if (totalDur > 0.05) {
-        return {
-          samples: concatFloat32Arrays(pcmParts),
-          durationSec: Number(totalDur.toFixed(2)),
-        };
-      }
-    } catch (err) {
-      if (err instanceof DOMException && err.name === "AbortError") throw err;
-      // Fall through to server ffmpeg extraction
-    }
+    // Fall through to server ffmpeg extraction
   }
 
   // Fallback path 3: server ffmpeg extraction to 16kHz mono WAV
@@ -455,7 +474,9 @@ export async function downloadWhisperModel(
           phase: data.phase === "loading" ? "loading" : "downloading",
           label:
             data.phase === "loading"
-              ? `Initializing ${spec.label}...`
+              ? pct > 0 && pct < 100
+                ? `Loading cached ${spec.label} (${pct}%)...`
+                : `Initializing ${spec.label}...`
               : `Downloading ${spec.label} (${pct}%)...`,
           percent: pct,
           file,
@@ -783,7 +804,9 @@ export async function runTranscriptGeneration(params: {
               phase: phase === "loading" ? "loading" : "downloading",
               label:
                 phase === "loading"
-                  ? `Loading ${spec.label}...`
+                  ? pct > 0 && pct < 100
+                    ? `Loading cached ${spec.label} (${pct}%)...`
+                    : `Loading ${spec.label}...`
                   : `Downloading ${spec.label} (${pct}%)...`,
               percent: mappedPct,
               file: typeof data.file === "string" ? data.file : undefined,

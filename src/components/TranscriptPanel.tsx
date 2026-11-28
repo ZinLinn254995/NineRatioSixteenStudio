@@ -113,9 +113,11 @@ export function TranscriptPanel({
   }, []);
 
   useEffect(() => {
-    if (!isTranscribing && result) {
+    if (!isTranscribing) {
       void refreshCacheStatus();
-      setModelsExpanded(false);
+      if (result) {
+        setModelsExpanded(false);
+      }
     }
   }, [isTranscribing, result]);
 
