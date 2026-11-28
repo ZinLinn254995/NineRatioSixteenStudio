@@ -286,7 +286,17 @@ interface ParsedGeminiError {
   statusText: string;
   rawMessage: string;
   isTransient: boolean;
+  isQuota429: boolean;
+  retryAfterMs?: number;
   isUnsupportedInput: boolean;
+}
+
+function parseRetryDelayMs(value: unknown): number | undefined {
+  if (typeof value === "string") {
+    const m = value.trim().match(/^(\d+(?:\.\d+)?)s$/i);
+    if (m) return Math.ceil(Number(m[1]) * 1000);
+  }
+  return undefined;
 }
 
 function parseGeminiError(err: unknown): ParsedGeminiError {
@@ -299,15 +309,23 @@ function parseGeminiError(err: unknown): ParsedGeminiError {
   let parsedCode = typeof errObj.status === "number" ? errObj.status : typeof errObj.code === "number" ? errObj.code : 0;
   let parsedStatus = "";
   let innerMessage = rawMessage;
+  let retryAfterMs: number | undefined;
 
   const trimmed = rawMessage.trim();
-  if (trimmed.startsWith("{")) {
+  const jsonStart = trimmed.indexOf("{");
+  if (jsonStart >= 0) {
     try {
-      const json = JSON.parse(trimmed) as {
-        error?: { code?: number; message?: string; status?: string };
+      const json = JSON.parse(trimmed.slice(jsonStart)) as {
+        error?: {
+          code?: number;
+          message?: string;
+          status?: string;
+          details?: Array<{ retryDelay?: string }>;
+        };
         code?: number;
         message?: string;
         status?: string;
+        details?: Array<{ retryDelay?: string }>;
       };
       const inner = json.error ?? json;
       if (typeof inner.code === "number") parsedCode = inner.code;
@@ -315,8 +333,26 @@ function parseGeminiError(err: unknown): ParsedGeminiError {
       if (typeof inner.message === "string" && inner.message.trim()) {
         innerMessage = inner.message.trim();
       }
+      if (Array.isArray(inner.details)) {
+        for (const d of inner.details) {
+          const ms = parseRetryDelayMs(d?.retryDelay);
+          if (ms && ms > 0) {
+            retryAfterMs = ms;
+            break;
+          }
+        }
+      }
     } catch {
       // Keep rawMessage
+    }
+  }
+
+  if (!retryAfterMs) {
+    const retryMatch = `${innerMessage} ${rawMessage}`.match(
+      /retry\s+in\s+(\d+(?:\.\d+)?)\s*s/i
+    );
+    if (retryMatch) {
+      retryAfterMs = Math.ceil(Number(retryMatch[1]) * 1000);
     }
   }
 
@@ -325,13 +361,19 @@ function parseGeminiError(err: unknown): ParsedGeminiError {
     if (codeMatch) parsedCode = Number(codeMatch[1]);
   }
 
-  const isTransient =
+  const isQuota429 =
     parsedCode === 429 ||
+    /429|RESOURCE_EXHAUSTED|rate limit|quota/i.test(
+      `${parsedStatus} ${innerMessage} ${rawMessage}`
+    );
+
+  const isTransient =
+    isQuota429 ||
     parsedCode === 500 ||
     parsedCode === 502 ||
     parsedCode === 503 ||
     parsedCode === 504 ||
-    /429|500|502|503|504|UNAVAILABLE|RESOURCE_EXHAUSTED|high demand|overloaded|temporarily|try again|rate limit|quota|ECONNRESET|ETIMEDOUT|fetch failed/i.test(
+    /500|502|503|504|UNAVAILABLE|high demand|overloaded|temporarily|try again|ECONNRESET|ETIMEDOUT|fetch failed/i.test(
       `${parsedStatus} ${innerMessage} ${rawMessage}`
     );
 
@@ -348,6 +390,8 @@ function parseGeminiError(err: unknown): ParsedGeminiError {
     statusText: parsedStatus,
     rawMessage: innerMessage,
     isTransient,
+    isQuota429,
+    retryAfterMs,
     isUnsupportedInput,
   };
 }
@@ -415,6 +459,7 @@ async function mapWithConcurrency<T, R>(
 }
 
 const RETRY_BASE_DELAYS_MS = [1200, 2500, 4500, 7500, 10000];
+const modelRateLimitCooldownUntil = new Map<string, number>();
 
 async function generateGroundedWithFailover(
   ai: GoogleGenAI,
@@ -424,7 +469,13 @@ async function generateGroundedWithFailover(
   opts?: {
     maxAttempts?: number;
     systemInstruction?: string;
-    onRetry?: (info: { attempt: number; maxAttempts: number; delayMs: number; model: string }) => void;
+    onRetry?: (info: {
+      attempt: number;
+      maxAttempts: number;
+      delayMs: number;
+      model: string;
+      isQuota429?: boolean;
+    }) => void;
   }
 ) {
   const maxAttempts = Math.max(2, Math.min(6, opts?.maxAttempts ?? 6));
@@ -433,11 +484,41 @@ async function generateGroundedWithFailover(
   let lastTransientErr: unknown = null;
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const now = Date.now();
+    const available = candidateModels.filter((m) => !unsupportedModels.has(m));
+    if (available.length === 0) break;
+
+    // Prefer a model not currently in a 429 quota cooldown window
     const preferred = candidateModels[attempt % candidateModels.length];
-    const model = unsupportedModels.has(preferred)
-      ? candidateModels.find((m) => !unsupportedModels.has(m))
-      : preferred;
-    if (!model) break;
+    const readyModels = available.filter(
+      (m) => (modelRateLimitCooldownUntil.get(m) ?? 0) <= now
+    );
+    let model: (typeof candidateModels)[number];
+    if (readyModels.length > 0) {
+      model = readyModels.includes(preferred) ? preferred : readyModels[0];
+    } else {
+      // All candidate models are cooling down: pick the one with the earliest expiry
+      model = [...available].sort(
+        (a, b) =>
+          (modelRateLimitCooldownUntil.get(a) ?? 0) -
+          (modelRateLimitCooldownUntil.get(b) ?? 0)
+      )[0];
+      const waitMs = Math.min(
+        62000,
+        Math.max(1000, (modelRateLimitCooldownUntil.get(model) ?? now) - now + 500)
+      );
+      console.warn(
+        `All Gemini models in 429 cooldown. Waiting ${Math.ceil(waitMs / 1000)}s before retrying ${model} (attempt ${attempt + 1}/${maxAttempts})`
+      );
+      opts?.onRetry?.({
+        attempt: attempt + 1,
+        maxAttempts,
+        delayMs: waitMs,
+        model,
+        isQuota429: true,
+      });
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
 
     try {
       const systemInstructionPart = opts?.systemInstruction
@@ -473,14 +554,50 @@ async function generateGroundedWithFailover(
         throw err;
       }
       lastTransientErr = err;
+
+      if (info.isQuota429) {
+        // Put this model into cooldown for its reported retryDelay (default 15s, capped at 62s)
+        const cooldownMs = Math.min(62000, Math.max(5000, info.retryAfterMs ?? 15000));
+        modelRateLimitCooldownUntil.set(model, Date.now() + cooldownMs);
+      }
+
       if (attempt === maxAttempts - 1) {
         throw err;
       }
-      const baseDelay =
-        RETRY_BASE_DELAYS_MS[Math.min(attempt, RETRY_BASE_DELAYS_MS.length - 1)];
-      const jitter = Math.floor(Math.random() * 600);
-      const delayMs = baseDelay + jitter;
-      const nextModel = candidateModels[(attempt + 1) % candidateModels.length];
+
+      const otherReady = candidateModels.find(
+        (m) =>
+          m !== model &&
+          !unsupportedModels.has(m) &&
+          (modelRateLimitCooldownUntil.get(m) ?? 0) <= Date.now()
+      );
+
+      let delayMs: number;
+      let nextModel: (typeof candidateModels)[number];
+      if (info.isQuota429 && otherReady) {
+        // Immediately fail over to the alternate model (separate quota bucket)
+        delayMs = 400;
+        nextModel = otherReady;
+      } else if (info.isQuota429) {
+        const soonest = [...candidateModels]
+          .filter((m) => !unsupportedModels.has(m))
+          .sort(
+            (a, b) =>
+              (modelRateLimitCooldownUntil.get(a) ?? 0) -
+              (modelRateLimitCooldownUntil.get(b) ?? 0)
+          )[0];
+        nextModel = soonest ?? "gemini-4-hydrogen";
+        const remaining = (modelRateLimitCooldownUntil.get(nextModel) ?? 0) - Date.now();
+        delayMs = Math.min(62000, Math.max(2000, remaining + 600));
+      } else {
+        const baseDelay =
+          RETRY_BASE_DELAYS_MS[Math.min(attempt, RETRY_BASE_DELAYS_MS.length - 1)];
+        const jitter = Math.floor(Math.random() * 600);
+        delayMs = baseDelay + jitter;
+        const rawNext = candidateModels[(attempt + 1) % candidateModels.length];
+        nextModel = unsupportedModels.has(rawNext) ? "gemini-4-hydrogen" : rawNext;
+      }
+
       console.warn(
         `Gemini ${model} transient error (${info.status}: ${info.rawMessage}). Retrying with ${nextModel} in ${delayMs}ms (attempt ${attempt + 2}/${maxAttempts})`
       );
@@ -488,13 +605,133 @@ async function generateGroundedWithFailover(
         attempt: attempt + 2,
         maxAttempts,
         delayMs,
-        model: unsupportedModels.has(nextModel) ? "gemini-4-hydrogen" : nextModel,
+        model: nextModel,
+        isQuota429: info.isQuota429,
       });
       await new Promise((r) => setTimeout(r, delayMs));
     }
   }
 
   throw lastTransientErr ?? new Error("Gemini AI is temporarily unavailable.");
+}
+
+async function enhanceSpeechWavBuffer(wavBuf: Buffer): Promise<Buffer> {
+  if (!wavBuf || wavBuf.length <= 44) return wavBuf;
+  const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "speech-enh-"));
+  try {
+    const inPath = path.join(tmpDir, "in.wav");
+    const outPath = path.join(tmpDir, "out.wav");
+    await fs.promises.writeFile(inPath, wavBuf);
+    await execFileAsync(
+      "ffmpeg",
+      [
+        "-y",
+        "-i",
+        inPath,
+        "-vn",
+        "-af",
+        "highpass=f=85,lowpass=f=7600,dynaudnorm=f=150:g=15:m=8",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-c:a",
+        "pcm_s16le",
+        outPath,
+      ],
+      FFMPEG_EXEC_OPTS
+    );
+    if (fs.existsSync(outPath) && fs.statSync(outPath).size > 44) {
+      return await fs.promises.readFile(outPath);
+    }
+    return wavBuf;
+  } catch {
+    return wavBuf;
+  } finally {
+    await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+const DEDICATED_TRANSCRIBE_MODEL = "gemini-3.5-transcribe";
+
+function buildDedicatedTranscribePrompt(sourceLangCode?: string): string {
+  const src = (sourceLangCode || "th").toLowerCase();
+  if (src === "th") {
+    return [
+      "Transcribe ONLY the actual spoken human dialogue in this audio verbatim in natural Thai script.",
+      "Rules:",
+      "- Keep colloquial Thai words, slang, contractions, and final particles (ครับ/ค่ะ/นะ/สิ/เลย/เหรอ/ว่ะ/จ้า) exactly as spoken.",
+      "- Start a new line whenever a different speaker starts talking or at a clear sentence pause.",
+      "- Do NOT translate, do NOT explain, do NOT add timestamps, and do NOT invent words if there is only silence, music, or sound effects (return empty string if no speech).",
+    ].join("\n");
+  }
+  if (src === "auto") {
+    return [
+      "Transcribe ONLY the actual spoken human dialogue in this audio verbatim in the original spoken language script.",
+      "Start a new line when the speaker changes or at natural sentence breaks.",
+      "Do NOT translate, summarize, or hallucinate text if there is only music or silence.",
+    ].join("\n");
+  }
+  return [
+    `Transcribe ONLY the actual spoken human dialogue in this audio verbatim in its original script (language code: ${src}).`,
+    "Start a new line when the speaker changes or at natural sentence breaks.",
+    "Do NOT translate, summarize, or invent words if there is only music or silence.",
+  ].join("\n");
+}
+
+async function transcribeAudioVerbatimWithDedicatedModel(
+  ai: GoogleGenAI,
+  wavBase64: string,
+  sourceLangCode?: string
+): Promise<string | null> {
+  if (!wavBase64 || wavBase64.length < 64) return null;
+  const cooldownUntil = modelRateLimitCooldownUntil.get(DEDICATED_TRANSCRIBE_MODEL) ?? 0;
+  if (cooldownUntil > Date.now()) {
+    return null;
+  }
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const resp = await ai.models.generateContent({
+        model: DEDICATED_TRANSCRIBE_MODEL,
+        contents: {
+          parts: [
+            { inlineData: { mimeType: "audio/wav", data: wavBase64 } },
+            { text: buildDedicatedTranscribePrompt(sourceLangCode) },
+          ],
+        },
+      });
+      const text = (resp.text || "").trim();
+      if (!text) return null;
+      // Ignore pure non-speech placeholder replies
+      if (/^(\[?(no speech|silence|music|none|n\/a)\]?\.?)$/i.test(text)) {
+        return null;
+      }
+      return text.slice(0, 8000);
+    } catch (err) {
+      const info = parseGeminiError(err);
+      if (info.isQuota429) {
+        const cooldownMs = Math.min(62000, Math.max(10000, info.retryAfterMs ?? 20000));
+        modelRateLimitCooldownUntil.set(DEDICATED_TRANSCRIBE_MODEL, Date.now() + cooldownMs);
+        console.warn(
+          `Dedicated transcribe model (${DEDICATED_TRANSCRIBE_MODEL}) rate-limited; falling back to Pass 2 audio directly.`
+        );
+        return null;
+      }
+      if (info.isUnsupportedInput || !info.isTransient) {
+        console.warn(
+          `Dedicated transcribe model (${DEDICATED_TRANSCRIBE_MODEL}) unavailable (${info.status}); falling back to Pass 2 audio.`
+        );
+        return null;
+      }
+      if (attempt === 0) {
+        await new Promise((r) => setTimeout(r, 900));
+        continue;
+      }
+      return null;
+    }
+  }
+  return null;
 }
 
 function parseDurationToSeconds(text: string): number {
@@ -1669,7 +1906,8 @@ function getClipPrompt(
   speechWindows?: { startSec: number; endSec: number }[],
   isSlicedLocalAudio = false,
   translationTone: TranslationTone = "casual",
-  genConfig?: SubtitleGenerationConfig
+  genConfig?: SubtitleGenerationConfig,
+  verbatimTranscript?: string | null
 ): string {
   const effectiveCfg =
     genConfig ?? normalizeSubtitleGenerationConfig(undefined, translationTone);
@@ -1684,8 +1922,12 @@ function getClipPrompt(
           .join("\n")}\n- NOTE: A single speech window often contains MULTIPLE consecutive speakers talking back-to-back with zero gap OR multiple distinct clauses by one speaker. ALWAYS subdivide a window into separate utterances at EVERY speaker change and EVERY natural clause/sentence boundary. Skip any window containing only music or sound effects.\n`
       : "";
 
+  const asrAnchorSection = verbatimTranscript?.trim()
+    ? `\nPASS-1 VERBATIM SPEECH TRANSCRIPT (from dedicated speech-recognition engine — HIGH-ACCURACY WORD ANCHOR):\n"""\n${verbatimTranscript.trim()}\n"""\n- Use this Pass-1 verbatim transcript as your PRIMARY anchor for the exact spoken words so you do not mishear, drop, or hallucinate dialogue.\n- Still listen closely to the accompanying audio to verify speaker turns ("S1", "S2", ...), exact sub-second startSec/endSec timestamps, vocal emotion/gender, and any subtle particles.\n`
+    : "";
+
   return `Listen carefully to the ACTUAL spoken audio in ${scopeDesc}.
-${vadSection}
+${vadSection}${asrAnchorSection}
 CRITICAL GROUNDING, SPEAKER-SEPARATION & TIMING RULES:
 - ONLY transcribe and translate what is ACTUALLY SPOKEN in the audio of this clip.
 - NEVER invent, guess, or fabricate dialogue that is not spoken.
@@ -2282,6 +2524,7 @@ interface EmbeddedCue {
   startSec: number;
   endSec: number;
   text: string;
+  rawLines?: string[];
 }
 
 const TEXT_SUB_CODECS = new Set([
@@ -2297,22 +2540,39 @@ const TEXT_SUB_CODECS = new Set([
 ]);
 
 function parseSrtTimestamp(raw: string): number | null {
-  const m = raw.trim().match(/^(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})$/);
-  if (!m) return null;
-  const h = Number(m[1]);
-  const min = Number(m[2]);
-  const s = Number(m[3]);
-  const ms = Number(m[4].padEnd(3, "0"));
-  return h * 3600 + min * 60 + s + ms / 1000;
+  const cleaned = raw.trim();
+  const hms = cleaned.match(/^(\d{1,2}):(\d{2}):(\d{2})(?:[,.](\d{1,3}))?$/);
+  if (hms) {
+    const h = Number(hms[1]);
+    const min = Number(hms[2]);
+    const s = Number(hms[3]);
+    const ms = hms[4] ? Number(hms[4].padEnd(3, "0")) : 0;
+    return h * 3600 + min * 60 + s + ms / 1000;
+  }
+  const msShort = cleaned.match(/^(\d{1,3}):(\d{2})(?:[,.](\d{1,3}))?$/);
+  if (msShort) {
+    const min = Number(msShort[1]);
+    const s = Number(msShort[2]);
+    const ms = msShort[3] ? Number(msShort[3].padEnd(3, "0")) : 0;
+    return min * 60 + s + ms / 1000;
+  }
+  return null;
 }
 
-function cleanSubtitleText(raw: string): string {
+function cleanSubtitleLine(raw: string): string {
   return raw
     .replace(/\{\\[^}]*\}/g, "")
     .replace(/<[^>]+>/g, "")
     .replace(/\r/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function cleanSubtitleText(raw: string): string {
+  return raw
+    .replace(/\r/g, "")
     .split("\n")
-    .map((line) => line.trim())
+    .map((line) => cleanSubtitleLine(line))
     .filter(Boolean)
     .join(" ")
     .replace(/\s+/g, " ")
@@ -2320,14 +2580,24 @@ function cleanSubtitleText(raw: string): string {
 }
 
 function parseSrtCues(srtContent: string): EmbeddedCue[] {
-  const blocks = srtContent.replace(/^\uFEFF/, "").split(/\r?\n\r?\n+/);
+  const normalized = srtContent.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const blocks = normalized.split(/\n{2,}/);
   const cues: EmbeddedCue[] = [];
   for (const block of blocks) {
     const lines = block
-      .split(/\r?\n/)
+      .split("\n")
       .map((l) => l.trim())
       .filter(Boolean);
     if (lines.length < 2) continue;
+    const firstUpper = lines[0].toUpperCase();
+    if (
+      firstUpper.startsWith("WEBVTT") ||
+      firstUpper.startsWith("NOTE") ||
+      firstUpper.startsWith("STYLE") ||
+      firstUpper.startsWith("REGION")
+    ) {
+      if (!lines.some((l) => l.includes("-->"))) continue;
+    }
     const timeIdx = lines.findIndex((l) => l.includes("-->"));
     if (timeIdx === -1) continue;
     const parts = lines[timeIdx].split("-->");
@@ -2335,9 +2605,18 @@ function parseSrtCues(srtContent: string): EmbeddedCue[] {
     const startSec = parseSrtTimestamp(parts[0].trim().split(/\s+/)[0]);
     const endSec = parseSrtTimestamp(parts[1].trim().split(/\s+/)[0]);
     if (startSec === null || endSec === null || endSec <= startSec) continue;
-    const text = cleanSubtitleText(lines.slice(timeIdx + 1).join("\n"));
+    const rawLines = lines
+      .slice(timeIdx + 1)
+      .map((l) => cleanSubtitleLine(l))
+      .filter(Boolean);
+    const text = rawLines.join(" ").replace(/\s+/g, " ").trim();
     if (!text) continue;
-    cues.push({ startSec, endSec, text });
+    cues.push({
+      startSec: Number(startSec.toFixed(3)),
+      endSec: Number(endSec.toFixed(3)),
+      text,
+      rawLines,
+    });
   }
   cues.sort((a, b) => a.startSec - b.startSec);
   return cues;
@@ -2647,11 +2926,22 @@ async function transcribePreparedExtractedScenes(
     });
   };
 
-  const emitRetryProgress = (clipIdx: number, attempt: number, maxAttempts: number) => {
+  const emitRetryProgress = (
+    clipIdx: number,
+    attempt: number,
+    maxAttempts: number,
+    delayMs?: number,
+    isQuota429?: boolean
+  ) => {
     const pct = Math.min(94, Math.round(55 + (completedUnits / totalWorkUnits) * 39));
+    const waitSec = delayMs && delayMs >= 3000 ? Math.ceil(delayMs / 1000) : 0;
+    const label =
+      isQuota429 && waitSec > 0
+        ? `AI rate limit cooling down, resuming in ${waitSec}s (${attempt}/${maxAttempts})...`
+        : `AI model busy, retrying automatically (${attempt}/${maxAttempts})...`;
     onProgress?.({
       stage: "generating",
-      label: `AI model busy, retrying automatically (${attempt}/${maxAttempts})...`,
+      label,
       percent: pct,
       clipIndex: clipIdx,
       totalClips,
@@ -2692,7 +2982,8 @@ async function transcribePreparedExtractedScenes(
             sourceLangCode: genConfig?.sourceLanguage,
             targetLangCode: genConfig?.targetLanguage,
           }),
-          onRetry: ({ attempt, maxAttempts }) => emitRetryProgress(idx, attempt, maxAttempts),
+          onRetry: ({ attempt, maxAttempts, delayMs, isQuota429 }) =>
+            emitRetryProgress(idx, attempt, maxAttempts, delayMs, isQuota429),
         }
       );
       const rawRes = JSON.parse((resp.text || "{}").trim()) as RawSceneUtterances;
@@ -2701,12 +2992,16 @@ async function transcribePreparedExtractedScenes(
     }
 
     const sc = job.scene;
-    const chunkResults = await mapWithConcurrency(job.subChunks, 2, async (ch) => {
+    // Keep inner sub-chunk concurrency at 1 so total in-flight Gemini calls never exceed 2 (prevents TPM bursts)
+    const chunkResults = await mapWithConcurrency(job.subChunks, 1, async (ch) => {
       const startFrame = Math.max(0, Math.floor(ch.startSec / 0.01));
       const endFrame = Math.min(job.fullRms.length, Math.ceil(ch.endSec / 0.01));
       const startByte = Math.min(job.fullPcm.length, startFrame * 320);
       const endByte = Math.min(job.fullPcm.length, Math.max(startByte + 640, endFrame * 320));
-      const wavBuf = pcmToWavBuffer(job.fullPcm.subarray(startByte, endByte), 16000);
+      const rawWavBuf = pcmToWavBuffer(job.fullPcm.subarray(startByte, endByte), 16000);
+      // Enhance speech clarity for ASR while preserving raw RMS envelope for timing alignment
+      const speechWavBuf = await enhanceSpeechWavBuffer(rawWavBuf);
+      const speechWavBase64 = speechWavBuf.toString("base64");
 
       const chDur = Math.max(0.2, Number(((endByte - startByte) / 32000).toFixed(2)));
       const absStart = Number((sc.startSec + startFrame * 0.01).toFixed(2));
@@ -2718,11 +3013,41 @@ async function transcribePreparedExtractedScenes(
           endSec: Number(Math.min(chDur, w.endSec - startFrame * 0.01).toFixed(2)),
         }));
 
+      // Pass 1: Dedicated speech-to-text engine (gemini-3.5-transcribe) for high-accuracy verbatim words
+      const pctPass1 = Math.min(93, Math.round(55 + (completedUnits / totalWorkUnits) * 39));
+      onProgress?.({
+        stage: "generating",
+        label:
+          totalClips > 1
+            ? `Pass 1/2: Transcribing speech (${Math.min(totalClips, idx + 1)}/${totalClips})...`
+            : "Pass 1/2: Transcribing speech...",
+        percent: pctPass1,
+        clipIndex: idx,
+        totalClips,
+      });
+      const verbatimTranscript = await transcribeAudioVerbatimWithDedicatedModel(
+        ai,
+        speechWavBase64,
+        genConfig?.sourceLanguage
+      );
+
+      // Pass 2: Speaker alignment, sub-second timing & 10-Module Burmese translation anchored on Pass 1
+      onProgress?.({
+        stage: "generating",
+        label:
+          totalClips > 1
+            ? `Pass 2/2: Translating & aligning (${Math.min(totalClips, idx + 1)}/${totalClips})...`
+            : "Pass 2/2: Translating & aligning...",
+        percent: Math.min(94, pctPass1 + 2),
+        clipIndex: idx,
+        totalClips,
+      });
+
       const resp = await generateGroundedWithFailover(
         ai,
         {
           parts: [
-            { inlineData: { mimeType: "audio/wav", data: wavBuf.toString("base64") } },
+            { inlineData: { mimeType: "audio/wav", data: speechWavBase64 } },
             {
               text: getClipPrompt(
                 chDur,
@@ -2731,7 +3056,8 @@ async function transcribePreparedExtractedScenes(
                 chWindows,
                 true,
                 translationTone,
-                genConfig
+                genConfig,
+                verbatimTranscript
               ),
             },
           ],
@@ -2744,7 +3070,8 @@ async function transcribePreparedExtractedScenes(
             sourceLangCode: genConfig?.sourceLanguage,
             targetLangCode: genConfig?.targetLanguage,
           }),
-          onRetry: ({ attempt, maxAttempts }) => emitRetryProgress(idx, attempt, maxAttempts),
+          onRetry: ({ attempt, maxAttempts, delayMs, isQuota429 }) =>
+            emitRetryProgress(idx, attempt, maxAttempts, delayMs, isQuota429),
         }
       );
 
@@ -3393,6 +3720,523 @@ app.post("/api/process-clip-audio", async (req, res) => {
   }
 });
 
+function buildRawUtterancesFromImportedCues(cues: EmbeddedCue[]): RawSceneUtterances {
+  const hasMyanmar = (s: string) => /[\u1000-\u109F]/.test(s);
+  const hasThai = (s: string) => /[\u0E00-\u0E7F]/.test(s);
+
+  const utterances = cues.map((cue) => {
+    const lines = (cue.rawLines && cue.rawLines.length > 0 ? cue.rawLines : [cue.text]).filter(Boolean);
+    let thaiScript = "";
+    let thaiPhonetic = "";
+    let burmese = "";
+
+    if (lines.length >= 2) {
+      for (const ln of lines) {
+        if (hasMyanmar(ln) && !burmese) {
+          burmese = ln;
+        } else if (hasThai(ln) && !thaiScript) {
+          thaiScript = ln;
+        } else if (!thaiPhonetic) {
+          thaiPhonetic = ln;
+        } else {
+          burmese = burmese ? `${burmese} ${ln}` : ln;
+        }
+      }
+      if (!thaiPhonetic) thaiPhonetic = thaiScript || burmese || cue.text;
+      if (!thaiScript) thaiScript = thaiPhonetic;
+      if (!burmese) burmese = cue.text;
+    } else {
+      const single = lines[0] || cue.text;
+      if (hasMyanmar(single)) {
+        burmese = single;
+        thaiScript = single;
+        thaiPhonetic = single;
+      } else if (hasThai(single)) {
+        thaiScript = single;
+        thaiPhonetic = single;
+        burmese = single;
+      } else {
+        thaiScript = single;
+        thaiPhonetic = single;
+        burmese = single;
+      }
+    }
+
+    const words: RawSceneWord[] = thaiPhonetic
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((tok) => ({ phonetic: tok, thai: tok, burmeseGloss: "" }));
+
+    return {
+      startSec: cue.startSec,
+      endSec: cue.endSec,
+      originalSpokenText: cue.text,
+      thaiScript,
+      thaiPhonetic,
+      burmese,
+      words,
+    };
+  });
+
+  return {
+    hasDialogue: utterances.length > 0,
+    summary: "Imported SRT/VTT subtitles",
+    utterances,
+  };
+}
+
+// Import external .SRT or .VTT subtitles (CapCut, Whisper, YouTube CC, etc.) with exact timestamps
+// and optional batched AI translation into Burmese + Thai phonetic using the 10-module translator.
+app.post("/api/import-subtitles", async (req, res) => {
+  const {
+    title = "Uploaded Video",
+    durationSec = 120,
+    selectedScenes = [],
+    srtContent = "",
+    mode = "translate",
+    translationTone,
+    generationConfig,
+    stream = false,
+  } = (req.body || {}) as {
+    title?: string;
+    durationSec?: number;
+    selectedScenes?: { startSec: number; endSec: number }[];
+    srtContent?: string;
+    mode?: "translate" | "raw";
+    translationTone?: TranslationTone;
+    generationConfig?: Partial<SubtitleGenerationConfig>;
+    stream?: boolean;
+  };
+
+  const wantStream = Boolean(stream) || Boolean(req.headers.accept?.includes("application/x-ndjson"));
+  const sendNdjson = (payload: Record<string, unknown>) => {
+    if (!res.writableEnded) {
+      res.write(`${JSON.stringify(payload)}\n`);
+    }
+  };
+  const emitProgress = (ev: ProcessProgressEvent) => {
+    if (wantStream) {
+      sendNdjson({ type: "progress", ...ev });
+    }
+  };
+
+  try {
+    if (typeof srtContent !== "string" || !srtContent.trim()) {
+      res.status(400).json({ error: "Please select or paste a valid .SRT or .VTT subtitle file." });
+      return;
+    }
+
+    const parsedCues = parseSrtCues(srtContent);
+    if (parsedCues.length === 0) {
+      res.status(400).json({
+        error:
+          "No valid timestamped subtitle cues were found in this file. Please upload a standard .srt or .vtt file.",
+      });
+      return;
+    }
+
+    const maxCueEnd = parsedCues.reduce((m, c) => Math.max(m, c.endSec), 0);
+    const totalDuration = Math.max(5, Number(durationSec) || 0, Math.ceil(maxCueEnd));
+    const rawScenes =
+      Array.isArray(selectedScenes) && selectedScenes.length > 0
+        ? selectedScenes
+        : [{ startSec: 0, endSec: totalDuration }];
+    const scenes = normalizeSelectedScenes(rawScenes, totalDuration);
+
+    if (scenes.length === 0) {
+      res.status(400).json({ error: "Select at least one scene before importing subtitles." });
+      return;
+    }
+
+    if (wantStream) {
+      res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache, no-transform");
+      res.setHeader("X-Accel-Buffering", "no");
+      res.flushHeaders?.();
+    }
+
+    const tone = normalizeTranslationTone(translationTone);
+    const normalizedGenConfig = normalizeSubtitleGenerationConfig(generationConfig, tone);
+    const totalClips = scenes.length;
+
+    emitProgress({
+      stage: "detecting",
+      label: `Parsed ${parsedCues.length} cues from SRT/VTT...`,
+      percent: 15,
+      totalClips,
+    });
+
+    // Slice cues cleanly to match each active timeline scene
+    const sceneCueLists: EmbeddedCue[][] = scenes.map((sc) =>
+      parsedCues
+        .filter((c) => c.endSec > sc.startSec + 0.05 && c.startSec < sc.endSec - 0.05)
+        .map((c) => ({
+          startSec: Number(Math.max(0, c.startSec - sc.startSec).toFixed(3)),
+          endSec: Number(Math.min(sc.durationSec, c.endSec - sc.startSec).toFixed(3)),
+          text: c.text,
+          rawLines: c.rawLines,
+        }))
+        .filter((c) => c.endSec > c.startSec + 0.04)
+    );
+
+    const totalMatchedCues = sceneCueLists.reduce((acc, list) => acc + list.length, 0);
+    if (totalMatchedCues === 0) {
+      const msg =
+        "None of the SRT/VTT cue timestamps fall inside your selected timeline clip range(s).";
+      if (wantStream) {
+        sendNdjson({ type: "error", status: 422, error: msg });
+        res.end();
+      } else {
+        res.status(422).json({ error: msg });
+      }
+      return;
+    }
+
+    let sceneResults: RawSceneUtterances[];
+
+    if (mode === "raw") {
+      sceneResults = sceneCueLists.map((cues) => buildRawUtterancesFromImportedCues(cues));
+      emitProgress({
+        stage: "compiling",
+        label: "Loading imported subtitles...",
+        percent: 90,
+        totalClips,
+      });
+    } else {
+      const ai = getGeminiClient();
+      const BATCH_SIZE = 25;
+      const totalBatches = Math.max(
+        1,
+        sceneCueLists.reduce((acc, list) => acc + Math.ceil(list.length / BATCH_SIZE), 0)
+      );
+      let completedBatches = 0;
+
+      sceneResults = [];
+      for (let scIdx = 0; scIdx < scenes.length; scIdx++) {
+        const sc = scenes[scIdx];
+        const cues = sceneCueLists[scIdx];
+        if (cues.length === 0) {
+          sceneResults.push({ hasDialogue: false, summary: "No cues in clip", utterances: [] });
+          continue;
+        }
+
+        const mergedUtterances: NonNullable<RawSceneUtterances["utterances"]> = [];
+        for (let offset = 0; offset < cues.length; offset += BATCH_SIZE) {
+          const batch = cues.slice(offset, offset + BATCH_SIZE);
+          const pct = Math.min(92, Math.round(20 + (completedBatches / totalBatches) * 72));
+          emitProgress({
+            stage: "generating",
+            label: `Translating SRT cues (${Math.min(offset + batch.length, cues.length)}/${cues.length})...`,
+            percent: pct,
+            clipIndex: scIdx,
+            totalClips,
+          });
+
+          const resp = await generateGroundedWithFailover(
+            ai,
+            getEmbeddedSubtitlesPrompt(sc.durationSec, batch, tone, normalizedGenConfig),
+            sceneTranscriptSchema,
+            ThinkingLevel.LOW,
+            {
+              systemInstruction: buildTranslatorSystemInstruction({
+                includeAudioSegmentation: false,
+                sourceLangCode: normalizedGenConfig.sourceLanguage,
+                targetLangCode: normalizedGenConfig.targetLanguage,
+              }),
+              onRetry: ({ attempt, maxAttempts, delayMs, isQuota429 }) => {
+                const waitSec = delayMs >= 3000 ? Math.ceil(delayMs / 1000) : 0;
+                emitProgress({
+                  stage: "generating",
+                  label:
+                    isQuota429 && waitSec > 0
+                      ? `AI rate limit cooling down, resuming in ${waitSec}s (${attempt}/${maxAttempts})...`
+                      : `AI model busy, retrying (${attempt}/${maxAttempts})...`,
+                  percent: pct,
+                  clipIndex: scIdx,
+                  totalClips,
+                });
+              },
+            }
+          );
+
+          const rawRes = JSON.parse((resp.text || "{}").trim()) as RawSceneUtterances;
+          const locked = lockUtterancesToEmbeddedCues(rawRes, batch);
+          if (Array.isArray(locked.utterances)) {
+            mergedUtterances.push(...locked.utterances);
+          }
+          completedBatches += 1;
+        }
+
+        sceneResults.push({
+          hasDialogue: mergedUtterances.length > 0,
+          summary: "Imported SRT/VTT subtitles",
+          utterances: mergedUtterances,
+        });
+      }
+    }
+
+    emitProgress({
+      stage: "compiling",
+      label: "Compiling subtitles...",
+      percent: 96,
+      totalClips,
+    });
+
+    const compiled = compileSceneTranscripts(scenes, sceneResults, true);
+    const speechRegions = compiled.subtitles.map((s) => ({
+      sourceStartSec: s.sourceStartSec,
+      sourceEndSec: s.sourceEndSec,
+    }));
+
+    const payload = {
+      title,
+      channel: "Imported SRT/VTT",
+      sourceDurationSec: totalDuration,
+      targetDurationSec: compiled.targetDurationSec,
+      scenes: compiled.scenes,
+      subtitles: compiled.subtitles,
+      speechRegions,
+      keyframeUrls: [],
+    };
+
+    if (wantStream) {
+      emitProgress({
+        stage: "compiling",
+        label: "Imported subtitles ready",
+        percent: 100,
+        totalClips,
+      });
+      sendNdjson({ type: "result", status: 200, data: payload });
+      res.end();
+      return;
+    }
+
+    res.json(payload);
+  } catch (err) {
+    console.error("Import subtitles error:", err);
+    const formatted = formatGeminiError(err, "Failed to import SRT/VTT subtitles.");
+    if (wantStream && res.headersSent) {
+      sendNdjson({ type: "error", status: formatted.status, error: formatted.message });
+      res.end();
+      return;
+    }
+    res.status(formatted.status).json({ error: formatted.message });
+  }
+});
+
+// Export audio-only (.mp3 or .wav) from fast client-extracted clips or an uploaded video file
+app.post("/api/export-audio", async (req, res) => {
+  const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "export-audio-"));
+  try {
+    const {
+      uploadId,
+      clips = [],
+      selectedScenes = [],
+      durationSec = 120,
+      title = "audio",
+      format = "mp3",
+    } = (req.body || {}) as {
+      uploadId?: string;
+      clips?: Array<{
+        startSec: number;
+        endSec: number;
+        trimLeadSec?: number;
+        durationSec?: number;
+        audioBase64: string;
+        mimeType?: string;
+      }>;
+      selectedScenes?: { startSec: number; endSec: number }[];
+      durationSec?: number;
+      title?: string;
+      format?: "mp3" | "wav";
+    };
+
+    const outFormat: "mp3" | "wav" = format === "wav" ? "wav" : "mp3";
+    const safeSlug =
+      String(title || "audio")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-|-$/g, "")
+        .slice(0, 48) || "audio";
+    const outPath = path.join(tmpDir, `exported-audio.${outFormat}`);
+
+    const encodeOutputFromInput = async (
+      inputArgs: string[],
+      extraFilter?: string[]
+    ) => {
+      const codecArgs =
+        outFormat === "wav"
+          ? ["-c:a", "pcm_s16le", "-ac", "1", "-ar", "16000"]
+          : ["-c:a", "libmp3lame", "-b:a", "128k", "-ac", "2", "-ar", "44100"];
+      await execFileAsync(
+        "ffmpeg",
+        [
+          "-y",
+          ...inputArgs,
+          "-vn",
+          "-sn",
+          "-dn",
+          ...(extraFilter ?? []),
+          ...codecArgs,
+          outPath,
+        ],
+        { ...FFMPEG_EXEC_OPTS, timeout: 110_000 }
+      );
+    };
+
+    const segPaths: string[] = [];
+
+    if (Array.isArray(clips) && clips.length > 0) {
+      const totalDuration = Math.max(1, Number(durationSec) || 120);
+      const scenes = normalizeSelectedScenes(
+        clips.map((c) => ({ startSec: c.startSec, endSec: c.endSec })),
+        totalDuration
+      );
+      if (scenes.length === 0) {
+        res.status(400).json({ error: "No valid clips provided for audio export." });
+        return;
+      }
+
+      for (let i = 0; i < scenes.length; i++) {
+        const sc = scenes[i];
+        const clip = clips[i];
+        if (!clip?.audioBase64) continue;
+        const rawBuf = Buffer.from(clip.audioBase64, "base64");
+        if (rawBuf.length < 32) continue;
+        const ext = clip.mimeType?.includes("wav") ? ".wav" : ".m4a";
+        const inPath = path.join(tmpDir, `clip-${i}${ext}`);
+        const segPath = path.join(tmpDir, `seg-${i}.wav`);
+        await fs.promises.writeFile(inPath, rawBuf);
+        const trimLead = Math.max(0, Number(clip.trimLeadSec) || 0);
+        await execFileAsync(
+          "ffmpeg",
+          [
+            "-y",
+            "-ss",
+            trimLead.toFixed(4),
+            "-i",
+            inPath,
+            "-t",
+            String(sc.durationSec),
+            "-vn",
+            "-sn",
+            "-dn",
+            "-af",
+            "aresample=async=1:first_pts=0",
+            "-c:a",
+            "pcm_s16le",
+            "-ac",
+            "2",
+            "-ar",
+            "44100",
+            segPath,
+          ],
+          { ...FFMPEG_EXEC_OPTS, timeout: 90_000 }
+        );
+        if (fs.existsSync(segPath) && fs.statSync(segPath).size > 44) {
+          segPaths.push(segPath);
+        }
+      }
+    } else if (uploadId && typeof uploadId === "string") {
+      const extracted = await withUploadSessionLock(
+        uploadId,
+        async (uploadedPath) => {
+          const totalDuration = Math.max(1, Number(durationSec) || 120);
+          const rawScenes =
+            Array.isArray(selectedScenes) && selectedScenes.length > 0
+              ? selectedScenes
+              : [{ startSec: 0, endSec: totalDuration }];
+          const scenes = normalizeSelectedScenes(rawScenes, totalDuration);
+          if (scenes.length === 0) return [];
+          const outSegs: string[] = [];
+          for (let i = 0; i < scenes.length; i++) {
+            const sc = scenes[i];
+            const segPath = path.join(tmpDir, `up-seg-${i}.wav`);
+            await execFileAsync(
+              "ffmpeg",
+              [
+                "-y",
+                "-ss",
+                sc.startSec.toFixed(3),
+                "-i",
+                uploadedPath,
+                "-t",
+                String(sc.durationSec),
+                "-vn",
+                "-sn",
+                "-dn",
+                "-af",
+                "aresample=async=1:first_pts=0",
+                "-c:a",
+                "pcm_s16le",
+                "-ac",
+                "2",
+                "-ar",
+                "44100",
+                segPath,
+              ],
+              { ...FFMPEG_EXEC_OPTS, timeout: 90_000 }
+            );
+            if (fs.existsSync(segPath) && fs.statSync(segPath).size > 44) {
+              outSegs.push(segPath);
+            }
+          }
+          return outSegs;
+        },
+        { markFinalized: true }
+      );
+      if (!extracted) {
+        res.status(404).json({ error: "Uploaded video file not found. Please try again." });
+        return;
+      }
+      segPaths.push(...extracted);
+    } else {
+      res.status(400).json({ error: "No video or audio clips provided for audio export." });
+      return;
+    }
+
+    if (segPaths.length === 0) {
+      res.status(422).json({ error: "No audio track was found in this video." });
+      return;
+    }
+
+    if (segPaths.length === 1) {
+      await encodeOutputFromInput(["-i", segPaths[0]]);
+    } else {
+      const concatListPath = path.join(tmpDir, "concat.txt");
+      const concatBody = segPaths
+        .map((p) => `file '${p.replace(/'/g, "'\\''")}'`)
+        .join("\n");
+      await fs.promises.writeFile(concatListPath, concatBody, "utf8");
+      await encodeOutputFromInput(["-f", "concat", "-safe", "0", "-i", concatListPath]);
+    }
+
+    if (!fs.existsSync(outPath) || fs.statSync(outPath).size === 0) {
+      res.status(500).json({ error: "Failed to encode audio file." });
+      return;
+    }
+
+    const audioBuf = await fs.promises.readFile(outPath);
+    res.setHeader(
+      "Content-Type",
+      outFormat === "wav" ? "audio/wav" : "audio/mpeg"
+    );
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${safeSlug}-audio.${outFormat}"`
+    );
+    res.setHeader("Content-Length", String(audioBuf.length));
+    res.send(audioBuf);
+  } catch (err) {
+    console.error("Export audio error:", err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Failed to export audio from this video." });
+    }
+  } finally {
+    await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
 // Process an already-uploaded video file (detects embedded subtitles first, else transcribes audio)
 app.post("/api/process-upload", async (req, res) => {
   const {
@@ -3762,13 +4606,26 @@ app.post("/api/regenerate-subtitle", async (req, res) => {
     }
 
     const hasAudio = Boolean(audioBase64);
+    const ai = getGeminiClient();
+
+    let enhancedAudioBase64 = audioBase64;
+    let pass1Verbatim: string | null = null;
+    if (audioBase64) {
+      const enhancedBuf = await enhanceSpeechWavBuffer(Buffer.from(audioBase64, "base64"));
+      enhancedAudioBase64 = enhancedBuf.toString("base64");
+      pass1Verbatim = await transcribeAudioVerbatimWithDedicatedModel(ai, enhancedAudioBase64, "th");
+    }
+
+    const pass1AnchorBlock = pass1Verbatim
+      ? `\nPASS-1 VERBATIM SPEECH TRANSCRIPT (from dedicated speech engine — use as primary word anchor while verifying against the audio):\n"""\n${pass1Verbatim}\n"""\n`
+      : "";
 
     const promptText = `${
       hasAudio
         ? `Listen very carefully to the SPOKEN AUDIO of this single ${lineDur.toFixed(2)}-second dialogue line.`
         : `Re-transcribe/correct and accurately translate this single ${lineDur.toFixed(2)}-second dialogue line using the spoken text and surrounding dialogue context.`
     }
-${contextBlock}${userHintBlock}
+${contextBlock}${userHintBlock}${pass1AnchorBlock}
 ${getTranslationToneInstruction(tone)}
 
 ${prevAttemptBlock}
@@ -3782,11 +4639,10 @@ TASK:
 2. Output natural, accurate, idiomatic Burmese translation (မြန်မာဘာသာပြန်) matching the chosen tone and conversational context.
 3. Provide accurate "thaiScript", clear English "thaiPhonetic" pronunciation (e.g. "Sa-wat-dee khrap"), and a matching word-by-word "words" breakdown aligned within [0.0, ${lineDur.toFixed(2)}] seconds (each word having "phonetic", "thai", 1-2 word "burmeseGloss" for content words or "" for particles, "startSec", and "endSec").`;
 
-    const ai = getGeminiClient();
-    const contents: Parameters<typeof generateGroundedWithFailover>[1] = audioBase64
+    const contents: Parameters<typeof generateGroundedWithFailover>[1] = enhancedAudioBase64
       ? {
           parts: [
-            { inlineData: { mimeType: "audio/wav", data: audioBase64 } },
+            { inlineData: { mimeType: "audio/wav", data: enhancedAudioBase64 } },
             { text: promptText },
           ],
         }
@@ -4691,9 +5547,22 @@ app.post("/api/transcribe-range", async (req, res) => {
               .join("\n")}\n`
           : "";
 
+      const enhancedRangeBuf = await enhanceSpeechWavBuffer(
+        Buffer.from(localAudioPrep.wavBase64, "base64")
+      );
+      const enhancedRangeBase64 = enhancedRangeBuf.toString("base64");
+      const rangePass1Verbatim = await transcribeAudioVerbatimWithDedicatedModel(
+        ai,
+        enhancedRangeBase64,
+        "th"
+      );
+      const rangePass1Block = rangePass1Verbatim
+        ? `\nPASS-1 VERBATIM SPEECH TRANSCRIPT (from dedicated speech engine — use as primary word anchor while checking exact target window bounds):\n"""\n${rangePass1Verbatim}\n"""\n`
+        : "";
+
       const prompt = `Listen carefully to this ${localAudioPrep.clipDur.toFixed(2)}-second audio clip.
 The user wants to fill missed subtitle(s) specifically for the TARGET WINDOW [${focusStartInClip.toFixed(2)}s – ${focusEndInClip.toFixed(2)}s] inside this clip (there is ~${padLead.toFixed(2)}s leading context buffer and trailing buffer around it so boundary syllables stay intact).
-${vadBlock}${contextBlock}
+${vadBlock}${rangePass1Block}${contextBlock}
 CRITICAL RULES:
 - ONLY transcribe and translate spoken dialogue actually heard inside (or primarily spanning) the target window [${focusStartInClip.toFixed(2)}s – ${focusEndInClip.toFixed(2)}s].
 - Do NOT repeat or duplicate the Previous/Next surrounding context lines if only their edges appear in the padding buffer.
@@ -4715,7 +5584,7 @@ For each spoken utterance:
         ai,
         {
           parts: [
-            { inlineData: { mimeType: "audio/wav", data: localAudioPrep.wavBase64 } },
+            { inlineData: { mimeType: "audio/wav", data: enhancedRangeBase64 } },
             { text: prompt },
           ],
         },
@@ -6083,6 +6952,80 @@ app.use(
   }
 );
 
+const NOOP_VITE_CLIENT_ESM = `// HMR disabled: clean Vite client shim (no WebSocket, no auto-reload)
+const sheetsMap = new Map();
+const linkSheetsMap = new Map();
+if ("document" in globalThis) {
+  document.querySelectorAll("style[data-vite-dev-id]").forEach((el) => {
+    sheetsMap.set(el.getAttribute("data-vite-dev-id"), el);
+  });
+  document.querySelectorAll('link[rel="stylesheet"][data-vite-dev-id]').forEach((el) => {
+    linkSheetsMap.set(el.getAttribute("data-vite-dev-id"), el);
+  });
+}
+let lastInsertedStyle;
+export function updateStyle(id, content) {
+  if (linkSheetsMap.has(id)) return;
+  let style = sheetsMap.get(id);
+  if (!style) {
+    style = document.createElement("style");
+    style.setAttribute("type", "text/css");
+    style.setAttribute("data-vite-dev-id", id);
+    style.textContent = content;
+    if (!lastInsertedStyle) {
+      document.head.appendChild(style);
+      setTimeout(() => { lastInsertedStyle = undefined; }, 0);
+    } else {
+      lastInsertedStyle.insertAdjacentElement("afterend", style);
+    }
+    lastInsertedStyle = style;
+  } else if (style.textContent !== content) {
+    style.textContent = content;
+  }
+  sheetsMap.set(id, style);
+}
+export function removeStyle(id) {
+  if (linkSheetsMap.has(id)) {
+    document.querySelectorAll('link[rel="stylesheet"][data-vite-dev-id="' + CSS.escape(id) + '"]').forEach((el) => el.remove());
+    linkSheetsMap.delete(id);
+  }
+  const style = sheetsMap.get(id);
+  if (style) {
+    document.head.removeChild(style);
+    sheetsMap.delete(id);
+  }
+}
+export function createHotContext() {
+  return {
+    data: {},
+    accept() {},
+    acceptExports() {},
+    dispose() {},
+    prune() {},
+    decline() {},
+    invalidate() {},
+    on() {},
+    off() {},
+    send() {},
+  };
+}
+export function injectQuery(url, queryToInject) {
+  if (url[0] !== "." && url[0] !== "/") return url;
+  const pathname = url.replace(/[?#].*$/, "");
+  const { search, hash } = new URL(url, "http://vite.dev");
+  return pathname + "?" + queryToInject + (search ? "&" + search.slice(1) : "") + (hash || "");
+}
+export class ErrorOverlay extends (typeof HTMLElement !== "undefined" ? HTMLElement : class {}) {}
+`;
+
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled promise rejection:", reason);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught exception:", err);
+});
+
 async function startServer() {
   await sweepOrphanedTempFiles();
   setInterval(() => {
@@ -6093,12 +7036,21 @@ async function startServer() {
 
   if (process.env.NODE_ENV !== "production") {
     const disableHmr = process.env.DISABLE_HMR === "true";
+    if (disableHmr) {
+      // Prevent Vite client WebSocket disconnects from triggering location.reload() loops
+      app.get("/@vite/client", (_req, res) => {
+        res.setHeader("Content-Type", "application/javascript; charset=utf-8");
+        res.setHeader("Cache-Control", "no-store");
+        res.send(NOOP_VITE_CLIENT_ESM);
+      });
+    }
     const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
-        hmr: !disableHmr,
-        ws: { server },
+        hmr: disableHmr ? false : { server },
+        ws: disableHmr ? false : { server },
+        watch: disableHmr ? null : undefined,
       },
       appType: "spa",
     });

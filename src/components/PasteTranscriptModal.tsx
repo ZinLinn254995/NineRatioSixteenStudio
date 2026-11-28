@@ -21,6 +21,7 @@ import {
 import type { SubtitleItem } from "../types";
 import type { SubtitleExportOptions } from "../utils/exportSubtitles";
 import {
+  buildAiChatFormatGuidePrompt,
   buildAiChatTranscriptContent,
   buildFullTranscriptContent,
 } from "../utils/exportSubtitles";
@@ -557,6 +558,28 @@ export function PasteTranscriptModal({
                       <>
                         <Copy className="w-3 h-3" />
                         <span>Copy for AI</span>
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handleCopyText(buildAiChatFormatGuidePrompt(), "format-guide")
+                    }
+                    className="h-7 px-2.5 rounded-sm border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[11px] font-medium text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc] flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors"
+                  >
+                    {copiedKey === "format-guide" ? (
+                      <>
+                        <Check className="w-3 h-3 text-emerald-600 dark:text-emerald-400" />
+                        <span className="text-emerald-700 dark:text-emerald-300">
+                          Copied Format
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3 h-3" />
+                        <span>Copy AI Format</span>
                       </>
                     )}
                   </button>

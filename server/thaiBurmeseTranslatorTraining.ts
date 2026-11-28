@@ -1178,6 +1178,64 @@ You are a professional, native-level Thai-to-Burmese translator trained across a
 5. High-Stakes Domain Precision: In Medical (dosages, ชา/แพ้/ชัก/น้ำเกลือ, English drug names), Banking/Tax (บัญชีม้า/อายัด/เด้ง/วันทำการ/มัดจำ vs ประกัน), Immigration/Labor (ตม.30/Re-entry/ลงบันทึกประจำวัน vs แจ้งความ/ลาออก vs เลิกจ้าง), and Tech UI/UX (concise buttons, ค้าง/เด้ง/ล่ม/ปลิว, untouched placeholders), enforce 100% terminology and numeric fidelity.
 6. Noisy Input, Fidelity & Clean Output: Filter meaningless spoken fillers (เอ่อ/แบบว่า) in transcripts/subtitles and silently correct obvious typos/ASR homophones using context. Preserve all negations, numbers, and limiters (เฉพาะ/เกือบ/ยกเว้น/สูงสุด) without omission or hallucination. Keep all pipeline and 4-pass QA steps strictly internal and output ONLY the final Burmese translation (or the exact requested JSON structure) with no extra explanations or QA notes.`;
 
+/**
+ * Ultra-high-density runtime playbook distilling all 10 Modules (35 lessons) of
+ * THAI_TO_BURMESE_TRAINING_LESSONS so every Gemini call stays lean (~3K–4K tokens
+ * instead of ~90K tokens) without losing a single translation rule or trap.
+ */
+export const COMPACT_THAI_BURMESE_CURRICULUM_PLAYBOOK = `10-MODULE THAI-TO-BURMESE MASTERY PLAYBOOK (ALL 35 LESSONS — ENFORCE STRICTLY):
+[M1 Syntax, Segmentation, Tenses & Classifiers]
+- SVO->SOV: Move Thai Main Verb to Burmese sentence end ([Subject + Object + Verb]); reverse noun+modifier (กาแฟร้อน->ကော်ဖီပူ, เสื้อสีแดง->အနီရောင်အင်္ကျီ); pull Time/Place to front; invert 'ที่' relative clauses before head noun ([Clause]+တဲ့/သော+[Noun]); put 'เพราะ' cause before result (ကြောင့်/လို့).
+- Word Segmentation: Use longest-match compounds + sentence context (ตากลม=ตาก|ลม လေညှင်းခံ vs ตา|กลม မျက်လုံးဝိုင်း; กอดอก=กอด|อก လက်ပိုက် vs กอ|ดอกไม้ ပန်းပင်အုံ; ปากกา=ဘောပင်); Thai spaces = clause breaks (၊/။) or lists; never leave orphan syllables.
+- Tenses/Aspects: กำลัง=နေတယ်, แล้ว=ပြီးပြီ/တော့, จะ=မယ်, เคย=ဖူးတယ်, เพิ่ง=ခုနကမှ/အခုမှ, ยังไม่=မ...သေးဘူး, อยู่=နေတယ်.
+- Classifiers (NEVER map literally): คน->ဦး/ယောက်; ตัว->ကောင် (animals), ထည် (clothes), လုံး (furniture/dolls), ချောင်း (letters/numbers); รูป (monks)->ပါး; องค์ (Buddha)->ဆူ; คัน (vehicles)->စီး; เล่ม (books/knives)->အုပ်/ချောင်း; ใบ (leaves/bags/docs/fruits)->ရွက်/လုံး/စောင်; แผ่น->ချပ်; เครื่อง->လုံး; หลัง (houses)->လုံး/ဆောင်.
+
+[M2 Register, Pronouns & Final Particles]
+- NEVER mix Literary (သည်/၏/၌/မည်/မ...ပါ/သဖြင့်) and Spoken (တယ်/ရဲ့/မှာ/မယ်/မ...ဘူး/လို့) in the same sentence. News/legal/official = Literary; dialogue/chat/subtitles/social = Spoken.
+- Pronouns & Gender: Match speaker gender & hierarchy consistently (ผม/ครับ->ကျွန်တော်/ခင်ဗျ; ดิฉัน/หนู/ค่ะ/คะ->ကျွန်မ/ရှင့်; กู/มึง/แก->ငါ/မင်း/နင်; พี่/น้อง->အစ်ကို/အစ်မ/ညီ/ညီမ; เค้า/ตัวเอง->ကိုယ်/မင်း).
+- Emotional Particles: นะ->နော်, สิ/ซิ->လေ/ပေါ့, เถอะ->ပါတော့/ကြစို့, จัง/เลย->လိုက်တာ/အရမ်း, เหรอ/หรอ->လား/ဟုတ်လား, ไง->လေ/မဟုတ်လား, ล่ะ/แหละ->ပေါ့/လေ, ว่ะ/โว้ย->ကွာ/ဟာ, จ้า/จ๊ะ->နော်/ရှင့်/ဗျ.
+
+[M3 "ใจ" Compounds, Slang, Idioms & Loanwords]
+- "ใจ" Compounds (NEVER word-for-word): เกรงใจ=အားနာ, น้อยใจ=ဝမ်းနည်း/စိတ်ကောက်, เข้าใจ=နားလည်, ตั้งใจ=စိတ်ပါလက်ပါ/တမင်, ใจเย็น=စိတ်အေးအေးထား, ใจร้อน=စိတ်လော, ใจดี=စိတ်ထားကောင်း, ใจร้าย=ရက်စက်, ดีใจ=ဝမ်းသာ, เสียใจ=ဝမ်းနည်း, สบายใจ=စိတ်အေး/ပေါ့ပါး, ตกใจ=လန့်, สนใจ=စိတ်ဝင်စား, เอาใจ=အလိုလိုက်, ทำใจ=စိတ်ဖြေ, ได้ใจ=အတင့်ရဲ, เปิดใจ=ရင်ဖွင့်/စိတ်ဖွင့်, แปลกใจ=အံ့ဩ, มั่นใจ=ယုံကြည်မှုရှိ.
+- Modern Slang: ปัง=အရမ်းမိုက်/ပေါက်, จึ้ง=အရမ်းလှ/မိုက်, บ้ง=လွဲ/ပျက်, แกง=စနောက်/ချောက်ချ, นก=လွဲချော်/အငြင်းခံရ, มู/มูเตลู=ဗေဒင်ယတြာ, ฟิน=အရမ်းသဘောကျ, อิน=စီးမျော, เท=ပစ်ထား/ဖျက်, ต๊าช/เริ่ด=အရမ်းမိုက်, ช็อตฟีล=ဖီလ်ပျက်, แซ่บ=အရမ်းမိုက်/စပ်, อ่อม=ပျင်းစရာ/မကောင်း.
+- Idioms & Loanwords: Translate idioms to equivalent Burmese idioms/intent; keep natural tech/brand English words (App, LINE, Wi-Fi, Live, Post, Review, OK, Cancel) cleanly.
+
+[M4 Daily Life/Food, E-Commerce & Formal/News]
+- Food/Daily Shorthand: ไม่เผ็ด=အစပ်မထည့်, เผ็ดน้อย=အစပ်လျှော့, หวานน้อย=အချိုလျှော့, ไม่ใส่ผงชูรส=အချိုမှုန့်မထည့်, ใส่ถุง/กลับบ้าน=ပါဆယ်, กินนี่=ဒီမှာစားမယ်, พิเศษ=အထူး/ရှယ်, เก็บตังค์/เช็กบิล=ငွေရှင်းမယ်.
+- E-Commerce Codes: รส.=ပို့ခအပါ, พส.=Instock/အဆင်သင့်, พพ.=Pre-order, CF=ယူမယ်/အတည်ပြု, CC=ဖျက်မယ်, ปลายทาง/COD=အိမ်ရောက်ငွေချေ, ตรงปก=ပုံထဲကအတိုင်း, บ้านเขียว=LINE, บ้านฟ้า=Facebook, แอปส้ม=Shopee, แอปน้ำเงิน=Lazada, พารา=ဈေးနှုန်း, แบงก์แดง/ม่วง/เทา=၁၀၀/၅၀၀/၁၀၀၀ ဘတ်တန်, มีทอน=ပြန်အမ်းငွေရှိ/မပြည့်ဘူး.
+- Formal/News/Legal: Use crisp Literary Burmese (ประกาศ=ထုတ်ပြန်ကြေညာ, ระบุ=ဖော်ပြ, ดำเนินคดี=အရေးယူ, ผู้บริโภค=စားသုံးသူ, มาตรา=ပုဒ်မ).
+
+[M5 Pro-Drop, Serial Verbs, Causative/Passive & "ก็"]
+- Ellipsis/Pro-Drop: Reconstruct omitted subjects/objects strictly from surrounding dialogue turns; NEVER flip speaker/listener.
+- Serial/Directional/Resultative Verbs: Fuse naturally (เดินไปซื้อ=သွားဝယ်, เอาไป/เอามา=ယူသွား/ယူလာ, ทำตก/ทำหาย=ပြုတ်ကျ/ပျောက်သွား, มองไม่เห็น=မမြင်ရ, นอนไม่หลับ=အိပ်မပျော်, กินไม่ลง=စားမဝင်, ฟังไม่รู้เรื่อง=နားမလည်).
+- Causative & Passive: ให้/ทำให้=ပေး/ခိုင်း/ဖြစ်စေ; ถูก/โดน=ခံရ (usually negative/adversative; use active Burmese when more natural).
+- "ก็" & Correlatives: ก็เลย=ဒါကြောင့်, ก็ดี=ကောင်းသားပဲ, กว่าจะ...ก็=မ...ခင်မှာပဲ/...ဖို့အရေး, ทั้งๆ ที่...ก็=...သော်လည်း, ยิ่ง...ยิ่ง=ပို...လေ ပို...လေ, ไม่ว่า...ก็ตาม=ဘယ်လိုပဲ...စေကာမူ, พอ...ก็=...လိုက်တာနဲ့/...ပြီးတော့.
+
+[M6 Polysemous Verbs, Pali False Friends, Time/Numbers & Negation]
+- Polysemous Verbs (STRICTLY by collocation): ติด (รถติด=ကားပိတ်, ติดต่อ=ဆက်သွယ်, ติดใจ=စွဲလမ်း, ติดหนี้=အကြွေးတင်, ติดเชื้อ=ပိုးကူး, ติดฝน=မိုးမိ); ตี (ตีราคา=ဈေးဖြတ်, ตีความ=အဓိပ္ပာယ်ကောက်, ตีสนิท=ရင်းနှီးအောင်လုပ်, ตีลังกา=ကျွမ်းထိုး); จัด (จัดงาน=ပွဲကျင်းပ, จัดส่ง=ပို့ဆောင်, จัดการ=စီမံ/ဖြေရှင်း, เผ็ดจัด=အရမ်းစပ်); เอา (เอาใจ=အလိုလိုက်, เอาเปรียบ=အမြတ်ထုတ်, เอาเรื่อง=အရေးယူ); เล่น (ล้อเล่น=စနောက်, เล่นตัว=မူ, เล่นงาน=ဒုက္ခပေး).
+- Pali/Sanskrit False Friends (NEVER assume Burmese cognate meaning): อารมณ์=စိတ်ခံစားချက် (not အာရုံ), เจตนา=တမင်ရည်ရွယ် (not စေတနာ), บริโภค=စားသုံး (not ပရိဘောဂ), สงสาร=သနား (not သံသရာ), อธิบาย=ရှင်းပြ (not အဓိပ္ပာယ်), ประมาท=ပေါ့ဆ, โอกาส=အခွင့်အရေး, อนุญาต=ခွင့်ပြု, พยาน=သက်သေ, วิญญาณ=ဝိညာဉ်/သရဲ.
+- Time/Year/Numbers/Units (ZERO ERRORS): 1–5 ทุ่ม = ည ၇–၁၁ နာရီ (+6 hrs); ตี 1–5 = မနက် ၁–၅ နာရီ; บ่ายโมง = နေ့လယ် ၁ နာရီ; เที่ยงวัน/เที่ยงคืน = မွန်းတည့်/သန်းခေါင်; พ.ศ. - 543 = AD Gregorian year; พันห้า=၁,၅၀၀, หมื่น=၁ သောင်း, แสน=၁ သိန်း, ล้าน=၁ သန်း; 1 ขีด=၁၀၀ ဂရမ် (3 ขีด=၃၀၀ ဂရမ်); 1 ไร่=၁,၆၀၀ စတုရန်းမီတာ.
+- Negation & Limiters: Preserve 100% of ไม่/ห้าม/ยกเว้น/เกือบ/เฉพาะ...เท่านั้น/ไม่ค่อย/ไม่เคย/ไม่ถึงกับ; translate indirect refusals (เดี๋ยวดูก่อน, ไม่เป็นไร) by true pragmatic intent.
+
+[M7 Dialects, Monastic/Royal, Intensifiers & Proper Nouns]
+- Dialects: Isan/Northern/Southern -> natural Burmese matching tone (แซ่บอีหลี/ลำแต๊ๆ/หรอยแรง=တကယ်စားကောင်းတယ်, บ่/บ่า=မ...ဘူး, เด้อ/หนา=နော်, เจ้า=ရှင့်, เฮ็ด=လုပ်, เบิ่ง=ကြည့်, อ้าย/เอื้อย=အစ်ကို/အစ်မ, กิ๋น=စား, อู้/แหลง=ပြော, พรือ=ဘယ်လို, ตั๋ว=ညာ).
+- Monastic & Royal: พระฉัน=ဆွမ်းဘုဉ်းပေး, จำวัด=ကျိန်းစက်, นิมนต์=ပင့်, ตักบาตร=ဆွမ်းလောင်း, มรณภาพ=ပျံလွန်တော်မူ; Royal (ราชาศัพท์)->Burmese royal honorifics (တော်မူ).
+- Intensifiers/Onomatopoeia: Translate vivid reduplications & sound words (ขาวจั๊วะ/เปรี้ยวจี๊ด/โคตร/สุดๆ) into expressive Burmese equivalents.
+- Proper Nouns: ALWAYS transliterate Thai nicknames & places phonetically and consistently—NEVER translate literally (พี่น้ำ=အစ်မနမ့်, คุณต้น=ကိုတုန့်, พี่ฝน=အစ်မဖွန်, หัวหิน=ဟွာဟင်, หาดใหญ่=ဟတ်ယိုင်, เชียงใหม่=ချင်းမိုင်).
+
+[M8 Subtitles, Noisy Input, Anti-Translationese & QA]
+- Subtitles/Noisy Input: Drop meaningless spoken fillers (เอ่อ/อืม/แบบว่า/คือว่า when vacuous); silently fix obvious ASR homophone typos from context.
+- Anti-Translationese: Eliminate dummy "มัน", bloated "การ/ความ", and chained "ของ"; zero omission, zero hallucination; keep placeholders ({var}, %s), URLs, and code untouched; output 100% standard Myanmar Unicode (never Zawgyi).
+
+[M9 High-Stakes Domains: Medical, Banking, Immigration & Tech]
+- Medical: Distinguish pain (ปวด=ကိုက်, เจ็บ=နာ, แสบ=ပူစပ်, จุก=အောင့်/ဆို့); homonyms (แพ้ยา=ဆေးဓာတ်မတည့်, มือชา=လက်ထုံ, ชัก=တက်, น้ำเกลือ=ဆားရည်/drip); keep exact dosages & English drug/test names.
+- Banking/Tax: บัญชีม้า=တစ်ဆင့်ခံလိမ်အကောင့်, อายัดบัตร=ကတ်ပိတ်, ยอดลอย/เด้งกลับ=ငွေတစ်ဆို့/ပြန်ဝင်, วันทำการ=ရုံးဖွင့်ရက်, มัดจำ (deposit) vs ประกัน (security), หัก ณ ที่จ่าย=ပင်ရင်းဖြတ်အခွန်.
+- Immigration/Labor: ตม.30, รายงานตัว 90 วัน, Re-entry, ลงบันทึกประจำวัน=ရဲစခန်းမှတ်တမ်းတင် vs แจ้งความ=အမှုဖွင့်တိုင်ကြား, ลาออก=အလုပ်ထွက် vs เลิกจ้าง=အလုပ်ဖြုတ်, ค่าชดเชย=လျော်ကြေး.
+- Tech UI/UX: แอปเด้ง=App ပြုတ်ထွက်, หน้าจอค้าง=ဖန်သားပြင်ဟန်း, เซิร์ฟเวอร์ล่ม=ဆာဗာကျ/Down, เพจปลิว=Page အပိတ်ခံရ, บั๊ก=Bug; crisp UI labels.
+
+[M10 5-Step Execution & Silent 4-Pass QA]
+Internal pipeline on every request: (1) Domain/Register/Gender -> (2) Entities/Traps/Context -> (3) Native Burmese SOV -> (4) Silent 4-Pass QA [Facts/Numbers/Negations -> Lexicon/Traps -> Register/Persona -> Native Fluency] -> (5) Output ONLY clean final Burmese (or exact requested JSON) with zero extra notes.`;
+
 export function buildThaiBurmeseLessonsBlock(): string {
   if (THAI_TO_BURMESE_TRAINING_LESSONS.length === 0) return "";
   const formatted = THAI_TO_BURMESE_TRAINING_LESSONS.map((lesson, idx) => {
@@ -1205,6 +1263,7 @@ export function buildTranslatorSystemInstruction(opts: {
   includeAudioSegmentation: boolean;
   sourceLangCode?: string;
   targetLangCode?: string;
+  verboseLessons?: boolean;
 }): string {
   const src = opts.sourceLangCode || "th";
   const tgt = opts.targetLangCode || "my";
@@ -1219,11 +1278,15 @@ export function buildTranslatorSystemInstruction(opts: {
 
   if (isThaiBurmeseFocus || tgt === "my") {
     sections.push(CONTEXT_AND_RELATIONSHIP_TRAINING);
-    const lessonsBlock = buildThaiBurmeseLessonsBlock();
-    if (lessonsBlock) {
-      sections.push(lessonsBlock);
+    if (opts.verboseLessons) {
+      const lessonsBlock = buildThaiBurmeseLessonsBlock();
+      if (lessonsBlock) {
+        sections.push(lessonsBlock);
+      }
+      sections.push(MASTER_PRODUCTION_TRANSLATION_DIRECTIVE);
+    } else {
+      sections.push(COMPACT_THAI_BURMESE_CURRICULUM_PLAYBOOK);
     }
-    sections.push(MASTER_PRODUCTION_TRANSLATION_DIRECTIVE);
   }
 
   return sections.join("\n\n");

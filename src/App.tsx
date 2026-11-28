@@ -40,6 +40,7 @@ import {
 import { ProjectTimelineEditor } from "./components/ProjectTimelineEditor";
 import { EmptyStudioUpload } from "./components/EmptyStudioUpload";
 import { ExportSheet } from "./components/ExportSheet";
+import { ImportSrtModal, type ImportSrtMode } from "./components/ImportSrtModal";
 import { OfflineIndicator, PWAInstallButton } from "./components/PWAInstallButton";
 import {
   exportProjectToMp4,
@@ -60,6 +61,8 @@ import {
   uploadBlobInChunks,
 } from "./utils/uploadFile";
 import { extractMp4AudioClips } from "./utils/mp4ClipAudio";
+import type { StructuredTranscriptImportResult } from "./utils/pasteTranscriptSync";
+import { makeSafeFileSlug } from "./utils/exportSubtitles";
 import {
   ensureSceneIds,
   findActiveSubtitle,
@@ -207,9 +210,17 @@ export default function App() {
   );
   const [stagePreviewScale, setStagePreviewScale] = useState<number>(DEFAULT_STAGE_PREVIEW_SCALE);
 
+  const [showImportSrtModal, setShowImportSrtModal] = useState(false);
+  const [isImportingSrt, setIsImportingSrt] = useState(false);
+  const [importSrtProgress, setImportSrtProgress] =
+    useState<SubtitleGenerationProgress | null>(null);
+  const [importSrtError, setImportSrtError] = useState<string | null>(null);
+  const [isExportingAudio, setIsExportingAudio] = useState(false);
+
   const activeRunIdRef = useRef(0);
   const lastGenActionRef = useRef<{ type: "all" } | { type: "clip"; sceneId: string } | null>(null);
   const generateAbortRef = useRef<AbortController | null>(null);
+  const importSrtAbortRef = useRef<AbortController | null>(null);
   const resyncAbortRef = useRef<AbortController | null>(null);
   const transcribeRangeAbortRef = useRef<AbortController | null>(null);
   const retranslateAbortRef = useRef<AbortController | null>(null);
@@ -1436,6 +1447,291 @@ export default function App() {
         setIsProcessing(false);
         setGenerationProgress(null);
       }
+    }
+  };
+
+  const handleOpenImportSrt = () => {
+    setImportSrtError(null);
+    setShowImportSrtModal(true);
+  };
+
+  const handleCancelImportSrt = () => {
+    importSrtAbortRef.current?.abort();
+    importSrtAbortRef.current = null;
+    setIsImportingSrt(false);
+    setImportSrtProgress(null);
+  };
+
+  const handleImportSrtSubtitles = async (
+    srtContent: string,
+    mode: ImportSrtMode,
+    fileName?: string
+  ) => {
+    const targetMedia = localMedia;
+    if (!targetMedia) {
+      setImportSrtError("Upload a local video first before importing subtitles.");
+      return;
+    }
+
+    importSrtAbortRef.current?.abort();
+    const controller = new AbortController();
+    importSrtAbortRef.current = controller;
+
+    const activeGenConfig = subtitleGenConfig;
+    const legacyTone: TranslationTone =
+      activeGenConfig.translationTone === "casual" ||
+      activeGenConfig.translationTone === "formal" ||
+      activeGenConfig.translationTone === "dramatic" ||
+      activeGenConfig.translationTone === "literal"
+        ? activeGenConfig.translationTone
+        : videoEdit.translationTone;
+
+    const effectiveScenes =
+      selectedScenes.length > 0
+        ? selectedScenes
+        : [
+            {
+              id: `scene-import-${Date.now()}`,
+              startSec: 0,
+              endSec: Math.max(5, targetMedia.durationSec || 60),
+            },
+          ];
+
+    setIsImportingSrt(true);
+    setImportSrtError(null);
+    setImportSrtProgress({
+      stage: "detecting",
+      label: mode === "translate" ? "Reading SRT & preparing translation..." : "Loading SRT cues...",
+      percent: 8,
+      totalClips: effectiveScenes.length,
+    });
+
+    try {
+      const resp = await fetch("/api/import-subtitles", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/x-ndjson",
+        },
+        body: JSON.stringify({
+          title: targetMedia.title,
+          durationSec: targetMedia.durationSec,
+          selectedScenes: effectiveScenes.map(({ startSec, endSec }) => ({
+            startSec,
+            endSec,
+          })),
+          srtContent,
+          mode,
+          translationTone: legacyTone,
+          generationConfig: activeGenConfig,
+          stream: true,
+        }),
+        signal: controller.signal,
+      });
+
+      const data = await readStreamingProcessResponse<VideoProject & { error?: string }>(resp, (ev) => {
+        setImportSrtProgress(ev);
+      });
+
+      if (controller.signal.aborted) return;
+
+      if (project && project.subtitles.length > 0) {
+        pushSubtitleUndo();
+      }
+
+      const normalizedServerProj = attachSceneIdsFromServerProject(data, effectiveScenes);
+      const nextProj: VideoProject = {
+        ...normalizedServerProj,
+        localUrl: targetMedia.localUrl,
+        localFile: targetMedia.localFile,
+      };
+      setProject(nextProj);
+      setBaselineFromProject(nextProj);
+
+      if (mode === "translate") {
+        const hasTranslationLine =
+          activeGenConfig.subtitleFormat !== "translation_only" &&
+          activeGenConfig.subtitleFormat !== "original_only" &&
+          activeGenConfig.targetLanguage !== "none";
+        setVideoEdit((prev) => ({
+          ...prev,
+          translationTone: legacyTone,
+          showBurmeseLine: hasTranslationLine,
+          showWordGloss: hasTranslationLine && activeGenConfig.includeWordGloss,
+          showThaiScript:
+            activeGenConfig.subtitleFormat === "bilingual_phonetic"
+              ? activeGenConfig.includeNativeScript && prev.showThaiScript
+              : activeGenConfig.subtitleFormat === "bilingual_native"
+                ? activeGenConfig.includeNativeScript
+                : false,
+        }));
+      }
+
+      setShowImportSrtModal(false);
+      setShowSubtitleGenSettings(false);
+      setActiveTab("studio");
+      setStudioSection("edit");
+      showShortcutToast(
+        `Imported ${nextProj.subtitles.length} cues${fileName ? ` from ${fileName}` : ""}`
+      );
+    } catch (err) {
+      if (
+        controller.signal.aborted ||
+        (err instanceof DOMException && err.name === "AbortError")
+      ) {
+        return;
+      }
+      setImportSrtError(formatReadableApiError(err, "Failed to import SRT/VTT subtitles."));
+    } finally {
+      if (importSrtAbortRef.current === controller) {
+        importSrtAbortRef.current = null;
+      }
+      setIsImportingSrt(false);
+      setImportSrtProgress(null);
+    }
+  };
+
+  const handleImportStructuredTranscript = (
+    result: StructuredTranscriptImportResult,
+    fileName?: string
+  ) => {
+    const targetMedia = localMedia;
+    if (!targetMedia) {
+      setImportSrtError("Upload a local video first before importing a transcript.");
+      return;
+    }
+    if (result.subtitles.length === 0) {
+      setImportSrtError("No valid transcript lines were detected.");
+      return;
+    }
+
+    if (project && project.subtitles.length > 0) {
+      pushSubtitleUndo();
+    }
+
+    const speechRegions: SpeechRegion[] = result.subtitles.map((sub) => ({
+      sourceStartSec: sub.sourceStartSec,
+      sourceEndSec: sub.sourceEndSec,
+    }));
+
+    const nextProj: VideoProject = {
+      title: targetMedia.title || "Uploaded Video",
+      channel: targetMedia.channel || "Local Video",
+      sourceDurationSec: Math.max(
+        1,
+        targetMedia.durationSec || result.targetDurationSec
+      ),
+      targetDurationSec: result.targetDurationSec,
+      scenes: result.scenes,
+      subtitles: result.subtitles,
+      speechRegions,
+      keyframeUrls: project?.keyframeUrls ?? [],
+      uploadId: targetMedia.uploadId,
+      localUrl: targetMedia.localUrl,
+      localFile: targetMedia.localFile,
+    };
+
+    setProject(nextProj);
+    setBaselineFromProject(nextProj);
+
+    setVideoEdit((prev) => ({
+      ...prev,
+      showBurmeseLine: result.hasBurmese ? true : prev.showBurmeseLine,
+      showWordGloss: result.hasWords ? true : prev.showWordGloss,
+      showThaiScript: result.hasThai ? prev.showThaiScript : false,
+    }));
+
+    setShowImportSrtModal(false);
+    setShowSubtitleGenSettings(false);
+    setImportSrtError(null);
+    setActiveTab("studio");
+    setStudioSection("edit");
+    showShortcutToast(
+      `Imported ${result.subtitles.length} lines${fileName ? ` from ${fileName}` : ""}`
+    );
+  };
+
+  const handleExportAudioOnly = async () => {
+    const targetMedia = localMedia;
+    if (!targetMedia || isExportingAudio) return;
+
+    const totalDur = Math.max(
+      1,
+      targetMedia.durationSec || project?.sourceDurationSec || 60
+    );
+    const scenePayload =
+      selectedScenes.length > 0
+        ? selectedScenes.map(({ startSec, endSec }) => ({ startSec, endSec }))
+        : [{ startSec: 0, endSec: totalDur }];
+
+    setIsExportingAudio(true);
+    setProcessError(null);
+    showShortcutToast("Extracting audio (.mp3)...");
+
+    try {
+      let uploadId = targetMedia.uploadId;
+      let resp: Response | null = null;
+
+      if (!uploadId && targetMedia.localFile) {
+        const fastClips = await extractMp4AudioClips(targetMedia.localFile, scenePayload);
+        if (fastClips && fastClips.length === scenePayload.length) {
+          resp = await fetch("/api/export-audio", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              title: targetMedia.title,
+              durationSec: totalDur,
+              clips: fastClips,
+              format: "mp3",
+            }),
+          });
+        } else {
+          uploadId = await uploadBlobInChunks(
+            targetMedia.localFile,
+            targetMedia.localFile.name
+          );
+          setLocalMedia((prev) => (prev ? { ...prev, uploadId } : prev));
+        }
+      }
+
+      if (!resp) {
+        if (!uploadId) {
+          throw new Error("Please upload a local video file first before exporting audio.");
+        }
+        resp = await fetch("/api/export-audio", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            uploadId,
+            title: targetMedia.title,
+            durationSec: totalDur,
+            selectedScenes: scenePayload,
+            format: "mp3",
+          }),
+        });
+      }
+
+      if (!resp.ok) {
+        const errData = await safeReadJson<{ error?: string }>(resp);
+        throw new Error(errData?.error || "Failed to export audio.");
+      }
+
+      const audioBlob = await resp.blob();
+      const slug = makeSafeFileSlug(targetMedia.title || "video");
+      const filename = `${slug}-audio.mp3`;
+      const url = URL.createObjectURL(audioBlob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 5000);
+      showShortcutToast(`Exported ${filename}`);
+    } catch (err) {
+      setProcessError(formatReadableApiError(err, "Failed to export audio."));
+    } finally {
+      setIsExportingAudio(false);
     }
   };
 
@@ -4524,6 +4820,9 @@ export default function App() {
               }
               onGenerateSubtitles={handleOpenSubtitleGenSettings}
               onConfirmGenerateSubtitles={handleGenerateSubtitles}
+              onOpenImportSrt={handleOpenImportSrt}
+              onExportAudio={localMedia ? () => void handleExportAudioOnly() : undefined}
+              isExportingAudio={isExportingAudio}
               showSubtitleGenSettings={showSubtitleGenSettings}
               subtitleGenConfig={subtitleGenConfig}
               onChangeSubtitleGenConfig={handleChangeSubtitleGenConfig}
@@ -4835,6 +5134,31 @@ export default function App() {
         onShare={handleShareMp4}
         onRetry={() => void startBackgroundExport(true)}
         onDiscardResult={handleDiscardExportResult}
+      />
+
+      <ImportSrtModal
+        isOpen={showImportSrtModal}
+        hasExistingSubtitles={Boolean(project && project.subtitles.length > 0)}
+        existingSubtitleCount={project?.subtitles.length ?? 0}
+        hasVideo={Boolean(localMedia)}
+        selectedScenes={selectedScenes}
+        videoDurationSec={
+          localMedia?.durationSec ??
+          project?.sourceDurationSec ??
+          project?.targetDurationSec ??
+          60
+        }
+        isImporting={isImportingSrt}
+        isExportingAudio={isExportingAudio}
+        progress={importSrtProgress}
+        error={importSrtError}
+        onImport={(content, mode, name) => void handleImportSrtSubtitles(content, mode, name)}
+        onImportStructured={handleImportStructuredTranscript}
+        onExportAudio={localMedia ? () => void handleExportAudioOnly() : undefined}
+        onCancelImport={handleCancelImportSrt}
+        onClose={() => {
+          if (!isImportingSrt) setShowImportSrtModal(false);
+        }}
       />
 
       {shortcutToast && (

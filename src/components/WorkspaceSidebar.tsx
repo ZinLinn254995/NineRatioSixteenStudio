@@ -18,7 +18,9 @@ import {
   Clock,
   Copy,
   Download,
+  FileAudio,
   FileText,
+  FileUp,
   Film,
   Loader2,
   LocateFixed,
@@ -85,6 +87,7 @@ import {
 import type { CutSpeechRegion } from "../utils/audioSpeechAnalyzer";
 import { DEFAULT_VIDEO_EDIT } from "../utils/videoFilters";
 import {
+  buildAiChatFormatGuidePrompt,
   buildAiChatTranscriptContent,
   buildFullTranscriptContent,
   buildSrtContent,
@@ -142,6 +145,9 @@ interface WorkspaceSidebarProps {
   onDetectedYouTubeDuration: (dur: number) => void;
   onGenerateSubtitles: () => void;
   onConfirmGenerateSubtitles?: (config: import("../types").SubtitleGenerationConfig) => void;
+  onOpenImportSrt?: () => void;
+  onExportAudio?: () => void;
+  isExportingAudio?: boolean;
   showSubtitleGenSettings?: boolean;
   subtitleGenConfig?: import("../types").SubtitleGenerationConfig;
   onChangeSubtitleGenConfig?: (next: import("../types").SubtitleGenerationConfig) => void;
@@ -341,6 +347,9 @@ export function WorkspaceSidebar({
   onDetectedYouTubeDuration,
   onGenerateSubtitles,
   onConfirmGenerateSubtitles,
+  onOpenImportSrt,
+  onExportAudio,
+  isExportingAudio = false,
   showSubtitleGenSettings = false,
   subtitleGenConfig,
   onChangeSubtitleGenConfig,
@@ -1693,6 +1702,7 @@ export function WorkspaceSidebar({
                 processError={processError}
                 onChangeConfig={onChangeSubtitleGenConfig}
                 onStartGenerate={onConfirmGenerateSubtitles}
+                onOpenImportSrt={onOpenImportSrt}
                 onCancelGenerate={onCancelGenerateSubtitles}
                 onClose={onCloseSubtitleGenSettings}
               />
@@ -1744,6 +1754,8 @@ export function WorkspaceSidebar({
                     0
                   }
                   onClearVideo={onClearLocalVideo}
+                  onExportAudio={onExportAudio}
+                  isExportingAudio={isExportingAudio}
                 />
                 <p className="text-[11px] text-[#4d597d] dark:text-[#919ec4] leading-relaxed">
                   Use the timeline below to split, trim, reorder clips, or generate subtitles.
@@ -1768,6 +1780,8 @@ export function WorkspaceSidebar({
                         0
                       }
                       onClearVideo={onClearLocalVideo}
+                      onExportAudio={onExportAudio}
+                      isExportingAudio={isExportingAudio}
                     />
                     {!hideCaptions && (
                       <PreGenerateBar
@@ -1779,6 +1793,7 @@ export function WorkspaceSidebar({
                           onChangeEditSettings({ ...editSettings, translationTone: tone })
                         }
                         onGenerate={onGenerateSubtitles}
+                        onImportSrt={onOpenImportSrt}
                         regeneratingClipId={regeneratingClipId}
                       />
                     )}
@@ -1872,6 +1887,7 @@ export function WorkspaceSidebar({
                           onChangeEditSettings({ ...editSettings, translationTone: tone })
                         }
                         onGenerate={onGenerateSubtitles}
+                        onImportSrt={onOpenImportSrt}
                         regeneratingClipId={regeneratingClipId}
                       />
                     )}
@@ -1930,6 +1946,14 @@ export function WorkspaceSidebar({
                   setTimeout(() => setCopiedTranscript(false), 2000);
                 } catch {
                   // ignore clipboard permission failure
+                }
+                setShowSourceMenu(false);
+              };
+              const handleCopyAiFormatPrompt = async () => {
+                const ok = await copyTextToClipboard(buildAiChatFormatGuidePrompt());
+                if (ok) {
+                  setCopiedTranscript(true);
+                  setTimeout(() => setCopiedTranscript(false), 2000);
                 }
                 setShowSourceMenu(false);
               };
@@ -2157,6 +2181,45 @@ export function WorkspaceSidebar({
 
                             {/* Export, Copy & Paste-Sync */}
                             <div className="space-y-0.5 pb-1 border-b border-[#d2dcf0] dark:border-[#21284c]">
+                              {onOpenImportSrt && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setShowSourceMenu(false);
+                                    onOpenImportSrt();
+                                  }}
+                                  className="w-full px-2 py-1.5 rounded-sm text-left text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] flex items-center gap-2 cursor-pointer"
+                                >
+                                  <FileUp className="w-3.5 h-3.5 text-teal-700 dark:text-teal-400" />
+                                  <span>Import Transcript / .SRT</span>
+                                </button>
+                              )}
+                              {onExportAudio && (
+                                <button
+                                  type="button"
+                                  disabled={isExportingAudio}
+                                  onClick={() => {
+                                    setShowSourceMenu(false);
+                                    onExportAudio();
+                                  }}
+                                  className="w-full px-2 py-1.5 rounded-sm text-left text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] flex items-center gap-2 cursor-pointer disabled:opacity-50"
+                                >
+                                  {isExportingAudio ? (
+                                    <Loader2 className="w-3.5 h-3.5 animate-spin text-teal-700 dark:text-teal-400" />
+                                  ) : (
+                                    <FileAudio className="w-3.5 h-3.5 text-teal-700 dark:text-teal-400" />
+                                  )}
+                                  <span>{isExportingAudio ? "Exporting Audio..." : "Export Audio (.mp3)"}</span>
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={handleCopyAiFormatPrompt}
+                                className="w-full px-2 py-1.5 rounded-sm text-left text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] hover:bg-[#e7ecf8] dark:hover:bg-[#141933] flex items-center gap-2 cursor-pointer"
+                              >
+                                <BookOpen className="w-3.5 h-3.5 text-teal-700 dark:text-teal-400" />
+                                <span>Copy AI Format Prompt</span>
+                              </button>
                               {onApplyPasteTranscriptSync && (
                                 <button
                                   type="button"

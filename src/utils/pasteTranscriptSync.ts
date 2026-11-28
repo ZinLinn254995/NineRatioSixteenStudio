@@ -1,4 +1,4 @@
-import type { SubtitleItem, SubtitleWord } from "../types";
+import type { SceneSelection, SpeakingScene, SubtitleItem, SubtitleWord } from "../types";
 import { buildWordsFromPhonetic } from "./subtitleState";
 
 export interface ParsedTranscriptWord {
@@ -10,6 +10,8 @@ export interface ParsedTranscriptWord {
 
 export interface ParsedTranscriptEntry {
   index: number | null;
+  startSec?: number;
+  endSec?: number;
   rawHeader?: string;
   thaiPhonetic?: string;
   thaiScript?: string;
@@ -61,14 +63,21 @@ const MYANMAR_CHAR_RE = /[\u1000-\u109F\uAA60-\uAA7F]/;
 const THAI_CHAR_RE = /[\u0E00-\u0E7F]/;
 const LATIN_CHAR_RE = /[A-Za-zÀ-ÖØ-öø-ÿ]/;
 
-const TIMESTAMP_RANGE_RE =
-  /^\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?\s*(?:[–—\-→]+|->|to)\s*\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?(?:\s+(.*))?$/i;
+const TIMESTAMP_TOKEN = "(\\d{1,2}:\\d{2}(?::\\d{2})?(?:[.,]\\d{1,3})?)";
+const TIMESTAMP_SEP = "(?:[–—\\-→]+|-->|->|to)";
+
+const TIMESTAMP_RANGE_RE = new RegExp(
+  `^${TIMESTAMP_TOKEN}\\s*${TIMESTAMP_SEP}\\s*${TIMESTAMP_TOKEN}(?:\\s+(.*))?$`,
+  "i"
+);
 
 const STRUCTURED_HEADER_BRACKET_RE =
   /^(?:[-*•]\s*|\#{1,4}\s*|\*{1,2})*\[(\d{1,4})\](?:\*{1,2})?(?:\s+(.*))?$/;
 
-const NUMBERED_TIMESTAMP_HEADER_RE =
-  /^(?:[-*•]\s*|\#{1,4}\s*|\*{1,2})*(\d{1,4})[.)]\s+(\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?\s*(?:[–—\-→]+|->|to)\s*\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?)(?:\s+(.*))?$/i;
+const NUMBERED_TIMESTAMP_HEADER_RE = new RegExp(
+  `^(?:[-*•]\\s*|\\#{1,4}\\s*|\\*{1,2})*(\\d{1,4})[.)]\\s+(${TIMESTAMP_TOKEN}\\s*${TIMESTAMP_SEP}\\s*${TIMESTAMP_TOKEN})(?:\\s+(.*))?$`,
+  "i"
+);
 
 const BARE_NUMBERED_HEADER_RE = /^(?:[-*•]\s*|\#{1,4}\s*|\*{1,2})*(\d{1,4})[.)]\s*$/;
 
@@ -238,12 +247,46 @@ function classifySingleLinePayload(
   return { thaiPhonetic: trimmed };
 }
 
-function stripLeadingTimestamp(text: string): { hadTimestamp: boolean; rest: string } {
+export function parseFlexibleTimestampSec(raw: string): number | null {
+  const cleaned = raw.trim();
+  const hms = cleaned.match(/^(\d{1,2}):(\d{2}):(\d{2})(?:[.,](\d{1,3}))?$/);
+  if (hms) {
+    const h = Number(hms[1]);
+    const min = Number(hms[2]);
+    const s = Number(hms[3]);
+    const ms = hms[4] ? Number(hms[4].padEnd(3, "0")) : 0;
+    if (!Number.isFinite(h) || !Number.isFinite(min) || !Number.isFinite(s)) return null;
+    return Number((h * 3600 + min * 60 + s + ms / 1000).toFixed(3));
+  }
+  const msShort = cleaned.match(/^(\d{1,3}):(\d{2})(?:[.,](\d{1,3}))?$/);
+  if (msShort) {
+    const min = Number(msShort[1]);
+    const s = Number(msShort[2]);
+    const ms = msShort[3] ? Number(msShort[3].padEnd(3, "0")) : 0;
+    if (!Number.isFinite(min) || !Number.isFinite(s)) return null;
+    return Number((min * 60 + s + ms / 1000).toFixed(3));
+  }
+  return null;
+}
+
+function stripLeadingTimestamp(text: string): {
+  hadTimestamp: boolean;
+  startSec?: number;
+  endSec?: number;
+  rest: string;
+} {
   const trimmed = text.trim();
   if (!trimmed) return { hadTimestamp: false, rest: "" };
   const tsMatch = trimmed.match(TIMESTAMP_RANGE_RE);
   if (tsMatch) {
-    return { hadTimestamp: true, rest: (tsMatch[1] || "").trim() };
+    const startSec = parseFlexibleTimestampSec(tsMatch[1] || "");
+    const endSec = parseFlexibleTimestampSec(tsMatch[2] || "");
+    return {
+      hadTimestamp: true,
+      ...(startSec !== null ? { startSec } : {}),
+      ...(endSec !== null ? { endSec } : {}),
+      rest: (tsMatch[3] || "").trim(),
+    };
   }
   return { hadTimestamp: false, rest: trimmed };
 }
@@ -278,6 +321,7 @@ export function parsePastedTranscript(rawInput: string): ParsedTranscriptResult 
   const hasTimestampBlockHeader = lines.some((line) => {
     const t = line.trim();
     if (NUMBERED_TIMESTAMP_HEADER_RE.test(t)) return true;
+    if (TIMESTAMP_RANGE_RE.test(t) && hasFieldLabel) return true;
     const bm = t.match(STRUCTURED_HEADER_BRACKET_RE);
     if (!bm) return false;
     return stripLeadingTimestamp(bm[2] || "").hadTimestamp || !(bm[2] || "").trim();
@@ -307,6 +351,8 @@ export function parsePastedTranscript(rawInput: string): ParsedTranscriptResult 
       ) {
         entries.push({
           index: current.index,
+          ...(current.startSec !== undefined ? { startSec: current.startSec } : {}),
+          ...(current.endSec !== undefined ? { endSec: current.endSec } : {}),
           rawHeader: current.rawHeader,
           ...(current.thaiPhonetic !== undefined ? { thaiPhonetic: current.thaiPhonetic } : {}),
           ...(current.thaiScript !== undefined ? { thaiScript: current.thaiScript } : {}),
@@ -344,6 +390,8 @@ export function parsePastedTranscript(rawInput: string): ParsedTranscriptResult 
         finalizeCurrent();
         current = {
           index: Number.isFinite(idx) ? idx : null,
+          ...(tsInfo.startSec !== undefined ? { startSec: tsInfo.startSec } : {}),
+          ...(tsInfo.endSec !== undefined ? { endSec: tsInfo.endSec } : {}),
           rawHeader: trimmed,
           hasExplicitFields: false,
           inlineAfterHeader: tsInfo.rest || undefined,
@@ -356,15 +404,37 @@ export function parsePastedTranscript(rawInput: string): ParsedTranscriptResult 
       const numTsMatch = trimmed.match(NUMBERED_TIMESTAMP_HEADER_RE);
       if (numTsMatch) {
         const idx = parseInt(numTsMatch[1], 10);
+        const tsStart = parseFlexibleTimestampSec(numTsMatch[3] || "");
+        const tsEnd = parseFlexibleTimestampSec(numTsMatch[4] || "");
         finalizeCurrent();
         current = {
           index: Number.isFinite(idx) ? idx : null,
+          ...(tsStart !== null ? { startSec: tsStart } : {}),
+          ...(tsEnd !== null ? { endSec: tsEnd } : {}),
           rawHeader: trimmed,
           hasExplicitFields: false,
-          inlineAfterHeader: (numTsMatch[3] || "").trim() || undefined,
+          inlineAfterHeader: (numTsMatch[5] || "").trim() || undefined,
           rawText: trimmed,
         };
         continue;
+      }
+
+      // Check standalone MM:SS – MM:SS header when structured fields are present
+      if (hasFieldLabel) {
+        const bareTs = stripLeadingTimestamp(trimmed);
+        if (bareTs.hadTimestamp) {
+          finalizeCurrent();
+          current = {
+            index: null,
+            ...(bareTs.startSec !== undefined ? { startSec: bareTs.startSec } : {}),
+            ...(bareTs.endSec !== undefined ? { endSec: bareTs.endSec } : {}),
+            rawHeader: trimmed,
+            hasExplicitFields: false,
+            inlineAfterHeader: bareTs.rest || undefined,
+            rawText: trimmed,
+          };
+          continue;
+        }
       }
 
       // Check bare "01." header before Phonetic:/Thai:/Burmese:
@@ -448,6 +518,8 @@ export function parsePastedTranscript(rawInput: string): ParsedTranscriptResult 
       if (!payload) continue;
       numberedEntries.push({
         index: Number.isFinite(idx) ? idx : null,
+        ...(tsInfo.startSec !== undefined ? { startSec: tsInfo.startSec } : {}),
+        ...(tsInfo.endSec !== undefined ? { endSec: tsInfo.endSec } : {}),
         rawHeader: trimmed,
         rawText: payload,
         ...classifySingleLinePayload(payload),
@@ -766,3 +838,294 @@ export function computeTranscriptSyncPreview(
     nextSubtitles,
   };
 }
+
+export interface StructuredTranscriptImportResult {
+  mode: ParsedTranscriptMode;
+  entries: ParsedTranscriptEntry[];
+  subtitles: SubtitleItem[];
+  scenes: SpeakingScene[];
+  targetDurationSec: number;
+  timedCount: number;
+  untimedCount: number;
+  spanStartSec: number;
+  spanEndSec: number;
+  hasPhonetic: boolean;
+  hasThai: boolean;
+  hasBurmese: boolean;
+  hasWords: boolean;
+  warnings: string[];
+}
+
+export function hasStructuredTranscriptFieldLabels(rawInput: string): boolean {
+  const cleaned = stripWrappingCodeFences(rawInput || "");
+  if (!cleaned) return false;
+  return cleaned.split("\n").some((line) => FIELD_LABEL_RE.test(line.trim()));
+}
+
+export function buildSubtitlesFromStructuredTranscript(
+  rawInput: string,
+  selectedScenes: SceneSelection[],
+  totalDurationSec: number
+): StructuredTranscriptImportResult {
+  const parsed = parsePastedTranscript(rawInput);
+  const warnings = [...parsed.warnings];
+
+  const timedEntries = parsed.entries.filter(
+    (e) => typeof e.startSec === "number" && Number.isFinite(e.startSec)
+  );
+  const timedCount = timedEntries.length;
+  const untimedCount = parsed.entries.length - timedCount;
+
+  const maxParsedEnd = parsed.entries.reduce((max, e) => {
+    const end =
+      typeof e.endSec === "number" && Number.isFinite(e.endSec)
+        ? e.endSec
+        : typeof e.startSec === "number" && Number.isFinite(e.startSec)
+          ? e.startSec + 2
+          : 0;
+    return Math.max(max, end);
+  }, 0);
+
+  const safeVideoDur = Math.max(
+    1,
+    Number.isFinite(totalDurationSec) && totalDurationSec > 0 ? totalDurationSec : 0,
+    Math.ceil(maxParsedEnd)
+  );
+
+  const baseScenes: SceneSelection[] =
+    selectedScenes.length > 0
+      ? selectedScenes
+      : [{ id: `scene-import-${Date.now()}`, startSec: 0, endSec: safeVideoDur }];
+
+  // Compile speaking scenes (cut timeline)
+  let cutCursor = 0;
+  const sceneLayouts = baseScenes.map((sc, idx) => {
+    const s = Math.max(0, Number(sc.startSec) || 0);
+    const e = Math.max(s + 0.5, Number(sc.endSec) || safeVideoDur);
+    const dur = Number((e - s).toFixed(3));
+    const cutStartSec = Number(cutCursor.toFixed(3));
+    const cutEndSec = Number((cutCursor + dur).toFixed(3));
+    cutCursor = cutEndSec;
+    const scene: SpeakingScene = {
+      id: sc.id || `scene-import-${idx + 1}`,
+      index: idx,
+      startSec: Number(s.toFixed(3)),
+      endSec: Number(e.toFixed(3)),
+      durationSec: dur,
+      summary: `Clip ${idx + 1}`,
+    };
+    return { scene, cutStartSec, cutEndSec };
+  });
+  const scenes: SpeakingScene[] = sceneLayouts.map((l) => l.scene);
+
+  const targetDurationSec = Number(Math.max(1, cutCursor).toFixed(3));
+
+  if (parsed.entries.length === 0) {
+    return {
+      mode: parsed.mode,
+      entries: [],
+      subtitles: [],
+      scenes,
+      targetDurationSec,
+      timedCount: 0,
+      untimedCount: 0,
+      spanStartSec: 0,
+      spanEndSec: 0,
+      hasPhonetic: false,
+      hasThai: false,
+      hasBurmese: false,
+      hasWords: false,
+      warnings,
+    };
+  }
+
+  // Decide whether timed entries represent source-video timestamps matching selectedScenes
+  // or direct cut-timeline timestamps.
+  const isSingleFullClip =
+    scenes.length === 1 && Math.abs(scenes[0].startSec) < 0.05;
+
+  let mapSourceToCut = false;
+  if (!isSingleFullClip && timedEntries.length > 0) {
+    const overlappingSourceCount = timedEntries.filter((e) => {
+      const s = e.startSec!;
+      const end = typeof e.endSec === "number" && e.endSec > s ? e.endSec : s + 1.5;
+      return scenes.some((sc) => end > sc.startSec + 0.05 && s < sc.endSec - 0.05);
+    }).length;
+    mapSourceToCut = overlappingSourceCount > 0;
+  }
+
+  const nowTs = Date.now();
+  const rawBuilt: SubtitleItem[] = [];
+  let fallbackCursor = 0;
+
+  const findSceneLayoutForCutTime = (cutSec: number) => {
+    for (const layout of sceneLayouts) {
+      if (cutSec >= layout.cutStartSec - 0.01 && cutSec <= layout.cutEndSec + 0.01) {
+        return layout;
+      }
+    }
+    return sceneLayouts[sceneLayouts.length - 1];
+  };
+
+  const createSubtitleItem = (
+    entry: ParsedTranscriptEntry,
+    startTime: number,
+    endTime: number,
+    seqIdx: number,
+    explicitScene?: { sceneIndex: number; sceneId?: string; sourceStartSec: number; sourceEndSec: number }
+  ): SubtitleItem => {
+    const cleanStart = Number(Math.max(0, startTime).toFixed(3));
+    const cleanEnd = Number(Math.max(cleanStart + 0.15, endTime).toFixed(3));
+    const duration = Math.max(0.15, cleanEnd - cleanStart);
+
+    const parsedWords = Array.isArray(entry.words) ? entry.words : [];
+    const thaiScript = (entry.thaiScript || "").trim();
+    const burmese = (entry.burmese || "").trim();
+    let thaiPhonetic = (entry.thaiPhonetic || "").trim();
+    if (!thaiPhonetic && parsedWords.length > 0) {
+      thaiPhonetic = parsedWords
+        .map((w) => w.phonetic.trim())
+        .filter(Boolean)
+        .join(" ");
+    }
+    if (!thaiPhonetic && thaiScript) {
+      thaiPhonetic = thaiScript;
+    }
+
+    const words: SubtitleWord[] =
+      parsedWords.length > 0
+        ? distributeParsedWords(parsedWords, 0, duration, [])
+        : thaiPhonetic
+          ? buildWordsFromPhonetic(thaiPhonetic, 0, duration, [])
+          : [];
+
+    const originalSpokenText = thaiScript || thaiPhonetic || burmese;
+
+    const layout = findSceneLayoutForCutTime(cleanStart);
+    const sceneIndex = explicitScene ? explicitScene.sceneIndex : layout.scene.index;
+    const sceneId = explicitScene ? explicitScene.sceneId : layout.scene.id;
+    const sourceStartSec = explicitScene
+      ? Number(Math.max(0, explicitScene.sourceStartSec).toFixed(3))
+      : Number(Math.max(0, layout.scene.startSec + (cleanStart - layout.cutStartSec)).toFixed(3));
+    const sourceEndSec = explicitScene
+      ? Number(Math.max(sourceStartSec + 0.15, explicitScene.sourceEndSec).toFixed(3))
+      : Number(Math.max(sourceStartSec + 0.15, sourceStartSec + duration).toFixed(3));
+
+    return {
+      id: `sub-import-${seqIdx + 1}-${nowTs}`,
+      sceneIndex,
+      ...(sceneId ? { sceneId } : {}),
+      startTime: cleanStart,
+      endTime: cleanEnd,
+      sourceStartSec,
+      sourceEndSec,
+      thaiPhonetic,
+      thaiScript,
+      burmese,
+      originalSpokenText,
+      words,
+      isManuallyEdited: true,
+    };
+  };
+
+  parsed.entries.forEach((entry, idx) => {
+    const hasStart = typeof entry.startSec === "number" && Number.isFinite(entry.startSec);
+    if (hasStart) {
+      const srcStart = Math.max(0, entry.startSec!);
+      const srcEnd =
+        typeof entry.endSec === "number" && Number.isFinite(entry.endSec) && entry.endSec > srcStart
+          ? entry.endSec
+          : srcStart + 2.0;
+
+      if (mapSourceToCut) {
+        for (const layout of sceneLayouts) {
+          const sc = layout.scene;
+          if (srcEnd > sc.startSec + 0.05 && srcStart < sc.endSec - 0.05) {
+            const relStart = Math.max(0, srcStart - sc.startSec);
+            const relEnd = Math.min(sc.durationSec, srcEnd - sc.startSec);
+            if (relEnd > relStart + 0.08) {
+              const cutStart = layout.cutStartSec + relStart;
+              const cutEnd = layout.cutStartSec + relEnd;
+              rawBuilt.push(
+                createSubtitleItem(entry, cutStart, cutEnd, rawBuilt.length, {
+                  sceneIndex: sc.index,
+                  sceneId: sc.id,
+                  sourceStartSec: sc.startSec + relStart,
+                  sourceEndSec: sc.startSec + relEnd,
+                })
+              );
+              fallbackCursor = Math.max(fallbackCursor, cutEnd);
+            }
+          }
+        }
+      } else {
+        rawBuilt.push(createSubtitleItem(entry, srcStart, srcEnd, idx));
+        fallbackCursor = Math.max(fallbackCursor, srcEnd);
+      }
+    } else {
+      const remainingLines = Math.max(1, parsed.entries.length - idx);
+      const remainingDur = Math.max(remainingLines * 1.5, targetDurationSec - fallbackCursor);
+      const slot = Math.min(3.0, Math.max(1.2, remainingDur / remainingLines));
+      const start = fallbackCursor;
+      const end = start + slot;
+      rawBuilt.push(createSubtitleItem(entry, start, end, idx));
+      fallbackCursor = end;
+    }
+  });
+
+  if (untimedCount > 0) {
+    warnings.push(
+      `${untimedCount} ${untimedCount === 1 ? "line had" : "lines had"} no timestamps and ${untimedCount === 1 ? "was" : "were"} paced sequentially.`
+    );
+  }
+  if (mapSourceToCut && rawBuilt.length < parsed.entries.length) {
+    const skipped = parsed.entries.length - rawBuilt.length;
+    warnings.push(
+      `${skipped} ${skipped === 1 ? "line fell" : "lines fell"} outside your selected timeline clip range.`
+    );
+  }
+
+  rawBuilt.sort((a, b) => a.startTime - b.startTime);
+
+  // Clean up any tiny timing overlaps while keeping exact start times intact
+  const subtitles: SubtitleItem[] = rawBuilt.map((sub, i) => {
+    const next = rawBuilt[i + 1];
+    if (next && sub.endTime > next.startTime && next.startTime > sub.startTime + 0.15) {
+      const adjustedEnd = Number(next.startTime.toFixed(3));
+      const nextDur = Math.max(0.15, adjustedEnd - sub.startTime);
+      const oldDur = Math.max(0.15, sub.endTime - sub.startTime);
+      const ratio = nextDur / oldDur;
+      return {
+        ...sub,
+        endTime: adjustedEnd,
+        words: sub.words.map((w) => ({
+          ...w,
+          startOffsetSec: Number((w.startOffsetSec * ratio).toFixed(2)),
+          endOffsetSec: Number((w.endOffsetSec * ratio).toFixed(2)),
+        })),
+      };
+    }
+    return sub;
+  });
+
+  const spanStartSec = subtitles.length > 0 ? subtitles[0].startTime : 0;
+  const spanEndSec = subtitles.reduce((m, s) => Math.max(m, s.endTime), 0);
+
+  return {
+    mode: parsed.mode,
+    entries: parsed.entries,
+    subtitles,
+    scenes,
+    targetDurationSec: Math.max(targetDurationSec, Number(spanEndSec.toFixed(3))),
+    timedCount,
+    untimedCount,
+    spanStartSec,
+    spanEndSec,
+    hasPhonetic: parsed.entries.some((e) => Boolean(e.thaiPhonetic?.trim())),
+    hasThai: parsed.entries.some((e) => Boolean(e.thaiScript?.trim())),
+    hasBurmese: parsed.entries.some((e) => Boolean(e.burmese?.trim())),
+    hasWords: parsed.entries.some((e) => Boolean(e.words && e.words.length > 0)),
+    warnings,
+  };
+}
+

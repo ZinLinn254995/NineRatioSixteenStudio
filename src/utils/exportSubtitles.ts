@@ -191,6 +191,35 @@ export function buildFullTranscriptContent(
   return `${header}${header ? "\n" : ""}${entries.join("\n\n")}\n`;
 }
 
+export const SUPPORTED_TRANSCRIPT_FORMAT_EXAMPLE = `[01] 00:01 – 00:04
+Phonetic: phá-nák-ngaan-gà-dùk-nà
+Thai:     พนักงานกะดึกน่ะ
+Burmese:  ညဂျူတီဝန်ထမ်းတွေပေါ့။
+Words:    phá-nák-ngaan (ဝန်ထမ်း) · gà-dùk (ညဂျူတီ)
+
+[02] 00:04 – 00:07
+Phonetic: thîi-maa-tham-ngaan-thîi-sǎn-dtì-mâat-à-nîa
+Thai:     ที่มาทำงานที่สันติมาศอ่ะเนี่ย
+Burmese:  ဒီဆန်တီမတ်မှာ လာအလုပ်လုပ်ကြတဲ့သူတွေကလေ။
+Words:    thîi-maa (လာ) · tham-ngaan (အလုပ်လုပ်) · sǎn-dtì-mâat (ဆန်တီမတ်)`;
+
+export function buildAiChatFormatGuidePrompt(): string {
+  return `Please transcribe the attached Thai audio accurately with exact timestamps and translate every spoken line into natural, conversational Burmese.
+
+CRITICAL OUTPUT FORMAT RULES:
+1. Listen carefully to the full audio from start to finish and split dialogue into short, natural subtitle lines (2–5 seconds each).
+2. Output ONLY the structured transcript blocks in the EXACT format below (no intro, no notes, no markdown tables).
+3. Keep the [01], [02], ... numbering, MM:SS – MM:SS timestamps, and exact field labels: Phonetic:, Thai:, Burmese:, Words:
+4. For Burmese:, use natural spoken Burmese (not robotic literal translation) that matches the speaker's tone, emotion, and relationship.
+5. For Words:, list the key vocabulary words in that line separated by " · " in the format: phonetic (Burmese meaning)
+
+EXACT EXAMPLE FORMAT TO FOLLOW:
+
+${SUPPORTED_TRANSCRIPT_FORMAT_EXAMPLE}
+
+Now transcribe and translate the entire audio using this exact format:`;
+}
+
 export function makeSafeFileSlug(title: string): string {
   return (
     title
@@ -216,3 +245,4 @@ export function downloadTextFile(
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 4000);
 }
+

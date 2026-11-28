@@ -2,6 +2,7 @@ import {
   AlertTriangle,
   ArrowLeft,
   ArrowLeftRight,
+  FileUp,
   Globe2,
   Languages,
   Loader2,
@@ -45,6 +46,7 @@ interface SubtitleGeneratePanelProps {
   processError?: string | null;
   onChangeConfig: (next: SubtitleGenerationConfig) => void;
   onStartGenerate: (config: SubtitleGenerationConfig) => void;
+  onOpenImportSrt?: () => void;
   onCancelGenerate?: () => void;
   onClose: () => void;
 }
@@ -85,6 +87,7 @@ export function SubtitleGeneratePanel({
   processError = null,
   onChangeConfig,
   onStartGenerate,
+  onOpenImportSrt,
   onCancelGenerate,
   onClose,
 }: SubtitleGeneratePanelProps) {
@@ -218,6 +221,28 @@ export function SubtitleGeneratePanel({
           <div className="px-3 py-2.5 rounded-md border border-amber-300 dark:border-amber-700/70 bg-amber-50/80 dark:bg-amber-950/35 text-xs text-amber-800 dark:text-amber-200 flex items-start gap-2">
             <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
             <span>{missingMediaReason}</span>
+          </div>
+        )}
+
+        {onOpenImportSrt && (
+          <div className="px-3 py-2.5 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc]/85 dark:bg-[#11162e] flex items-center justify-between gap-2.5">
+            <div className="min-w-0">
+              <p className="text-xs font-semibold text-[#0c1026] dark:text-[#f3f5fc] truncate">
+                Have a transcript or .SRT / .VTT?
+              </p>
+              <p className="text-[10.5px] text-[#4d597d] dark:text-[#919ec4] leading-snug">
+                Paste a formatted AI transcript directly or import exact .SRT/.VTT timings.
+              </p>
+            </div>
+            <button
+              type="button"
+              disabled={!canGenerate || isGenerating}
+              onClick={onOpenImportSrt}
+              className="h-8 px-3 rounded-md border border-teal-600/50 dark:border-teal-400/50 bg-white dark:bg-[#141933] hover:bg-teal-50 dark:hover:bg-teal-950/45 text-teal-800 dark:text-teal-200 text-[11px] font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-40 transition-colors"
+            >
+              <FileUp className="w-3.5 h-3.5 shrink-0" />
+              <span>Import / Paste</span>
+            </button>
           </div>
         )}
 

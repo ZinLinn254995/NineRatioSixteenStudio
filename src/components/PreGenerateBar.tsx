@@ -1,4 +1,4 @@
-import { Loader2 } from "lucide-react";
+import { FileUp, Loader2 } from "lucide-react";
 import type {
   SceneSelection,
   SubtitleGenerationProgress,
@@ -19,6 +19,7 @@ export interface PreGenerateBarProps {
   translationTone: TranslationTone;
   onChangeTranslationTone: (tone: TranslationTone) => void;
   onGenerate: () => void;
+  onImportSrt?: () => void;
   regeneratingClipId?: string | null;
 }
 
@@ -29,6 +30,7 @@ export function PreGenerateBar({
   translationTone,
   onChangeTranslationTone,
   onGenerate,
+  onImportSrt,
   regeneratingClipId = null,
 }: PreGenerateBarProps) {
   const totalSelectedSec = scenes.reduce(
@@ -70,23 +72,38 @@ export function PreGenerateBar({
         </div>
       </div>
 
-      <button
-        type="button"
-        onClick={onGenerate}
-        disabled={scenes.length === 0 || isProcessing || Boolean(regeneratingClipId)}
-        className="h-9 px-5 rounded-md bg-teal-700 hover:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 text-white dark:text-[#060918] text-xs font-semibold flex items-center gap-2 whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer shadow-xs"
-      >
-        {isProcessing ? (
-          <>
-            <Loader2 className="w-3.5 h-3.5 animate-spin" />
-            <span>
-              {generationProgress ? `Generating ${generationProgress.percent}%` : "Generating..."}
-            </span>
-          </>
-        ) : (
-          <span>Generate Subtitles</span>
+      <div className="flex items-center gap-2">
+        {onImportSrt && (
+          <button
+            type="button"
+            onClick={onImportSrt}
+            disabled={scenes.length === 0 || isProcessing || Boolean(regeneratingClipId)}
+            title="Paste a timestamped transcript from AI Chat or import a .SRT / .VTT file"
+            className="h-9 px-3.5 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-[#0c1026] dark:text-[#f3f5fc] text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer"
+          >
+            <FileUp className="w-3.5 h-3.5 text-teal-700 dark:text-teal-400 shrink-0" />
+            <span>Import / Paste</span>
+          </button>
         )}
-      </button>
+
+        <button
+          type="button"
+          onClick={onGenerate}
+          disabled={scenes.length === 0 || isProcessing || Boolean(regeneratingClipId)}
+          className="h-9 px-5 rounded-md bg-teal-700 hover:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 text-white dark:text-[#060918] text-xs font-semibold flex items-center gap-2 whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer shadow-xs"
+        >
+          {isProcessing ? (
+            <>
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              <span>
+                {generationProgress ? `Generating ${generationProgress.percent}%` : "Generating..."}
+              </span>
+            </>
+          ) : (
+            <span>Generate Subtitles</span>
+          )}
+        </button>
+      </div>
     </div>
   );
 }
