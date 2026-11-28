@@ -27,6 +27,7 @@ import {
   deleteCachedWhisperModel,
   detectWebGpuSupport,
   downloadWhisperModel,
+  formatWhisperLanguageLabel,
   getCachedWhisperModelIds,
   TRANSCRIPT_MODELS,
   type TranscriptModelSpec,
@@ -64,6 +65,38 @@ interface TranscriptPanelProps {
 function formatBytesMb(bytes?: number): string | null {
   if (!bytes || !Number.isFinite(bytes) || bytes <= 0) return null;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function countTranscriptWords(text: string, langCode?: string): number {
+  const trimmed = text.trim();
+  if (!trimmed) return 0;
+
+  try {
+    const SegmenterCtor = (
+      Intl as unknown as {
+        Segmenter?: new (
+          locale?: string,
+          options?: { granularity: "word" | "grapheme" | "sentence" }
+        ) => {
+          segment: (input: string) => Iterable<{ isWordLike?: boolean }>;
+        };
+      }
+    ).Segmenter;
+
+    if (typeof SegmenterCtor === "function") {
+      const locale = langCode && langCode !== "auto" ? langCode : undefined;
+      const segmenter = new SegmenterCtor(locale, { granularity: "word" });
+      let count = 0;
+      for (const seg of segmenter.segment(trimmed)) {
+        if (seg.isWordLike) count++;
+      }
+      if (count > 0) return count;
+    }
+  } catch {
+    // Fallback to whitespace splitting below
+  }
+
+  return trimmed.split(/\s+/).length;
 }
 
 export function TranscriptPanel({
@@ -173,9 +206,16 @@ export function TranscriptPanel({
   const wordCount = useMemo(() => {
     if (!result) return 0;
     const combined = result.segments.map((s) => s.text).join(" ").trim();
-    if (!combined) return 0;
-    return combined.split(/\s+/).length;
+    const effectiveLangCode =
+      result.detectedLanguage ||
+      (result.language !== "auto" ? result.language : undefined);
+    return countTranscriptWords(combined, effectiveLangCode);
   }, [result]);
+
+  const detectedLanguageDisplay = useMemo(
+    () => formatWhisperLanguageLabel(result?.detectedLanguage),
+    [result?.detectedLanguage]
+  );
 
   const handleCopy = async (mode: "plain" | "timed") => {
     if (!result) return;
@@ -451,16 +491,18 @@ export function TranscriptPanel({
         {/* Active Progress + Generate CTA */}
         <section className="space-y-2">
           {activeProgress && (
-            <div className="px-3 py-2.5 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] space-y-1.5">
+            <div className="px-3 py-2.5 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] space-y-2">
               <div className="flex items-center justify-between gap-2 text-xs">
                 <span className="font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center gap-1.5 min-w-0 truncate">
                   <Loader2 className="w-3.5 h-3.5 animate-spin text-teal-700 dark:text-teal-400 shrink-0" />
                   <span className="truncate">{activeProgress.label}</span>
                 </span>
                 <span className="font-mono-tabular text-[11px] font-semibold text-teal-700 dark:text-teal-300 whitespace-nowrap shrink-0">
-                  {activeProgress.loadedBytes && activeProgress.totalBytes
-                    ? `${formatBytesMb(activeProgress.loadedBytes)} / ${formatBytesMb(activeProgress.totalBytes)} · `
-                    : ""}
+                  {activeProgress.totalChunks && activeProgress.chunkIndex
+                    ? `Chunk ${activeProgress.chunkIndex}/${activeProgress.totalChunks} · `
+                    : activeProgress.loadedBytes && activeProgress.totalBytes
+                      ? `${formatBytesMb(activeProgress.loadedBytes)} / ${formatBytesMb(activeProgress.totalBytes)} · `
+                      : ""}
                   {Math.round(activeProgress.percent)}%
                 </span>
               </div>
@@ -470,6 +512,16 @@ export function TranscriptPanel({
                   style={{ width: `${Math.max(4, Math.min(100, activeProgress.percent))}%` }}
                 />
               </div>
+              {activeProgress.partialText && activeProgress.partialText.trim() && (
+                <div className="pt-1.5 border-t border-[#d2dcf0]/70 dark:border-[#21284c]/70 space-y-1">
+                  <p className="text-[10.5px] font-medium text-[#4d597d] dark:text-[#919ec4]">
+                    Live Preview · Streaming chunks
+                  </p>
+                  <p className="text-[11.5px] leading-relaxed font-myanmar text-[#0c1026] dark:text-[#f3f5fc] max-h-24 overflow-y-auto whitespace-pre-wrap select-text">
+                    {activeProgress.partialText}
+                  </p>
+                </div>
+              )}
             </div>
           )}
 
@@ -564,6 +616,7 @@ export function TranscriptPanel({
               <div className="flex items-center justify-between gap-2">
                 <div className="text-[11px] font-mono-tabular text-[#4d597d] dark:text-[#919ec4] truncate">
                   {result.segments.length} segments · {wordCount} words · {result.modelLabel}
+                  {detectedLanguageDisplay ? ` · Detected: ${detectedLanguageDisplay}` : ""}
                 </div>
 
                 <div

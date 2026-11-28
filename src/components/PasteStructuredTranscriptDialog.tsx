@@ -1,16 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Check, ClipboardPaste, Copy, FileText, Trash2, X } from "lucide-react";
-import type { SceneSelection } from "../types";
+import type { SceneSelection, SpeakingScene } from "../types";
 import {
   buildSubtitlesFromStructuredTranscript,
   type StructuredTranscriptImportResult,
+  type TranscriptTimingCoordinateMode,
 } from "../utils/pasteTranscriptSync";
 
 interface PasteStructuredTranscriptDialogProps {
   isOpen: boolean;
   onClose: () => void;
   selectedScenes: SceneSelection[];
+  scenes?: SpeakingScene[];
   totalDurationSec: number;
+  sourceDurationSec?: number;
   existingSubtitleCount: number;
   onApply: (result: StructuredTranscriptImportResult, mode: "replace" | "append") => void;
 }
@@ -40,12 +43,15 @@ export function PasteStructuredTranscriptDialog({
   isOpen,
   onClose,
   selectedScenes,
+  scenes,
   totalDurationSec,
+  sourceDurationSec,
   existingSubtitleCount,
   onApply,
 }: PasteStructuredTranscriptDialogProps) {
   const [rawText, setRawText] = useState("");
   const [applyMode, setApplyMode] = useState<"replace" | "append">("replace");
+  const [timingMode, setTimingMode] = useState<TranscriptTimingCoordinateMode>("auto");
   const [clipboardHint, setClipboardHint] = useState<string | null>(null);
   const [copiedFormat, setCopiedFormat] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -54,6 +60,7 @@ export function PasteStructuredTranscriptDialog({
     if (!isOpen) return;
     setClipboardHint(null);
     setCopiedFormat(false);
+    setTimingMode("auto");
     setApplyMode(existingSubtitleCount > 0 ? "replace" : "append");
     const timer = window.setTimeout(() => {
       textareaRef.current?.focus();
@@ -72,14 +79,24 @@ export function PasteStructuredTranscriptDialog({
   }, [isOpen, existingSubtitleCount, onClose]);
 
   const parsedResult = useMemo(
-    () => buildSubtitlesFromStructuredTranscript(rawText, selectedScenes, totalDurationSec),
-    [rawText, selectedScenes, totalDurationSec]
+    () =>
+      buildSubtitlesFromStructuredTranscript(rawText, selectedScenes, totalDurationSec, {
+        timingMode,
+        scenes,
+        sourceDurationSec,
+      }),
+    [rawText, selectedScenes, scenes, totalDurationSec, sourceDurationSec, timingMode]
   );
 
+  const effectiveTimelineDur =
+    parsedResult.clipTotalDurationSec > 0 ? parsedResult.clipTotalDurationSec : totalDurationSec;
+
   const exceedsVideoEnd =
-    totalDurationSec > 0 &&
+    effectiveTimelineDur > 0 &&
     parsedResult.subtitles.length > 0 &&
-    parsedResult.spanEndSec > totalDurationSec + 0.25;
+    parsedResult.spanEndSec > effectiveTimelineDur + 0.25;
+
+  const clipCount = (scenes && scenes.length > 0 ? scenes.length : selectedScenes.length) || 1;
 
   const detectedFields = useMemo(() => {
     const labels: string[] = [];
@@ -128,18 +145,27 @@ export function PasteStructuredTranscriptDialog({
     const freshResult = buildSubtitlesFromStructuredTranscript(
       rawText,
       selectedScenes,
-      totalDurationSec
+      totalDurationSec,
+      {
+        timingMode,
+        scenes,
+        sourceDurationSec,
+      }
     );
     onApply(freshResult, existingSubtitleCount > 0 ? applyMode : "replace");
   };
 
   const subCount = parsedResult.subtitles.length;
+  const applicableSubCount = parsedResult.subtitles.filter(
+    (s) => effectiveTimelineDur <= 0 || s.startTime < effectiveTimelineDur - 0.05
+  ).length;
+  const effectiveApplyCount = applicableSubCount > 0 ? applicableSubCount : subCount;
   const applyButtonLabel =
     subCount === 0
       ? "Add Subtitles"
       : existingSubtitleCount > 0 && applyMode === "replace"
-        ? `Replace with ${subCount} ${subCount === 1 ? "Subtitle" : "Subtitles"}`
-        : `Add ${subCount} ${subCount === 1 ? "Subtitle" : "Subtitles"}`;
+        ? `Replace with ${effectiveApplyCount} ${effectiveApplyCount === 1 ? "Subtitle" : "Subtitles"}`
+        : `Add ${effectiveApplyCount} ${effectiveApplyCount === 1 ? "Subtitle" : "Subtitles"}`;
 
   return (
     <div
@@ -263,6 +289,48 @@ export function PasteStructuredTranscriptDialog({
             }`}
           />
 
+          {/* Timing Coordinate Selector when clips were edited / trimmed / split / reordered */}
+          {rawText.trim().length > 0 && parsedResult.canToggleTimingMode && (
+            <div className="rounded-lg border border-[#d2dcf0] dark:border-[#21284c] bg-[#f8fafe] dark:bg-[#090c1a] px-3 py-2.5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+              <div className="min-w-0 space-y-0.5">
+                <p className="text-xs font-semibold text-[#0c1026] dark:text-[#f3f5fc]">
+                  Timestamp Match ({clipCount} {clipCount === 1 ? "clip" : "clips"} · {formatClockTime(effectiveTimelineDur)})
+                </p>
+                <p className="text-[11px] text-[#4d597d] dark:text-[#919ec4] leading-snug">
+                  {parsedResult.resolvedTimingMode === "timeline"
+                    ? "Timeline (Cut): 00:00 matches Clip 1 start on your edited timeline (best for Whisper tab transcripts)."
+                    : "Source Video: Timestamps match the original unedited video and map into kept clip ranges."}
+                </p>
+              </div>
+              <div className="inline-flex rounded-lg border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#070814] p-0.5 shrink-0 self-start sm:self-center">
+                <button
+                  type="button"
+                  onClick={() => setTimingMode("timeline")}
+                  className={`h-8 px-2.5 rounded-md text-xs font-medium cursor-pointer transition-colors whitespace-nowrap ${
+                    parsedResult.resolvedTimingMode === "timeline"
+                      ? "bg-white dark:bg-[#1a2142] text-teal-700 dark:text-teal-300 shadow-xs font-semibold"
+                      : "text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
+                  }`}
+                >
+                  Timeline (Cut)
+                  {timingMode === "auto" && parsedResult.autoDetectedTimingMode === "timeline" ? " · Auto" : ""}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTimingMode("source")}
+                  className={`h-8 px-2.5 rounded-md text-xs font-medium cursor-pointer transition-colors whitespace-nowrap ${
+                    parsedResult.resolvedTimingMode === "source"
+                      ? "bg-white dark:bg-[#1a2142] text-teal-700 dark:text-teal-300 shadow-xs font-semibold"
+                      : "text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
+                  }`}
+                >
+                  Source Video
+                  {timingMode === "auto" && parsedResult.autoDetectedTimingMode === "source" ? " · Auto" : ""}
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Live Summary & Warnings */}
           {rawText.trim().length > 0 && (
             <div className="space-y-2.5">
@@ -293,12 +361,23 @@ export function PasteStructuredTranscriptDialog({
 
               {subCount === 0 && (
                 <div className="px-3 py-2.5 rounded-md border border-amber-300/70 dark:border-amber-500/35 bg-amber-50/70 dark:bg-amber-950/30 text-xs text-amber-800 dark:text-amber-200">
-                  No subtitle lines detected yet. Check that each block starts with{" "}
-                  <span className="font-mono-tabular font-semibold">[01] 00:01 – 00:02</span>{" "}
-                  followed by <span className="font-mono">Phonetic:</span>,{" "}
-                  <span className="font-mono">Thai:</span>,{" "}
-                  <span className="font-mono">Burmese:</span>, or{" "}
-                  <span className="font-mono">Words:</span>.
+                  {parsedResult.resolvedTimingMode === "source" &&
+                  parsedResult.outsideSourceClipsCount > 0 ? (
+                    <span>
+                      All timestamped lines fell outside your kept clips in Source Video mode.
+                      Switch Timestamp Match to <span className="font-semibold">Timeline (Cut)</span>{" "}
+                      if your timestamps start at 00:00 for the edited timeline.
+                    </span>
+                  ) : (
+                    <>
+                      No subtitle lines detected yet. Check that each block starts with{" "}
+                      <span className="font-mono-tabular font-semibold">[01] 00:01 – 00:02</span>{" "}
+                      followed by <span className="font-mono">Phonetic:</span>,{" "}
+                      <span className="font-mono">Thai:</span>,{" "}
+                      <span className="font-mono">Burmese:</span>, or{" "}
+                      <span className="font-mono">Words:</span>.
+                    </>
+                  )}
                 </div>
               )}
 
@@ -307,11 +386,10 @@ export function PasteStructuredTranscriptDialog({
                   {parsedResult.warnings.map((warn, i) => (
                     <p key={i}>{warn}</p>
                   ))}
-                  {exceedsVideoEnd && (
+                  {exceedsVideoEnd && parsedResult.exceedsTimelineCount === 0 && (
                     <p className="font-mono-tabular">
-                      Transcript reaches {formatClockTime(parsedResult.spanEndSec)}, beyond video
-                      duration ({formatClockTime(totalDurationSec)}); timestamps past the end will
-                      clamp to the video end.
+                      Last subtitle reaches {formatClockTime(parsedResult.spanEndSec)}, past timeline
+                      end ({formatClockTime(effectiveTimelineDur)}) and will trim to fit the clip end.
                     </p>
                   )}
                 </div>
@@ -320,46 +398,67 @@ export function PasteStructuredTranscriptDialog({
               {/* Parsed Preview List */}
               {subCount > 0 && (
                 <div className="rounded-lg border border-[#d2dcf0] dark:border-[#21284c] divide-y divide-[#e7ecf8] dark:divide-[#1a2142] max-h-[360px] overflow-y-auto bg-[#fbfcff] dark:bg-[#090c1a]">
-                  {parsedResult.subtitles.map((sub, idx) => (
-                    <div key={sub.id} className="px-3 py-2.5 space-y-1">
-                      <div className="flex items-center justify-between gap-2 text-[11px] font-mono-tabular text-[#4d597d] dark:text-[#919ec4]">
-                        <span className="font-semibold text-teal-700 dark:text-teal-400">
-                          [{String(idx + 1).padStart(2, "0")}]
-                        </span>
-                        <span>
-                          {formatClockTime(sub.startTime)} – {formatClockTime(sub.endTime)}
-                        </span>
+                  {parsedResult.subtitles.map((sub, idx) => {
+                    const outOfTimelineBounds =
+                      effectiveTimelineDur > 0 && sub.startTime >= effectiveTimelineDur - 0.05;
+                    return (
+                      <div
+                        key={sub.id}
+                        className={`px-3 py-2.5 space-y-1 ${
+                          outOfTimelineBounds ? "opacity-55 bg-amber-50/40 dark:bg-amber-950/20" : ""
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2 text-[11px] font-mono-tabular text-[#4d597d] dark:text-[#919ec4]">
+                          <div className="flex items-center gap-2">
+                            <span className="font-semibold text-teal-700 dark:text-teal-400">
+                              [{String(idx + 1).padStart(2, "0")}]
+                            </span>
+                            {clipCount > 1 && (
+                              <span className="px-1.5 py-0.5 rounded bg-[#e7ecf8] dark:bg-[#1a2142] text-[10px] font-medium text-[#31406b] dark:text-[#b4c1e6]">
+                                Clip {sub.sceneIndex + 1}
+                              </span>
+                            )}
+                            {outOfTimelineBounds && (
+                              <span className="text-[10px] font-sans font-medium text-amber-700 dark:text-amber-300">
+                                Past timeline end
+                              </span>
+                            )}
+                          </div>
+                          <span>
+                            {formatClockTime(sub.startTime)} – {formatClockTime(sub.endTime)}
+                          </span>
+                        </div>
+
+                        {sub.thaiPhonetic && (
+                          <p className="text-xs font-semibold text-[#0c1026] dark:text-[#f3f5fc] break-words">
+                            {sub.thaiPhonetic}
+                          </p>
+                        )}
+
+                        {sub.thaiScript && sub.thaiScript !== sub.thaiPhonetic && (
+                          <p className="text-xs text-[#31406b] dark:text-[#b4c1e6] break-words">
+                            {sub.thaiScript}
+                          </p>
+                        )}
+
+                        {sub.burmese && (
+                          <p className="font-myanmar text-xs text-[#1c3db8] dark:text-[#93b5fa] break-words leading-relaxed">
+                            {sub.burmese}
+                          </p>
+                        )}
+
+                        {sub.words.length > 0 && (
+                          <p className="text-[11px] text-[#4d597d] dark:text-[#919ec4] break-words leading-relaxed">
+                            {sub.words
+                              .map((w) =>
+                                w.burmeseGloss ? `${w.phonetic} (${w.burmeseGloss})` : w.phonetic
+                              )
+                              .join(" · ")}
+                          </p>
+                        )}
                       </div>
-
-                      {sub.thaiPhonetic && (
-                        <p className="text-xs font-semibold text-[#0c1026] dark:text-[#f3f5fc] break-words">
-                          {sub.thaiPhonetic}
-                        </p>
-                      )}
-
-                      {sub.thaiScript && sub.thaiScript !== sub.thaiPhonetic && (
-                        <p className="text-xs text-[#31406b] dark:text-[#b4c1e6] break-words">
-                          {sub.thaiScript}
-                        </p>
-                      )}
-
-                      {sub.burmese && (
-                        <p className="font-myanmar text-xs text-[#1c3db8] dark:text-[#93b5fa] break-words leading-relaxed">
-                          {sub.burmese}
-                        </p>
-                      )}
-
-                      {sub.words.length > 0 && (
-                        <p className="text-[11px] text-[#4d597d] dark:text-[#919ec4] break-words leading-relaxed">
-                          {sub.words
-                            .map((w) =>
-                              w.burmeseGloss ? `${w.phonetic} (${w.burmeseGloss})` : w.phonetic
-                            )
-                            .join(" · ")}
-                        </p>
-                      )}
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>

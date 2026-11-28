@@ -433,6 +433,9 @@ export function sanitizeTranscriptResult(raw: unknown): TranscriptResult | undef
     modelId,
     modelLabel: typeof rec.modelLabel === "string" && rec.modelLabel.trim() ? rec.modelLabel : "Base",
     language,
+    ...(typeof rec.detectedLanguage === "string" && rec.detectedLanguage.trim()
+      ? { detectedLanguage: rec.detectedLanguage.trim() }
+      : {}),
     durationSec:
       typeof rec.durationSec === "number" && Number.isFinite(rec.durationSec) && rec.durationSec >= 0
         ? rec.durationSec

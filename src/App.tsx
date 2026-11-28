@@ -35,7 +35,6 @@ import type {
   YouTubeVideo,
 } from "./types";
 import { DEFAULT_STAGE_PREVIEW_SCALE, Stage9x16, type Stage9x16Handle } from "./components/Stage9x16";
-import { mapCutTimeToSource } from "./components/ScenePlayer";
 import {
   WorkspaceSidebar,
   type StudioSectionId,
@@ -72,6 +71,7 @@ import {
   ensureSceneIds,
   findActiveSubtitle,
   getSceneDurationSec,
+  mapCutRangeToSourceMetadata,
   remapSubtitlesToScenes,
   withSceneId,
 } from "./utils/projectTimeline";
@@ -497,10 +497,23 @@ export default function App() {
     setIsSubtitleSearchOpen(false);
     setAutoFollowState("following");
     setBaselineSubRegions(
-      proj?.subtitles.map((s) => ({
-        sourceStartSec: s.sourceStartSec,
-        sourceEndSec: s.sourceEndSec,
-      })) ?? []
+      proj?.subtitles.flatMap((s) =>
+        Array.isArray(s.sourceSegments) && s.sourceSegments.length > 0
+          ? s.sourceSegments.map((seg) => ({
+              sourceStartSec: seg.sourceStartSec,
+              sourceEndSec: seg.sourceEndSec,
+              mediaUrl: seg.mediaUrl,
+              sceneId: seg.sceneId,
+            }))
+          : [
+              {
+                sourceStartSec: s.sourceStartSec,
+                sourceEndSec: s.sourceEndSec,
+                mediaUrl: s.mediaUrl,
+                sceneId: s.sceneId,
+              },
+            ]
+      ) ?? []
     );
     if (!proj) {
       timelineBaselineRef.current = null;
@@ -520,10 +533,23 @@ export default function App() {
   useEffect(() => {
     if (baselineSubRegions.length === 0 && project && project.subtitles.length > 0) {
       setBaselineSubRegions(
-        project.subtitles.map((s) => ({
-          sourceStartSec: s.sourceStartSec,
-          sourceEndSec: s.sourceEndSec,
-        }))
+        project.subtitles.flatMap((s) =>
+          Array.isArray(s.sourceSegments) && s.sourceSegments.length > 0
+            ? s.sourceSegments.map((seg) => ({
+                sourceStartSec: seg.sourceStartSec,
+                sourceEndSec: seg.sourceEndSec,
+                mediaUrl: seg.mediaUrl,
+                sceneId: seg.sceneId,
+              }))
+            : [
+                {
+                  sourceStartSec: s.sourceStartSec,
+                  sourceEndSec: s.sourceEndSec,
+                  mediaUrl: s.mediaUrl,
+                  sceneId: s.sceneId,
+                },
+              ]
+        )
       );
     }
   }, [baselineSubRegions.length, project]);
@@ -533,35 +559,47 @@ export default function App() {
     const normalized = ensureSceneIds(project.scenes);
     let cursor = 0;
     const segments: TimelineSegmentLike[] = normalized.map((sc) => {
-      const clipDur = Math.max(0.1, sc.endSec - sc.startSec);
+      const clipDur = getSceneDurationSec(sc);
       const seg: TimelineSegmentLike = {
         startSec: sc.startSec,
         endSec: sc.endSec,
         clipDur,
         cutStart: cursor,
         cutEnd: cursor + clipDur,
+        mediaUrl: sc.mediaUrl,
+        sceneId: sc.id,
       };
       cursor += clipDur;
       return seg;
     });
+    const buildSubRegions = (): SpeechRegion[] =>
+      project.subtitles.flatMap((s) =>
+        Array.isArray(s.sourceSegments) && s.sourceSegments.length > 0
+          ? s.sourceSegments.map((seg) => ({
+              sourceStartSec: seg.sourceStartSec,
+              sourceEndSec: seg.sourceEndSec,
+              mediaUrl: seg.mediaUrl,
+              sceneId: seg.sceneId,
+            }))
+          : [
+              {
+                sourceStartSec: s.sourceStartSec,
+                sourceEndSec: s.sourceEndSec,
+                mediaUrl: s.mediaUrl,
+                sceneId: s.sceneId,
+              },
+            ]
+      );
     const resolvedSpeechRegions: SpeechRegion[] =
       project.speechRegions && project.speechRegions.length > 0
         ? project.speechRegions
         : baselineSubRegions.length > 0
           ? baselineSubRegions
-          : project.subtitles.map((s) => ({
-              sourceStartSec: s.sourceStartSec,
-              sourceEndSec: s.sourceEndSec,
-            }));
+          : buildSubRegions();
     const primary = projectSpeechRegionsToCutTimeline(segments, resolvedSpeechRegions);
     if (primary.length > 0) return primary;
     const fallbackSubs: SpeechRegion[] =
-      baselineSubRegions.length > 0
-        ? baselineSubRegions
-        : project.subtitles.map((s) => ({
-            sourceStartSec: s.sourceStartSec,
-            sourceEndSec: s.sourceEndSec,
-          }));
+      baselineSubRegions.length > 0 ? baselineSubRegions : buildSubRegions();
     return projectSpeechRegionsToCutTimeline(segments, fallbackSubs);
   }, [project, baselineSubRegions]);
 
@@ -2440,19 +2478,19 @@ export default function App() {
     const burmese = input.burmese.trim();
     const originalSpokenText =
       input.originalSpokenText !== undefined ? input.originalSpokenText.trim() : "Custom subtitle";
-    const mappedStart = mapCutTimeToSource(project.scenes, startTime);
-    const mappedEnd = mapCutTimeToSource(project.scenes, endTime);
+    const mapped = mapCutRangeToSourceMetadata(project.scenes, startTime, endTime);
 
-    const mappedStartScene = project.scenes[mappedStart.sceneIndex];
     const newItem: SubtitleItem = withSceneId(
       {
         id: `sub-custom-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-        sceneIndex: mappedStart.sceneIndex,
-        mediaUrl: mappedStartScene?.mediaUrl,
+        sceneIndex: mapped.sceneIndex,
+        ...(mapped.sceneId ? { sceneId: mapped.sceneId } : {}),
+        mediaUrl: mapped.mediaUrl,
         startTime,
         endTime,
-        sourceStartSec: Number(mappedStart.sourceSec.toFixed(2)),
-        sourceEndSec: Number(mappedEnd.sourceSec.toFixed(2)),
+        sourceStartSec: Number(mapped.sourceStartSec.toFixed(2)),
+        sourceEndSec: Number(mapped.sourceEndSec.toFixed(2)),
+        ...(mapped.sourceSegments ? { sourceSegments: mapped.sourceSegments } : {}),
         originalSpokenText,
         thaiPhonetic,
         thaiScript: thaiPhonetic,
@@ -2494,12 +2532,19 @@ export default function App() {
     const curProj = projectRef.current;
     if (!curProj || result.subtitles.length === 0) return;
 
+    const computedScenesDur = curProj.scenes.reduce((acc, sc) => acc + getSceneDurationSec(sc), 0);
     const maxCutDur = Math.max(
       0.5,
-      curProj.targetDurationSec || localMedia?.durationSec || result.targetDurationSec || 10
+      computedScenesDur > 0
+        ? computedScenesDur
+        : curProj.targetDurationSec || localMedia?.durationSec || result.targetDurationSec || 10
     );
 
-    const clampSub = (sub: SubtitleItem): SubtitleItem => {
+    const inRangeRaw = result.subtitles.filter((sub) => sub.startTime < maxCutDur - 0.05);
+    const skippedOutOfRange = result.subtitles.length - inRangeRaw.length;
+    const candidateSubs = inRangeRaw.length > 0 ? inRangeRaw : [result.subtitles[0]];
+
+    const normalizePastedSub = (sub: SubtitleItem): SubtitleItem => {
       const startTime = Number(Math.max(0, Math.min(maxCutDur - 0.15, sub.startTime)).toFixed(2));
       const endTime = Number(
         Math.max(startTime + 0.15, Math.min(maxCutDur, sub.endTime)).toFixed(2)
@@ -2507,16 +2552,57 @@ export default function App() {
       const duration = Math.max(0.15, endTime - startTime);
       const oldDur = Math.max(0.15, sub.endTime - sub.startTime);
       const ratio = duration / oldDur;
-      const mappedStart = mapCutTimeToSource(curProj.scenes, startTime);
-      const mappedEnd = mapCutTimeToSource(curProj.scenes, endTime);
+
+      const preserveSourceAnchor =
+        result.resolvedTimingMode === "source" &&
+        Number.isFinite(sub.sourceStartSec) &&
+        Number.isFinite(sub.sourceEndSec) &&
+        sub.sourceEndSec > sub.sourceStartSec &&
+        sub.sceneIndex >= 0 &&
+        sub.sceneIndex < curProj.scenes.length;
+
+      let sceneIndex: number;
+      let sceneId: string | undefined;
+      let mediaUrl: string | undefined;
+      let sourceStartSec: number;
+      let sourceEndSec: number;
+      let sourceSegments = undefined as SubtitleItem["sourceSegments"];
+
+      if (preserveSourceAnchor) {
+        const sc = curProj.scenes[sub.sceneIndex];
+        sceneIndex = sub.sceneIndex;
+        sceneId = sc?.id ?? sub.sceneId;
+        mediaUrl = sc?.mediaUrl !== undefined ? sc.mediaUrl : sub.mediaUrl;
+        const clampedSrcStart = Math.max(0, sub.sourceStartSec);
+        const clampedSrcEnd = Math.max(
+          clampedSrcStart + 0.12,
+          Math.min(sub.sourceEndSec, clampedSrcStart + duration)
+        );
+        sourceStartSec = Number(clampedSrcStart.toFixed(2));
+        sourceEndSec = Number(clampedSrcEnd.toFixed(2));
+      } else {
+        const mapped = mapCutRangeToSourceMetadata(curProj.scenes, startTime, endTime);
+        sceneIndex = mapped.sceneIndex;
+        sceneId = mapped.sceneId;
+        mediaUrl = mapped.mediaUrl;
+        sourceStartSec = Number(mapped.sourceStartSec.toFixed(2));
+        sourceEndSec = Number(mapped.sourceEndSec.toFixed(2));
+        sourceSegments = mapped.sourceSegments;
+      }
+
       return withSceneId(
         {
           ...sub,
-          sceneIndex: mappedStart.sceneIndex,
+          sceneIndex,
+          ...(sceneId ? { sceneId } : {}),
+          mediaUrl,
           startTime,
           endTime,
-          sourceStartSec: Number(mappedStart.sourceSec.toFixed(2)),
-          sourceEndSec: Number(mappedEnd.sourceSec.toFixed(2)),
+          sourceStartSec,
+          sourceEndSec,
+          ...(sourceSegments ? { sourceSegments } : { sourceSegments: undefined }),
+          aiSourceStartSec: undefined,
+          aiSourceEndSec: undefined,
           words: sub.words.map((w) => ({
             ...w,
             startOffsetSec: Number(
@@ -2531,30 +2617,65 @@ export default function App() {
       );
     };
 
-    const normalizedSubs = result.subtitles.map(clampSub).sort((a, b) => a.startTime - b.startTime);
+    const normalizedSubs = candidateSubs
+      .map(normalizePastedSub)
+      .sort((a, b) => a.startTime - b.startTime);
     if (normalizedSubs.length === 0) return;
 
     pushSubtitleUndo();
 
     const mergeSubtitles = (base: SubtitleItem[]) =>
       mode === "replace"
-        ? normalizedSubs.map((s) => ({ ...s, words: s.words.map((w) => ({ ...w })) }))
+        ? normalizedSubs.map((s) => ({
+            ...s,
+            ...(s.sourceSegments
+              ? { sourceSegments: s.sourceSegments.map((seg) => ({ ...seg })) }
+              : {}),
+            words: s.words.map((w) => ({ ...w })),
+          }))
         : [
             ...base,
-            ...normalizedSubs.map((s) => ({ ...s, words: s.words.map((w) => ({ ...w })) })),
+            ...normalizedSubs.map((s) => ({
+              ...s,
+              ...(s.sourceSegments
+                ? { sourceSegments: s.sourceSegments.map((seg) => ({ ...seg })) }
+                : {}),
+              words: s.words.map((w) => ({ ...w })),
+            })),
           ].sort((a, b) => a.startTime - b.startTime);
 
+    const nextBaselineSubs = mergeSubtitles(
+      timelineBaselineRef.current ? timelineBaselineRef.current.subtitles : curProj.subtitles
+    );
     if (timelineBaselineRef.current) {
-      timelineBaselineRef.current.subtitles = mergeSubtitles(
-        timelineBaselineRef.current.subtitles
-      );
+      timelineBaselineRef.current.subtitles = nextBaselineSubs;
     }
+
+    const nextSpeechRegions: SpeechRegion[] = nextBaselineSubs.flatMap((s) =>
+      Array.isArray(s.sourceSegments) && s.sourceSegments.length > 0
+        ? s.sourceSegments.map((seg) => ({
+            sourceStartSec: seg.sourceStartSec,
+            sourceEndSec: seg.sourceEndSec,
+            mediaUrl: seg.mediaUrl,
+            sceneId: seg.sceneId,
+          }))
+        : [
+            {
+              sourceStartSec: s.sourceStartSec,
+              sourceEndSec: s.sourceEndSec,
+              mediaUrl: s.mediaUrl,
+              sceneId: s.sceneId,
+            },
+          ]
+    );
+    setBaselineSubRegions(nextSpeechRegions);
 
     setProject((prev) => {
       if (!prev) return prev;
       return {
         ...prev,
         isDraft: false,
+        speechRegions: mode === "replace" ? undefined : prev.speechRegions,
         subtitles: mergeSubtitles(prev.subtitles),
       };
     });
@@ -2572,14 +2693,18 @@ export default function App() {
     setStageSelectRequest({ id: firstSub.id, focusPhonetic: false, nonce: Date.now() });
     handleSeek(firstSub.startTime);
     setShowPasteTranscriptDialog(false);
+    const skippedSuffix =
+      skippedOutOfRange > 0 && inRangeRaw.length > 0
+        ? ` (${skippedOutOfRange} past timeline end skipped)`
+        : "";
     setSaveNotice(
       mode === "replace" && curProj.subtitles.length > 0
         ? `Replaced subtitles with ${normalizedSubs.length} pasted ${
             normalizedSubs.length === 1 ? "line" : "lines"
-          }.`
+          }${skippedSuffix}.`
         : `Added ${normalizedSubs.length} pasted ${
             normalizedSubs.length === 1 ? "subtitle" : "subtitles"
-          }.`
+          }${skippedSuffix}.`
     );
   };
 
@@ -2699,8 +2824,7 @@ export default function App() {
     const startTime = Number(Math.max(0, Math.min(maxDur - 0.2, nextStart)).toFixed(2));
     const endTime = Number(Math.max(startTime + 0.2, Math.min(maxDur, nextEnd)).toFixed(2));
     const newDur = Math.max(0.2, endTime - startTime);
-    const mappedStart = mapCutTimeToSource(project.scenes, startTime);
-    const mappedEnd = mapCutTimeToSource(project.scenes, endTime);
+    const mapped = mapCutRangeToSourceMetadata(project.scenes, startTime, endTime);
 
     const updateList = (list: SubtitleItem[]) =>
       list
@@ -2727,11 +2851,13 @@ export default function App() {
                 typeof sub.aiSourceEndSec === "number" && Number.isFinite(sub.aiSourceEndSec)
                   ? sub.aiSourceEndSec
                   : sub.sourceEndSec,
-              sceneIndex: mappedStart.sceneIndex,
+              sceneIndex: mapped.sceneIndex,
+              mediaUrl: mapped.mediaUrl,
               startTime,
               endTime,
-              sourceStartSec: Number(mappedStart.sourceSec.toFixed(2)),
-              sourceEndSec: Number(mappedEnd.sourceSec.toFixed(2)),
+              sourceStartSec: Number(mapped.sourceStartSec.toFixed(2)),
+              sourceEndSec: Number(mapped.sourceEndSec.toFixed(2)),
+              sourceSegments: mapped.sourceSegments,
               words,
             },
             project.scenes
@@ -2761,8 +2887,7 @@ export default function App() {
           const nextEnd = Number(
             Math.max(nextStart + 0.2, Math.min(maxDur, nextStart + origDur)).toFixed(2)
           );
-          const mappedStart = mapCutTimeToSource(project.scenes, nextStart);
-          const mappedEnd = mapCutTimeToSource(project.scenes, nextEnd);
+          const mapped = mapCutRangeToSourceMetadata(project.scenes, nextStart, nextEnd);
           return withSceneId(
             {
               ...sub,
@@ -2774,11 +2899,13 @@ export default function App() {
                 typeof sub.aiSourceEndSec === "number" && Number.isFinite(sub.aiSourceEndSec)
                   ? sub.aiSourceEndSec
                   : sub.sourceEndSec,
-              sceneIndex: mappedStart.sceneIndex,
+              sceneIndex: mapped.sceneIndex,
+              mediaUrl: mapped.mediaUrl,
               startTime: nextStart,
               endTime: nextEnd,
-              sourceStartSec: Number(mappedStart.sourceSec.toFixed(2)),
-              sourceEndSec: Number(mappedEnd.sourceSec.toFixed(2)),
+              sourceStartSec: Number(mapped.sourceStartSec.toFixed(2)),
+              sourceEndSec: Number(mapped.sourceEndSec.toFixed(2)),
+              sourceSegments: mapped.sourceSegments,
             },
             project.scenes
           );
@@ -2885,16 +3012,18 @@ export default function App() {
       const [thaiScript1, thaiScript2] = splitTextProportional(target.thaiScript, ratio);
       const [spoken1, spoken2] = splitTextProportional(target.originalSpokenText, ratio);
 
-      const mappedStart = mapCutTimeToSource(project.scenes, target.startTime);
-      const mappedSplit = mapCutTimeToSource(project.scenes, splitTime);
-      const mappedEnd = mapCutTimeToSource(project.scenes, target.endTime);
+      const mappedFirst = mapCutRangeToSourceMetadata(project.scenes, target.startTime, splitTime);
+      const mappedSecond = mapCutRangeToSourceMetadata(project.scenes, splitTime, target.endTime);
 
       const firstItem: SubtitleItem = withSceneId(
         {
           ...target,
+          sceneIndex: mappedFirst.sceneIndex,
+          mediaUrl: mappedFirst.mediaUrl,
           endTime: splitTime,
-          sourceStartSec: Number(mappedStart.sourceSec.toFixed(2)),
-          sourceEndSec: Number(mappedSplit.sourceSec.toFixed(2)),
+          sourceStartSec: Number(mappedFirst.sourceStartSec.toFixed(2)),
+          sourceEndSec: Number(mappedFirst.sourceEndSec.toFixed(2)),
+          sourceSegments: mappedFirst.sourceSegments,
           originalSpokenText: spoken1,
           thaiScript: thaiScript1,
           thaiPhonetic: phonetic1,
@@ -2907,11 +3036,13 @@ export default function App() {
       const secondItem: SubtitleItem = withSceneId(
         {
           id: `${target.id}-sp-${Date.now().toString(36).slice(-4)}`,
-          sceneIndex: mappedSplit.sceneIndex,
+          sceneIndex: mappedSecond.sceneIndex,
+          mediaUrl: mappedSecond.mediaUrl,
           startTime: splitTime,
           endTime: target.endTime,
-          sourceStartSec: Number(mappedSplit.sourceSec.toFixed(2)),
-          sourceEndSec: Number(mappedEnd.sourceSec.toFixed(2)),
+          sourceStartSec: Number(mappedSecond.sourceStartSec.toFixed(2)),
+          sourceEndSec: Number(mappedSecond.sourceEndSec.toFixed(2)),
+          sourceSegments: mappedSecond.sourceSegments,
           originalSpokenText: spoken2,
           thaiScript: thaiScript2,
           thaiPhonetic: phonetic2,
@@ -2960,16 +3091,18 @@ export default function App() {
         })),
       ];
 
-      const mappedStart = mapCutTimeToSource(project.scenes, mergedStart);
-      const mappedEnd = mapCutTimeToSource(project.scenes, mergedEnd);
+      const mapped = mapCutRangeToSourceMetadata(project.scenes, mergedStart, mergedEnd);
 
       const mergedItem: SubtitleItem = withSceneId(
         {
           ...cur,
+          sceneIndex: mapped.sceneIndex,
+          mediaUrl: mapped.mediaUrl,
           startTime: Number(mergedStart.toFixed(2)),
           endTime: Number(mergedEnd.toFixed(2)),
-          sourceStartSec: Number(mappedStart.sourceSec.toFixed(2)),
-          sourceEndSec: Number(mappedEnd.sourceSec.toFixed(2)),
+          sourceStartSec: Number(mapped.sourceStartSec.toFixed(2)),
+          sourceEndSec: Number(mapped.sourceEndSec.toFixed(2)),
+          sourceSegments: mapped.sourceSegments,
           originalSpokenText: [cur.originalSpokenText, nxt.originalSpokenText]
             .map((s) => s.trim())
             .filter(Boolean)
@@ -3386,8 +3519,7 @@ export default function App() {
         const newDur = Math.max(0.25, endTime - startTime);
         const oldDur = Math.max(0.2, sub.endTime - sub.startTime);
         const scale = newDur / oldDur;
-        const mappedStart = mapCutTimeToSource(scenes, startTime);
-        const mappedEnd = mapCutTimeToSource(scenes, endTime);
+        const mapped = mapCutRangeToSourceMetadata(scenes, startTime, endTime);
 
         const words =
           sub.words.length > 0
@@ -3408,11 +3540,13 @@ export default function App() {
         return withSceneId(
           {
             ...sub,
-            sceneIndex: mappedStart.sceneIndex,
+            sceneIndex: mapped.sceneIndex,
+            mediaUrl: mapped.mediaUrl,
             startTime,
             endTime,
-            sourceStartSec: Number(mappedStart.sourceSec.toFixed(2)),
-            sourceEndSec: Number(mappedEnd.sourceSec.toFixed(2)),
+            sourceStartSec: Number(mapped.sourceStartSec.toFixed(2)),
+            sourceEndSec: Number(mapped.sourceEndSec.toFixed(2)),
+            sourceSegments: mapped.sourceSegments,
             words,
           },
           scenes
@@ -3840,8 +3974,7 @@ export default function App() {
           Math.max(itemStart + 0.25, Math.min(maxDur, Number(rawItem.endTime) || endSec)).toFixed(2)
         );
         const dur = Math.max(0.25, itemEnd - itemStart);
-        const mappedStart = mapCutTimeToSource(latestProj.scenes, itemStart);
-        const mappedEnd = mapCutTimeToSource(latestProj.scenes, itemEnd);
+        const mapped = mapCutRangeToSourceMetadata(latestProj.scenes, itemStart, itemEnd);
         const thaiPhonetic = (rawItem.thaiPhonetic || "").trim() || (rawItem.thaiScript || "").trim();
         const words: SubtitleWord[] =
           Array.isArray(rawItem.words) && rawItem.words.length > 0
@@ -3857,11 +3990,13 @@ export default function App() {
         return withSceneId(
           {
             id: `sub-range-${stamp}-${idx}-${Math.random().toString(36).slice(2, 6)}`,
-            sceneIndex: mappedStart.sceneIndex,
+            sceneIndex: mapped.sceneIndex,
+            mediaUrl: mapped.mediaUrl,
             startTime: itemStart,
             endTime: itemEnd,
-            sourceStartSec: Number(mappedStart.sourceSec.toFixed(2)),
-            sourceEndSec: Number(mappedEnd.sourceSec.toFixed(2)),
+            sourceStartSec: Number(mapped.sourceStartSec.toFixed(2)),
+            sourceEndSec: Number(mapped.sourceEndSec.toFixed(2)),
+            sourceSegments: mapped.sourceSegments,
             originalSpokenText: (rawItem.originalSpokenText || "").trim() || thaiPhonetic,
             thaiPhonetic,
             thaiScript: (rawItem.thaiScript || "").trim() || thaiPhonetic,
@@ -5368,7 +5503,9 @@ export default function App() {
         isOpen={Boolean(showPasteTranscriptDialog && project)}
         onClose={() => setShowPasteTranscriptDialog(false)}
         selectedScenes={selectedScenes}
+        scenes={project?.scenes}
         totalDurationSec={project?.targetDurationSec || localMedia?.durationSec || 0}
+        sourceDurationSec={localMedia?.durationSec || project?.sourceDurationSec || 0}
         existingSubtitleCount={project?.subtitles.length ?? 0}
         onApply={handleApplyPastedTranscript}
       />

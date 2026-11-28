@@ -55,6 +55,13 @@ export interface SubtitleWord {
   endOffsetSec: number;
 }
 
+export interface SubtitleSourceSegment {
+  sceneId?: string;
+  mediaUrl?: string;
+  sourceStartSec: number;
+  sourceEndSec: number;
+}
+
 export interface SubtitleItem {
   id: string;
   sceneIndex: number;
@@ -64,6 +71,7 @@ export interface SubtitleItem {
   endTime: number;
   sourceStartSec: number;
   sourceEndSec: number;
+  sourceSegments?: SubtitleSourceSegment[];
   aiSourceStartSec?: number;
   aiSourceEndSec?: number;
   originalSpokenText: string;
@@ -97,6 +105,8 @@ export interface YouTubeSourcePreview {
 export interface SpeechRegion {
   sourceStartSec: number;
   sourceEndSec: number;
+  mediaUrl?: string;
+  sceneId?: string;
 }
 
 export interface VideoProject {
@@ -334,6 +344,7 @@ export interface TranscriptResult {
   modelId: TranscriptModelId;
   modelLabel: string;
   language: SubtitleSourceLanguage;
+  detectedLanguage?: string;
   durationSec: number;
   text: string;
   segments: TranscriptSegment[];
@@ -347,6 +358,10 @@ export interface TranscriptProgress {
   file?: string;
   loadedBytes?: number;
   totalBytes?: number;
+  chunkIndex?: number;
+  totalChunks?: number;
+  partialText?: string;
+  detectedLanguage?: string;
 }
 
 

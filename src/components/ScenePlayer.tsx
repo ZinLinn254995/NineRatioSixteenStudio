@@ -9,6 +9,7 @@ import {
 } from "react";
 import { Play } from "lucide-react";
 import type { SpeakingScene, VideoEditSettings, VoiceSettings } from "../types";
+import { getSceneDurationSec } from "../utils/projectTimeline";
 import { applyVoiceEffectsToVideoElement, resumeAllVoiceContexts } from "../utils/webAudioVoice";
 import { getEffectivePlaybackSpeed } from "../utils/voicePresets";
 import { buildCssFilterString, buildCssTransformString } from "../utils/videoFilters";
@@ -18,7 +19,7 @@ import { AdversarialNoiseOverlay } from "./AdversarialNoiseOverlay";
 export function getSceneCutStart(scenes: SpeakingScene[], sceneIndex: number): number {
   let acc = 0;
   for (let i = 0; i < sceneIndex && i < scenes.length; i++) {
-    acc += scenes[i].durationSec;
+    acc += getSceneDurationSec(scenes[i]);
   }
   return acc;
 }
@@ -30,14 +31,15 @@ export function mapCutTimeToSource(
   let acc = 0;
   for (let i = 0; i < scenes.length; i++) {
     const s = scenes[i];
-    if (cutTime < acc + s.durationSec - 0.001 || i === scenes.length - 1) {
-      const offset = Math.max(0, Math.min(s.durationSec, cutTime - acc));
+    const dur = getSceneDurationSec(s);
+    if (cutTime < acc + dur - 0.001 || i === scenes.length - 1) {
+      const offset = Math.max(0, Math.min(dur, cutTime - acc));
       return {
         sceneIndex: i,
         sourceSec: Math.min(s.endSec, s.startSec + offset),
       };
     }
-    acc += s.durationSec;
+    acc += dur;
   }
   return { sceneIndex: 0, sourceSec: 0 };
 }

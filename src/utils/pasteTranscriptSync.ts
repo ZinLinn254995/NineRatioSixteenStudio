@@ -1,4 +1,9 @@
 import type { SceneSelection, SpeakingScene, SubtitleItem, SubtitleWord } from "../types";
+import {
+  buildContiguousClipBlocks,
+  getSceneDurationSec,
+  mapCutRangeToSourceMetadata,
+} from "./projectTimeline";
 import { buildWordsFromPhonetic } from "./subtitleState";
 
 export interface ParsedTranscriptWord {
@@ -839,14 +844,29 @@ export function computeTranscriptSyncPreview(
   };
 }
 
+export type TranscriptTimingCoordinateMode = "auto" | "timeline" | "source";
+
+export interface PasteTranscriptBuildOptions {
+  timingMode?: TranscriptTimingCoordinateMode;
+  scenes?: SpeakingScene[];
+  sourceDurationSec?: number;
+}
+
 export interface StructuredTranscriptImportResult {
   mode: ParsedTranscriptMode;
   entries: ParsedTranscriptEntry[];
   subtitles: SubtitleItem[];
   scenes: SpeakingScene[];
   targetDurationSec: number;
+  clipTotalDurationSec: number;
+  resolvedTimingMode: "timeline" | "source";
+  autoDetectedTimingMode: "timeline" | "source";
+  canToggleTimingMode: boolean;
+  hasMultiSourceClips: boolean;
   timedCount: number;
   untimedCount: number;
+  exceedsTimelineCount: number;
+  outsideSourceClipsCount: number;
   spanStartSec: number;
   spanEndSec: number;
   hasPhonetic: boolean;
@@ -865,7 +885,8 @@ export function hasStructuredTranscriptFieldLabels(rawInput: string): boolean {
 export function buildSubtitlesFromStructuredTranscript(
   rawInput: string,
   selectedScenes: SceneSelection[],
-  totalDurationSec: number
+  totalDurationSec: number,
+  options?: PasteTranscriptBuildOptions
 ): StructuredTranscriptImportResult {
   const parsed = parsePastedTranscript(rawInput);
   const warnings = [...parsed.warnings];
@@ -892,33 +913,132 @@ export function buildSubtitlesFromStructuredTranscript(
     Math.ceil(maxParsedEnd)
   );
 
-  const baseScenes: SceneSelection[] =
-    selectedScenes.length > 0
-      ? selectedScenes
-      : [{ id: `scene-import-${Date.now()}`, startSec: 0, endSec: safeVideoDur }];
+  const richScenes = options?.scenes && options.scenes.length > 0 ? options.scenes : null;
+  const hasExplicitScenes = Boolean(richScenes || selectedScenes.length > 0);
 
-  // Compile speaking scenes (cut timeline)
   let cutCursor = 0;
-  const sceneLayouts = baseScenes.map((sc, idx) => {
-    const s = Math.max(0, Number(sc.startSec) || 0);
-    const e = Math.max(s + 0.5, Number(sc.endSec) || safeVideoDur);
-    const dur = Number((e - s).toFixed(3));
-    const cutStartSec = Number(cutCursor.toFixed(3));
-    const cutEndSec = Number((cutCursor + dur).toFixed(3));
-    cutCursor = cutEndSec;
-    const scene: SpeakingScene = {
-      id: sc.id || `scene-import-${idx + 1}`,
-      index: idx,
-      startSec: Number(s.toFixed(3)),
-      endSec: Number(e.toFixed(3)),
-      durationSec: dur,
-      summary: `Clip ${idx + 1}`,
-    };
-    return { scene, cutStartSec, cutEndSec };
-  });
-  const scenes: SpeakingScene[] = sceneLayouts.map((l) => l.scene);
+  const scenes: SpeakingScene[] = richScenes
+    ? richScenes.map((sc, idx) => {
+        const s = Math.max(0, Number(sc.startSec) || 0);
+        const durFallback = Number.isFinite(sc.durationSec) && sc.durationSec > 0 ? sc.durationSec : 0.1;
+        const e = Math.max(
+          s + 0.1,
+          Number.isFinite(sc.endSec) && sc.endSec > s ? sc.endSec : s + durFallback
+        );
+        const dur = Number(getSceneDurationSec({ startSec: s, endSec: e, durationSec: sc.durationSec }).toFixed(3));
+        cutCursor += dur;
+        return {
+          ...sc,
+          id: sc.id || `scene-import-${idx + 1}`,
+          index: idx,
+          startSec: Number(s.toFixed(3)),
+          endSec: Number(e.toFixed(3)),
+          durationSec: dur,
+          summary: sc.summary || `Clip ${idx + 1}`,
+        };
+      })
+    : (selectedScenes.length > 0
+        ? selectedScenes
+        : [{ id: `scene-import-${Date.now()}`, startSec: 0, endSec: safeVideoDur }]
+      ).map((sc, idx) => {
+        const s = Math.max(0, Number(sc.startSec) || 0);
+        const e = Math.max(s + 0.1, Number(sc.endSec) || safeVideoDur);
+        const dur = Number((e - s).toFixed(3));
+        cutCursor += dur;
+        return {
+          id: sc.id || `scene-import-${idx + 1}`,
+          index: idx,
+          startSec: Number(s.toFixed(3)),
+          endSec: Number(e.toFixed(3)),
+          durationSec: dur,
+          summary: `Clip ${idx + 1}`,
+        };
+      });
 
-  const targetDurationSec = Number(Math.max(1, cutCursor).toFixed(3));
+  const clipTotalDurationSec = Number(Math.max(0.5, cutCursor).toFixed(3));
+  const targetDurationSec = clipTotalDurationSec;
+
+  const mergedBlocks = buildContiguousClipBlocks(scenes);
+  const videoBlocks = mergedBlocks.filter((b) => b.mediaType !== "image");
+  const distinctVideoMediaUrls = new Set(videoBlocks.map((b) => b.mediaUrl));
+  const hasImages = scenes.some((sc) => sc.mediaType === "image");
+  const hasMultiSourceClips = distinctVideoMediaUrls.size > 1 || (hasImages && scenes.length > 0);
+
+  const sourceDurHint =
+    typeof options?.sourceDurationSec === "number" &&
+    Number.isFinite(options.sourceDurationSec) &&
+    options.sourceDurationSec > 0
+      ? options.sourceDurationSec
+      : undefined;
+
+  const isContiguousFullFromZero =
+    !hasImages &&
+    videoBlocks.length === 1 &&
+    Math.abs(videoBlocks[0].startSec) < 0.05 &&
+    (!sourceDurHint || Math.abs(videoBlocks[0].endSec - sourceDurHint) < 0.5);
+
+  const canToggleTimingMode =
+    timedCount > 0 && videoBlocks.length > 0 && !isContiguousFullFromZero;
+
+  // Auto-detect whether timestamps represent Cut-Timeline coordinates (0:00 = Clip 1 start,
+  // e.g. Whisper tab output) or Original Source-Video coordinates (unedited full video).
+  let autoDetectedTimingMode: "timeline" | "source" = "timeline";
+  if (
+    timedEntries.length > 0 &&
+    !isContiguousFullFromZero &&
+    videoBlocks.length > 0 &&
+    distinctVideoMediaUrls.size <= 1
+  ) {
+    const primaryVideoUrl = videoBlocks[0].mediaUrl;
+    const primaryBlocks = videoBlocks.filter((b) => b.mediaUrl === primaryVideoUrl);
+    const minVideoStart = primaryBlocks.reduce((m, b) => Math.min(m, b.startSec), Infinity);
+    const maxVideoEnd = primaryBlocks.reduce((m, b) => Math.max(m, b.endSec), 0);
+    const minTimedStart = timedEntries.reduce(
+      (m, e) => Math.min(m, Math.max(0, e.startSec!)),
+      Infinity
+    );
+
+    const matchesInSourceBlocks = timedEntries.filter((e) => {
+      const s = Math.max(0, e.startSec!);
+      const end = typeof e.endSec === "number" && e.endSec > s ? e.endSec : s + 1.5;
+      return primaryBlocks.some((b) => end > b.startSec + 0.05 && s < b.endSec - 0.05);
+    }).length;
+
+    const matchesPastCutEndInSource = timedEntries.filter((e) => {
+      const s = Math.max(0, e.startSec!);
+      const end = typeof e.endSec === "number" && e.endSec > s ? e.endSec : s + 1.5;
+      return (
+        s >= clipTotalDurationSec + 0.45 &&
+        primaryBlocks.some((b) => end > b.startSec + 0.05 && s < b.endSec - 0.05)
+      );
+    }).length;
+
+    const hasEarlyLineBeforeTrim =
+      minVideoStart > 0.6 && minTimedStart < Math.min(1.5, minVideoStart - 0.15);
+
+    if (matchesPastCutEndInSource > 0) {
+      autoDetectedTimingMode = "source";
+    } else if (
+      minVideoStart > 0.8 &&
+      !hasEarlyLineBeforeTrim &&
+      matchesInSourceBlocks >= Math.ceil(timedEntries.length * 0.5)
+    ) {
+      autoDetectedTimingMode = "source";
+    } else if (
+      maxVideoEnd > clipTotalDurationSec + 0.5 &&
+      timedEntries.some((e) => e.startSec! >= clipTotalDurationSec + 0.45) &&
+      matchesInSourceBlocks > 0
+    ) {
+      autoDetectedTimingMode = "source";
+    }
+  }
+
+  const resolvedTimingMode: "timeline" | "source" =
+    options?.timingMode === "source"
+      ? "source"
+      : options?.timingMode === "timeline"
+        ? "timeline"
+        : autoDetectedTimingMode;
 
   if (parsed.entries.length === 0) {
     return {
@@ -927,8 +1047,15 @@ export function buildSubtitlesFromStructuredTranscript(
       subtitles: [],
       scenes,
       targetDurationSec,
+      clipTotalDurationSec,
+      resolvedTimingMode,
+      autoDetectedTimingMode,
+      canToggleTimingMode,
+      hasMultiSourceClips,
       timedCount: 0,
       untimedCount: 0,
+      exceedsTimelineCount: 0,
+      outsideSourceClipsCount: 0,
       spanStartSec: 0,
       spanEndSec: 0,
       hasPhonetic: false,
@@ -939,46 +1066,46 @@ export function buildSubtitlesFromStructuredTranscript(
     };
   }
 
-  // Decide whether timed entries represent source-video timestamps matching selectedScenes
-  // or direct cut-timeline timestamps.
-  const isSingleFullClip =
-    scenes.length === 1 && Math.abs(scenes[0].startSec) < 0.05;
-
-  let mapSourceToCut = false;
-  if (!isSingleFullClip && timedEntries.length > 0) {
-    const overlappingSourceCount = timedEntries.filter((e) => {
-      const s = e.startSec!;
-      const end = typeof e.endSec === "number" && e.endSec > s ? e.endSec : s + 1.5;
-      return scenes.some((sc) => end > sc.startSec + 0.05 && s < sc.endSec - 0.05);
-    }).length;
-    mapSourceToCut = overlappingSourceCount > 0;
-  }
-
   const nowTs = Date.now();
   const rawBuilt: SubtitleItem[] = [];
   let fallbackCursor = 0;
-
-  const findSceneLayoutForCutTime = (cutSec: number) => {
-    for (const layout of sceneLayouts) {
-      if (cutSec >= layout.cutStartSec - 0.01 && cutSec <= layout.cutEndSec + 0.01) {
-        return layout;
-      }
-    }
-    return sceneLayouts[sceneLayouts.length - 1];
-  };
+  let outsideSourceClipsCount = 0;
+  let exceedsTimelineCount = 0;
 
   const createSubtitleItem = (
     entry: ParsedTranscriptEntry,
     startTime: number,
     endTime: number,
     seqIdx: number,
-    explicitScene?: { sceneIndex: number; sceneId?: string; sourceStartSec: number; sourceEndSec: number }
+    opts?: {
+      clipLeftFrac?: number;
+      clipRightFrac?: number;
+      explicitSource?: {
+        sceneIndex: number;
+        sceneId?: string;
+        mediaUrl?: string;
+        sourceStartSec: number;
+        sourceEndSec: number;
+      };
+    }
   ): SubtitleItem => {
     const cleanStart = Number(Math.max(0, startTime).toFixed(3));
     const cleanEnd = Number(Math.max(cleanStart + 0.15, endTime).toFixed(3));
     const duration = Math.max(0.15, cleanEnd - cleanStart);
 
-    const parsedWords = Array.isArray(entry.words) ? entry.words : [];
+    let parsedWords = Array.isArray(entry.words) ? entry.words : [];
+    if (
+      parsedWords.length > 1 &&
+      typeof opts?.clipLeftFrac === "number" &&
+      typeof opts?.clipRightFrac === "number" &&
+      (opts.clipLeftFrac > 0.04 || opts.clipRightFrac < 0.96)
+    ) {
+      const totalW = parsedWords.length;
+      const startW = Math.max(0, Math.min(totalW - 1, Math.floor(opts.clipLeftFrac * totalW)));
+      const endW = Math.max(startW + 1, Math.min(totalW, Math.ceil(opts.clipRightFrac * totalW)));
+      parsedWords = parsedWords.slice(startW, endW);
+    }
+
     const thaiScript = (entry.thaiScript || "").trim();
     const burmese = (entry.burmese || "").trim();
     let thaiPhonetic = (entry.thaiPhonetic || "").trim();
@@ -1001,24 +1128,37 @@ export function buildSubtitlesFromStructuredTranscript(
 
     const originalSpokenText = thaiScript || thaiPhonetic || burmese;
 
-    const layout = findSceneLayoutForCutTime(cleanStart);
-    const sceneIndex = explicitScene ? explicitScene.sceneIndex : layout.scene.index;
-    const sceneId = explicitScene ? explicitScene.sceneId : layout.scene.id;
-    const sourceStartSec = explicitScene
-      ? Number(Math.max(0, explicitScene.sourceStartSec).toFixed(3))
-      : Number(Math.max(0, layout.scene.startSec + (cleanStart - layout.cutStartSec)).toFixed(3));
-    const sourceEndSec = explicitScene
-      ? Number(Math.max(sourceStartSec + 0.15, explicitScene.sourceEndSec).toFixed(3))
-      : Number(Math.max(sourceStartSec + 0.15, sourceStartSec + duration).toFixed(3));
+    if (opts?.explicitSource) {
+      const ex = opts.explicitSource;
+      return {
+        id: `sub-import-${seqIdx + 1}-${nowTs}`,
+        sceneIndex: ex.sceneIndex,
+        ...(ex.sceneId ? { sceneId: ex.sceneId } : {}),
+        ...(ex.mediaUrl !== undefined ? { mediaUrl: ex.mediaUrl } : {}),
+        startTime: cleanStart,
+        endTime: cleanEnd,
+        sourceStartSec: Number(Math.max(0, ex.sourceStartSec).toFixed(3)),
+        sourceEndSec: Number(Math.max(ex.sourceStartSec + 0.12, ex.sourceEndSec).toFixed(3)),
+        thaiPhonetic,
+        thaiScript,
+        burmese,
+        originalSpokenText,
+        words,
+        isManuallyEdited: true,
+      };
+    }
 
+    const mapped = mapCutRangeToSourceMetadata(scenes, cleanStart, cleanEnd);
     return {
       id: `sub-import-${seqIdx + 1}-${nowTs}`,
-      sceneIndex,
-      ...(sceneId ? { sceneId } : {}),
+      sceneIndex: mapped.sceneIndex,
+      ...(mapped.sceneId ? { sceneId: mapped.sceneId } : {}),
+      ...(mapped.mediaUrl !== undefined ? { mediaUrl: mapped.mediaUrl } : {}),
       startTime: cleanStart,
       endTime: cleanEnd,
-      sourceStartSec,
-      sourceEndSec,
+      sourceStartSec: mapped.sourceStartSec,
+      sourceEndSec: mapped.sourceEndSec,
+      ...(mapped.sourceSegments ? { sourceSegments: mapped.sourceSegments } : {}),
       thaiPhonetic,
       thaiScript,
       burmese,
@@ -1028,47 +1168,83 @@ export function buildSubtitlesFromStructuredTranscript(
     };
   };
 
+  const primaryVideoUrl = videoBlocks[0]?.mediaUrl ?? "";
+  const sourceMatchingBlocks = videoBlocks.filter((b) => b.mediaUrl === primaryVideoUrl);
+
+  if (resolvedTimingMode === "source" && distinctVideoMediaUrls.size > 1) {
+    warnings.push(
+      "Source Video timing matched your primary video clip; separately uploaded clips keep their own cut timeline."
+    );
+  }
+  if (resolvedTimingMode === "source" && hasImages) {
+    warnings.push("Image clips are skipped when mapping Source Video timestamps.");
+  }
+
   parsed.entries.forEach((entry, idx) => {
     const hasStart = typeof entry.startSec === "number" && Number.isFinite(entry.startSec);
     if (hasStart) {
-      const srcStart = Math.max(0, entry.startSec!);
-      const srcEnd =
-        typeof entry.endSec === "number" && Number.isFinite(entry.endSec) && entry.endSec > srcStart
+      const rawStart = Math.max(0, entry.startSec!);
+      const rawEnd =
+        typeof entry.endSec === "number" && Number.isFinite(entry.endSec) && entry.endSec > rawStart
           ? entry.endSec
-          : srcStart + 2.0;
+          : rawStart + 2.0;
 
-      if (mapSourceToCut) {
-        for (const layout of sceneLayouts) {
-          const sc = layout.scene;
-          if (srcEnd > sc.startSec + 0.05 && srcStart < sc.endSec - 0.05) {
-            const relStart = Math.max(0, srcStart - sc.startSec);
-            const relEnd = Math.min(sc.durationSec, srcEnd - sc.startSec);
-            if (relEnd > relStart + 0.08) {
-              const cutStart = layout.cutStartSec + relStart;
-              const cutEnd = layout.cutStartSec + relEnd;
+      if (resolvedTimingMode === "source") {
+        let matchedAny = false;
+        const entryDur = Math.max(0.15, rawEnd - rawStart);
+        for (const block of sourceMatchingBlocks) {
+          if (rawEnd > block.startSec + 0.05 && rawStart < block.endSec - 0.05) {
+            const ovStart = Math.max(block.startSec, rawStart);
+            const ovEnd = Math.min(block.endSec, rawEnd);
+            if (ovEnd - ovStart >= 0.08) {
+              matchedAny = true;
+              const cutStart = block.cutStart + (ovStart - block.startSec);
+              const cutEnd = block.cutStart + (ovEnd - block.startSec);
+              const matchedRef =
+                block.sceneRefs.find(
+                  (r) => ovStart >= r.startSec - 0.05 && ovStart <= r.endSec + 0.05
+                ) ?? block.sceneRefs[0];
+              const scIdx = matchedRef?.sceneIndex ?? 0;
               rawBuilt.push(
                 createSubtitleItem(entry, cutStart, cutEnd, rawBuilt.length, {
-                  sceneIndex: sc.index,
-                  sceneId: sc.id,
-                  sourceStartSec: sc.startSec + relStart,
-                  sourceEndSec: sc.startSec + relEnd,
+                  clipLeftFrac: Math.max(0, (ovStart - rawStart) / entryDur),
+                  clipRightFrac: Math.min(1, (ovEnd - rawStart) / entryDur),
+                  explicitSource: {
+                    sceneIndex: scIdx,
+                    sceneId: matchedRef?.sceneId ?? scenes[scIdx]?.id,
+                    mediaUrl: scenes[scIdx]?.mediaUrl,
+                    sourceStartSec: ovStart,
+                    sourceEndSec: ovEnd,
+                  },
                 })
               );
               fallbackCursor = Math.max(fallbackCursor, cutEnd);
             }
           }
         }
+        if (!matchedAny) {
+          outsideSourceClipsCount++;
+        }
       } else {
-        rawBuilt.push(createSubtitleItem(entry, srcStart, srcEnd, idx));
-        fallbackCursor = Math.max(fallbackCursor, srcEnd);
+        if (hasExplicitScenes && rawStart >= clipTotalDurationSec - 0.05) {
+          exceedsTimelineCount++;
+        }
+        rawBuilt.push(createSubtitleItem(entry, rawStart, rawEnd, rawBuilt.length));
+        fallbackCursor = Math.max(fallbackCursor, rawEnd);
       }
     } else {
       const remainingLines = Math.max(1, parsed.entries.length - idx);
-      const remainingDur = Math.max(remainingLines * 1.5, targetDurationSec - fallbackCursor);
-      const slot = Math.min(3.0, Math.max(1.2, remainingDur / remainingLines));
+      const remainingTimeline = Math.max(0, targetDurationSec - fallbackCursor);
+      const fitSlot =
+        hasExplicitScenes && remainingTimeline > 0.25
+          ? Math.max(0.25, Math.min(3.0, remainingTimeline / remainingLines))
+          : Math.min(3.0, Math.max(1.2, (remainingTimeline || remainingLines * 1.5) / remainingLines));
       const start = fallbackCursor;
-      const end = start + slot;
-      rawBuilt.push(createSubtitleItem(entry, start, end, idx));
+      const end = start + fitSlot;
+      if (hasExplicitScenes && start >= clipTotalDurationSec - 0.05) {
+        exceedsTimelineCount++;
+      }
+      rawBuilt.push(createSubtitleItem(entry, start, end, rawBuilt.length));
       fallbackCursor = end;
     }
   });
@@ -1078,16 +1254,20 @@ export function buildSubtitlesFromStructuredTranscript(
       `${untimedCount} ${untimedCount === 1 ? "line had" : "lines had"} no timestamps and ${untimedCount === 1 ? "was" : "were"} paced sequentially.`
     );
   }
-  if (mapSourceToCut && rawBuilt.length < parsed.entries.length) {
-    const skipped = parsed.entries.length - rawBuilt.length;
+  if (resolvedTimingMode === "source" && outsideSourceClipsCount > 0) {
     warnings.push(
-      `${skipped} ${skipped === 1 ? "line fell" : "lines fell"} outside your selected timeline clip range.`
+      `${outsideSourceClipsCount} ${outsideSourceClipsCount === 1 ? "line fell" : "lines fell"} outside your kept timeline clips (trimmed out) and ${outsideSourceClipsCount === 1 ? "was" : "were"} skipped.`
+    );
+  }
+  if (resolvedTimingMode === "timeline" && exceedsTimelineCount > 0) {
+    warnings.push(
+      `${exceedsTimelineCount} ${exceedsTimelineCount === 1 ? "line starts" : "lines start"} past the timeline end (${clipTotalDurationSec.toFixed(1)}s). If these timestamps match the unedited source video, switch Timing to Source Video.`
     );
   }
 
   rawBuilt.sort((a, b) => a.startTime - b.startTime);
 
-  // Clean up any tiny timing overlaps while keeping exact start times intact
+  // Clean up tiny timing overlaps while preserving exact start times and valid non-inverted source ranges
   const subtitles: SubtitleItem[] = rawBuilt.map((sub, i) => {
     const next = rawBuilt[i + 1];
     if (next && sub.endTime > next.startTime && next.startTime > sub.startTime + 0.15) {
@@ -1095,9 +1275,26 @@ export function buildSubtitlesFromStructuredTranscript(
       const nextDur = Math.max(0.15, adjustedEnd - sub.startTime);
       const oldDur = Math.max(0.15, sub.endTime - sub.startTime);
       const ratio = nextDur / oldDur;
+      const mapped = mapCutRangeToSourceMetadata(scenes, sub.startTime, adjustedEnd);
       return {
         ...sub,
         endTime: adjustedEnd,
+        sceneIndex: resolvedTimingMode === "source" ? sub.sceneIndex : mapped.sceneIndex,
+        ...(resolvedTimingMode === "source"
+          ? {
+              sourceEndSec: Number(
+                Math.max(sub.sourceStartSec + 0.12, sub.sourceStartSec + nextDur).toFixed(3)
+              ),
+            }
+          : {
+              ...(mapped.sceneId ? { sceneId: mapped.sceneId } : {}),
+              ...(mapped.mediaUrl !== undefined ? { mediaUrl: mapped.mediaUrl } : {}),
+              sourceStartSec: mapped.sourceStartSec,
+              sourceEndSec: mapped.sourceEndSec,
+              ...(mapped.sourceSegments
+                ? { sourceSegments: mapped.sourceSegments }
+                : { sourceSegments: undefined }),
+            }),
         words: sub.words.map((w) => ({
           ...w,
           startOffsetSec: Number((w.startOffsetSec * ratio).toFixed(2)),
@@ -1116,9 +1313,18 @@ export function buildSubtitlesFromStructuredTranscript(
     entries: parsed.entries,
     subtitles,
     scenes,
-    targetDurationSec: Math.max(targetDurationSec, Number(spanEndSec.toFixed(3))),
+    targetDurationSec: hasExplicitScenes
+      ? targetDurationSec
+      : Math.max(targetDurationSec, Number(spanEndSec.toFixed(3))),
+    clipTotalDurationSec,
+    resolvedTimingMode,
+    autoDetectedTimingMode,
+    canToggleTimingMode,
+    hasMultiSourceClips,
     timedCount,
     untimedCount,
+    exceedsTimelineCount,
+    outsideSourceClipsCount,
     spanStartSec,
     spanEndSec,
     hasPhonetic: parsed.entries.some((e) => Boolean(e.thaiPhonetic?.trim())),

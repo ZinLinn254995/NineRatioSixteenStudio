@@ -458,6 +458,7 @@ export function ProjectTimelineEditor({
       list.push({
         scene: sc,
         sceneId,
+        mediaUrl: sc.mediaUrl,
         index: idx,
         startSec: sc.startSec,
         endSec: sc.endSec,
@@ -737,29 +738,59 @@ export function ProjectTimelineEditor({
     setRangeNotice(null);
     setBaselineSubRegions(
       hasGeneratedProject(project)
-        ? project.subtitles.map((s) => ({
-            sourceStartSec: s.sourceStartSec,
-            sourceEndSec: s.sourceEndSec,
-          }))
+        ? project.subtitles.flatMap((s) =>
+            Array.isArray(s.sourceSegments) && s.sourceSegments.length > 0
+              ? s.sourceSegments.map((seg) => ({
+                  sourceStartSec: seg.sourceStartSec,
+                  sourceEndSec: seg.sourceEndSec,
+                  mediaUrl: seg.mediaUrl,
+                  sceneId: seg.sceneId,
+                }))
+              : [
+                  {
+                    sourceStartSec: s.sourceStartSec,
+                    sourceEndSec: s.sourceEndSec,
+                    mediaUrl: s.mediaUrl,
+                    sceneId: s.sceneId,
+                  },
+                ]
+          )
         : []
     );
   }, [projectIdentity]);
 
-  // Capture initial subtitle baseline if project mounted with subtitles after identity init
+  // Keep local baselineSubRegions aligned when subtitles are cleared or replaced wholesale (e.g. Paste Transcript)
+  const subFirstId = project?.subtitles[0]?.id ?? "";
+  const subCountKey = project?.subtitles.length ?? 0;
   useEffect(() => {
-    if (
-      baselineSubRegions.length === 0 &&
-      hasGeneratedProject(project) &&
-      project.subtitles.length > 0
-    ) {
+    if (!hasGeneratedProject(project) || project.subtitles.length === 0) {
+      if (baselineSubRegions.length > 0) {
+        setBaselineSubRegions([]);
+      }
+      return;
+    }
+    if (baselineSubRegions.length === 0 || subFirstId.startsWith("sub-import-")) {
       setBaselineSubRegions(
-        project.subtitles.map((s) => ({
-          sourceStartSec: s.sourceStartSec,
-          sourceEndSec: s.sourceEndSec,
-        }))
+        project.subtitles.flatMap((s) =>
+          Array.isArray(s.sourceSegments) && s.sourceSegments.length > 0
+            ? s.sourceSegments.map((seg) => ({
+                sourceStartSec: seg.sourceStartSec,
+                sourceEndSec: seg.sourceEndSec,
+                mediaUrl: seg.mediaUrl,
+                sceneId: seg.sceneId,
+              }))
+            : [
+                {
+                  sourceStartSec: s.sourceStartSec,
+                  sourceEndSec: s.sourceEndSec,
+                  mediaUrl: s.mediaUrl,
+                  sceneId: s.sceneId,
+                },
+              ]
+        )
       );
     }
-  }, [baselineSubRegions.length, project]);
+  }, [baselineSubRegions.length, project, subFirstId, subCountKey]);
 
   // Clear activeSceneId only if the previously selected scene was removed (never auto-select on load)
   useEffect(() => {
@@ -1446,22 +1477,48 @@ export function ProjectTimelineEditor({
     if (baselineSubRegions.length > 0) {
       return baselineSubRegions;
     }
-    return (project?.subtitles ?? []).map((s) => ({
-      sourceStartSec: s.sourceStartSec,
-      sourceEndSec: s.sourceEndSec,
-    }));
+    return (project?.subtitles ?? []).flatMap((s) =>
+      Array.isArray(s.sourceSegments) && s.sourceSegments.length > 0
+        ? s.sourceSegments.map((seg) => ({
+            sourceStartSec: seg.sourceStartSec,
+            sourceEndSec: seg.sourceEndSec,
+            mediaUrl: seg.mediaUrl,
+            sceneId: seg.sceneId,
+          }))
+        : [
+            {
+              sourceStartSec: s.sourceStartSec,
+              sourceEndSec: s.sourceEndSec,
+              mediaUrl: s.mediaUrl,
+              sceneId: s.sceneId,
+            },
+          ]
+    );
   }, [project?.speechRegions, baselineSubRegions, project?.subtitles]);
 
   const computedCutSpeechRegions = useMemo(() => {
     const primary = projectSpeechRegionsToCutTimeline(segments, resolvedSpeechRegions);
     if (primary.length > 0) return primary;
-    const fallbackSubs =
+    const fallbackSubs: SpeechRegion[] =
       baselineSubRegions.length > 0
         ? baselineSubRegions
-        : (project?.subtitles ?? []).map((s) => ({
-            sourceStartSec: s.sourceStartSec,
-            sourceEndSec: s.sourceEndSec,
-          }));
+        : (project?.subtitles ?? []).flatMap((s) =>
+            Array.isArray(s.sourceSegments) && s.sourceSegments.length > 0
+              ? s.sourceSegments.map((seg) => ({
+                  sourceStartSec: seg.sourceStartSec,
+                  sourceEndSec: seg.sourceEndSec,
+                  mediaUrl: seg.mediaUrl,
+                  sceneId: seg.sceneId,
+                }))
+              : [
+                  {
+                    sourceStartSec: s.sourceStartSec,
+                    sourceEndSec: s.sourceEndSec,
+                    mediaUrl: s.mediaUrl,
+                    sceneId: s.sceneId,
+                  },
+                ]
+          );
     return projectSpeechRegionsToCutTimeline(segments, fallbackSubs);
   }, [segments, resolvedSpeechRegions, baselineSubRegions, project?.subtitles]);
 
@@ -1480,20 +1537,30 @@ export function ProjectTimelineEditor({
       currentEnd: number;
     }> = [];
     subs.forEach((sub, subIdx) => {
-      const origSrcStart =
-        typeof sub.aiSourceStartSec === "number" && Number.isFinite(sub.aiSourceStartSec)
-          ? sub.aiSourceStartSec
-          : sub.sourceStartSec;
-      const origSrcEnd =
-        typeof sub.aiSourceEndSec === "number" && Number.isFinite(sub.aiSourceEndSec)
-          ? sub.aiSourceEndSec
-          : sub.sourceEndSec;
-      if (!Number.isFinite(origSrcStart) || !Number.isFinite(origSrcEnd) || origSrcEnd <= origSrcStart) {
+      const hasAiAnchor =
+        typeof sub.aiSourceStartSec === "number" &&
+        Number.isFinite(sub.aiSourceStartSec) &&
+        typeof sub.aiSourceEndSec === "number" &&
+        Number.isFinite(sub.aiSourceEndSec) &&
+        sub.aiSourceEndSec > sub.aiSourceStartSec;
+
+      if (!hasAiAnchor) {
+        list.push({
+          key: `ai-guide-${sub.id}-0`,
+          subId: sub.id,
+          subIdx,
+          cutStart: sub.startTime,
+          cutEnd: sub.endTime,
+          currentStart: sub.startTime,
+          currentEnd: sub.endTime,
+        });
         return;
       }
 
+      const origSrcStart = sub.aiSourceStartSec!;
+      const origSrcEnd = sub.aiSourceEndSec!;
+
       const matchesCurrentSource =
-        !sub.isManuallyEdited &&
         Math.abs(origSrcStart - sub.sourceStartSec) < 0.005 &&
         Math.abs(origSrcEnd - sub.sourceEndSec) < 0.005;
 
@@ -1511,7 +1578,12 @@ export function ProjectTimelineEditor({
       }
 
       const projected = projectSpeechRegionsToCutTimeline(segments, [
-        { sourceStartSec: origSrcStart, sourceEndSec: origSrcEnd },
+        {
+          sourceStartSec: origSrcStart,
+          sourceEndSec: origSrcEnd,
+          mediaUrl: sub.mediaUrl,
+          sceneId: sub.sceneId,
+        },
       ]);
       projected.forEach((proj, pIdx) => {
         list.push({

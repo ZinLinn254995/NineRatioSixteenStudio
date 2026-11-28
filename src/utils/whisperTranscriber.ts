@@ -210,24 +210,25 @@ function mixAudioBufferToMono(audioBuffer: AudioBuffer): Float32Array {
   return mixed;
 }
 
-async function resampleBufferSegmentTo16k(
-  audioBuffer: AudioBuffer,
+async function resampleMonoSegmentTo16k(
+  monoFull: Float32Array,
+  sampleRate: number,
+  audioDuration: number,
   startSec: number,
   durationSec: number
 ): Promise<Float32Array> {
   const targetRate = 16000;
-  const safeStart = Math.max(0, Math.min(audioBuffer.duration, startSec));
-  const availDur = Math.max(0.05, Math.min(durationSec, audioBuffer.duration - safeStart));
+  const safeStart = Math.max(0, Math.min(audioDuration, startSec));
+  const availDur = Math.max(0.05, Math.min(durationSec, audioDuration - safeStart));
   const targetLength = Math.max(1, Math.ceil(availDur * targetRate));
 
-  const monoFull = mixAudioBufferToMono(audioBuffer);
   const OfflineCtx =
     window.OfflineAudioContext ||
     (window as unknown as { webkitOfflineAudioContext: typeof OfflineAudioContext })
       .webkitOfflineAudioContext;
 
   const offline = new OfflineCtx(1, targetLength, targetRate);
-  const srcBuffer = offline.createBuffer(1, monoFull.length, audioBuffer.sampleRate);
+  const srcBuffer = offline.createBuffer(1, monoFull.length, sampleRate);
   srcBuffer.copyToChannel(monoFull as Float32Array<ArrayBuffer>, 0);
 
   const source = offline.createBufferSource();
@@ -248,6 +249,67 @@ function concatFloat32Arrays(chunks: Float32Array[]): Float32Array {
     offset += chunk.length;
   }
   return out;
+}
+
+function normalizeSpeechPcm(samples: Float32Array): Float32Array {
+  const len = samples.length;
+  if (len === 0) return samples;
+
+  let sum = 0;
+  for (let i = 0; i < len; i++) {
+    sum += samples[i];
+  }
+  const mean = sum / len;
+
+  let peak = 0;
+  let activeSqSum = 0;
+  let activeSampleCount = 0;
+  let totalSqSum = 0;
+
+  const frameSize = 512;
+  for (let start = 0; start < len; start += frameSize) {
+    const end = Math.min(len, start + frameSize);
+    let frameSq = 0;
+    for (let i = start; i < end; i++) {
+      const centered = samples[i] - mean;
+      const abs = Math.abs(centered);
+      if (abs > peak) peak = abs;
+      const sq = centered * centered;
+      frameSq += sq;
+      totalSqSum += sq;
+    }
+    const frameCount = end - start;
+    const frameRms = Math.sqrt(frameSq / frameCount);
+    if (frameRms > 0.002) {
+      activeSqSum += frameSq;
+      activeSampleCount += frameCount;
+    }
+  }
+
+  if (peak < 1e-5) {
+    return samples;
+  }
+
+  const rms =
+    activeSampleCount > 0
+      ? Math.sqrt(activeSqSum / activeSampleCount)
+      : Math.sqrt(totalSqSum / len);
+
+  if (rms < 1e-5) return samples;
+
+  // Target ~ -21.4 dBFS active RMS, bounded gain [0.5, 6.0], strict 0.92 peak ceiling
+  const rawGain = 0.085 / rms;
+  const maxSafeGain = 0.92 / peak;
+  const gain = Math.min(maxSafeGain, Math.max(0.5, Math.min(6.0, rawGain)));
+
+  if (Math.abs(mean) < 1e-4 && Math.abs(gain - 1) < 0.05) {
+    return samples;
+  }
+
+  for (let i = 0; i < len; i++) {
+    samples[i] = Math.max(-0.98, Math.min(0.98, (samples[i] - mean) * gain));
+  }
+  return samples;
 }
 
 function base64ToArrayBuffer(b64: string): ArrayBuffer {
@@ -301,6 +363,7 @@ export async function extractTimelineAudio16kMono(
         throw new DOMException("Aborted", "AbortError");
       }
       const decoded = await decodeWithAudioContext(buf);
+      const monoFull = mixAudioBufferToMono(decoded);
       const pcmParts: Float32Array[] = [];
       let totalDur = 0;
       for (let i = 0; i < effectiveScenes.length; i++) {
@@ -310,7 +373,13 @@ export async function extractTimelineAudio16kMono(
         const sc = effectiveScenes[i];
         const s = Math.max(0, Math.min(decoded.duration, sc.startSec));
         const e = Math.max(s + 0.1, Math.min(decoded.duration, sc.endSec));
-        const resampled = await resampleBufferSegmentTo16k(decoded, s, e - s);
+        const resampled = await resampleMonoSegmentTo16k(
+          monoFull,
+          decoded.sampleRate,
+          decoded.duration,
+          s,
+          e - s
+        );
         pcmParts.push(resampled);
         totalDur += resampled.length / 16000;
         options.onProgress?.({
@@ -348,8 +417,11 @@ export async function extractTimelineAudio16kMono(
         }
         const clip = mp4Clips[i];
         const decoded = await decodeWithAudioContext(base64ToArrayBuffer(clip.audioBase64));
-        const resampled = await resampleBufferSegmentTo16k(
-          decoded,
+        const monoClip = mixAudioBufferToMono(decoded);
+        const resampled = await resampleMonoSegmentTo16k(
+          monoClip,
+          decoded.sampleRate,
+          decoded.duration,
           clip.trimLeadSec,
           clip.durationSec
         );
@@ -657,6 +729,73 @@ function buildSegmentsFromWhisperOutput(
   };
 }
 
+function normalizeForRepetitionCheck(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[\s.,!?;:'"()[\]\-–—…♪♫*~•·。！？ฯ]+/g, "")
+    .trim();
+}
+
+function filterHallucinatedSegments(
+  segments: TranscriptSegment[]
+): { text: string; segments: TranscriptSegment[] } {
+  const cleaned: TranscriptSegment[] = [];
+  let prevKey = "";
+  let repeatRun = 0;
+
+  for (const seg of segments) {
+    const trimmed = seg.text.trim();
+    if (!trimmed) continue;
+
+    // Drop pure punctuation / music-symbol ghost lines
+    if (/^[\s.,!?;:'"()[\]\-–—…♪♫*~•·。！？ฯ]+$/.test(trimmed)) {
+      continue;
+    }
+
+    // Collapse runaway 3+ consecutive identical repetition loops
+    const key = normalizeForRepetitionCheck(trimmed);
+    if (key && key === prevKey) {
+      repeatRun++;
+      if (repeatRun >= 2) {
+        continue;
+      }
+    } else {
+      prevKey = key;
+      repeatRun = 0;
+    }
+
+    cleaned.push({
+      ...seg,
+      id: `tr-${cleaned.length + 1}`,
+      index: cleaned.length + 1,
+      text: trimmed,
+    });
+  }
+
+  return {
+    text: cleaned.map((s) => s.text).join(" "),
+    segments: cleaned,
+  };
+}
+
+export function formatWhisperLanguageLabel(code?: string | null): string | null {
+  if (!code || code === "auto") return null;
+  const normalized = code.trim().toLowerCase();
+  if (!normalized) return null;
+
+  try {
+    if (typeof Intl !== "undefined" && typeof Intl.DisplayNames === "function") {
+      const display = new Intl.DisplayNames(["en"], { type: "language" }).of(normalized);
+      if (display && display.toLowerCase() !== normalized) {
+        return display;
+      }
+    }
+  } catch {
+    // Fallback to uppercase code
+  }
+  return normalized.toUpperCase();
+}
+
 export async function runTranscriptGeneration(params: {
   file: File;
   title: string;
@@ -757,7 +896,7 @@ export async function runTranscriptGeneration(params: {
   }
 
   // Local browser Whisper path
-  const { samples, durationSec } = await extractTimelineAudio16kMono(
+  const { samples: rawSamples, durationSec } = await extractTimelineAudio16kMono(
     params.file,
     params.scenes.map((s) => ({ startSec: s.startSec, endSec: s.endSec })),
     {
@@ -772,16 +911,28 @@ export async function runTranscriptGeneration(params: {
     throw new DOMException("Aborted", "AbortError");
   }
 
+  const samples = normalizeSpeechPcm(rawSamples);
   const whisperLang = WHISPER_LANGUAGE_MAP[params.language] ?? "auto";
 
   const runWorkerPass = (audioBuf: Float32Array, forceWasm: boolean) =>
-    new Promise<RawWhisperOutput>((resolve, reject) => {
+    new Promise<{ output: RawWhisperOutput; detectedLanguage?: string }>((resolve, reject) => {
       const worker = createWhisperWorker();
       const requestId = `tr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      let currentPhase: "downloading" | "loading" | "transcribing" = "loading";
 
       const onAbort = () => {
         cleanup();
-        terminateActiveWhisperWorker();
+        if (currentPhase === "downloading") {
+          // Terminate worker during network download so fetch aborts immediately
+          terminateActiveWhisperWorker();
+        } else {
+          // Soft cancel: keep worker and cached Whisper/VAD models warm in memory
+          try {
+            worker.postMessage({ type: "cancel", requestId });
+          } catch {
+            terminateActiveWhisperWorker();
+          }
+        }
         reject(new DOMException("Aborted", "AbortError"));
       };
 
@@ -791,15 +942,39 @@ export async function runTranscriptGeneration(params: {
 
         if (data.type === "progress") {
           const phase = data.phase as TranscriptProgress["phase"];
+          if (phase === "downloading" || phase === "loading" || phase === "transcribing") {
+            currentPhase = phase;
+          }
           const pct = Number(data.percent) || 0;
+          const stageLabel =
+            typeof data.stageLabel === "string" ? data.stageLabel : undefined;
+          const detectedLanguage =
+            typeof data.detectedLanguage === "string" ? data.detectedLanguage : undefined;
+          const chunkIndex =
+            typeof data.chunkIndex === "number" ? data.chunkIndex : undefined;
+          const totalChunks =
+            typeof data.totalChunks === "number" ? data.totalChunks : undefined;
+          const partialText =
+            typeof data.partialText === "string" ? data.partialText : undefined;
+
           if (phase === "transcribing") {
+            const mappedPct = Math.max(75, Math.min(99, Math.round(75 + (pct / 100) * 24)));
+            const detectedLabel = formatWhisperLanguageLabel(detectedLanguage);
             params.onProgress?.({
               phase: "transcribing",
-              label: `Transcribing with ${spec.label}...`,
-              percent: 84,
+              label:
+                stageLabel ||
+                (detectedLabel
+                  ? `Transcribing ${spec.label} · ${detectedLabel}...`
+                  : `Transcribing with ${spec.label}...`),
+              percent: mappedPct,
+              chunkIndex,
+              totalChunks,
+              partialText,
+              detectedLanguage,
             });
           } else {
-            const mappedPct = Math.round(30 + (pct / 100) * 48);
+            const mappedPct = Math.round(30 + (pct / 100) * 45);
             params.onProgress?.({
               phase: phase === "loading" ? "loading" : "downloading",
               label:
@@ -816,7 +991,14 @@ export async function runTranscriptGeneration(params: {
           }
         } else if (data.type === "complete") {
           cleanup();
-          resolve((data.output as RawWhisperOutput) || { text: "", chunks: [] });
+          resolve({
+            output: (data.output as RawWhisperOutput) || { text: "", chunks: [] },
+            detectedLanguage:
+              typeof data.detectedLanguage === "string" ? data.detectedLanguage : undefined,
+          });
+        } else if (data.type === "cancelled") {
+          cleanup();
+          reject(new DOMException("Aborted", "AbortError"));
         } else if (data.type === "error") {
           cleanup();
           reject(new Error(String(data.error || "Whisper transcription failed.")));
@@ -860,13 +1042,13 @@ export async function runTranscriptGeneration(params: {
       );
     });
 
-  let output: RawWhisperOutput;
+  let workerResult: { output: RawWhisperOutput; detectedLanguage?: string };
   if (forceWasmSession) {
-    output = await runWorkerPass(samples, true);
+    workerResult = await runWorkerPass(samples, true);
   } else {
     let fallbackCopy: Float32Array | null = samples.slice();
     try {
-      output = await runWorkerPass(samples, false);
+      workerResult = await runWorkerPass(samples, false);
       fallbackCopy = null;
     } catch (err) {
       if (
@@ -883,21 +1065,23 @@ export async function runTranscriptGeneration(params: {
         label: `Switching ${spec.label} to WASM mode...`,
         percent: 50,
       });
-      output = await runWorkerPass(fallbackCopy, true);
+      workerResult = await runWorkerPass(fallbackCopy, true);
       fallbackCopy = null;
     }
   }
 
   const normalized = buildSegmentsFromWhisperOutput(
-    output,
+    workerResult.output,
     durationSec,
     params.wordTimestamps
   );
+  const filtered = filterHallucinatedSegments(normalized.segments);
 
   params.onProgress?.({
     phase: "transcribing",
     label: "Completed",
     percent: 100,
+    detectedLanguage: workerResult.detectedLanguage,
   });
 
   return {
@@ -906,9 +1090,10 @@ export async function runTranscriptGeneration(params: {
     modelId: spec.id,
     modelLabel: spec.label,
     language: params.language,
+    detectedLanguage: workerResult.detectedLanguage,
     durationSec,
-    text: normalized.text,
-    segments: normalized.segments,
+    text: filtered.text || normalized.text,
+    segments: filtered.segments,
     createdAt: Date.now(),
   };
 }

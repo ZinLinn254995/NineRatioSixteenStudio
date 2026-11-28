@@ -6,6 +6,8 @@ export interface TimelineSegmentLike {
   clipDur: number;
   cutStart: number;
   cutEnd: number;
+  mediaUrl?: string;
+  sceneId?: string;
 }
 
 export interface CutSpeechRegion {
@@ -21,7 +23,14 @@ export function projectSpeechRegionsToCutTimeline(
   const projected: CutSpeechRegion[] = [];
 
   for (const seg of segments) {
+    const segMediaUrl = seg.mediaUrl || "";
     for (const sr of speechRegions) {
+      if (sr.mediaUrl !== undefined && (sr.mediaUrl || "") !== segMediaUrl) {
+        continue;
+      }
+      if (sr.sceneId && seg.sceneId && sr.sceneId !== seg.sceneId) {
+        continue;
+      }
       const ovStart = Math.max(seg.startSec, sr.sourceStartSec);
       const ovEnd = Math.min(seg.endSec, sr.sourceEndSec);
       if (ovEnd - ovStart >= 0.04) {
