@@ -113,6 +113,7 @@ interface ProjectTimelineEditorProps {
 interface ClipSegment {
   scene: SpeakingScene;
   sceneId: string;
+  mediaUrl?: string;
   index: number;
   startSec: number;
   endSec: number;
