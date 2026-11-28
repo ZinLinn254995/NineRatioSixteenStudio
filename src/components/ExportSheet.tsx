@@ -149,14 +149,14 @@ export function ExportSheet({
       aria-modal="true"
       aria-labelledby="export-sheet-title"
     >
-      <div className="w-full sm:max-w-md rounded-t-2xl sm:rounded-xl border-t sm:border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#0c1026] dark:text-[#f3f5fc] shadow-2xl overflow-hidden">
+      <div className="w-full sm:max-w-md max-h-[90dvh] flex flex-col rounded-t-2xl sm:rounded-xl border-t sm:border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] text-[#0c1026] dark:text-[#f3f5fc] shadow-2xl overflow-hidden">
         {/* Mobile drag handle */}
-        <div className="flex justify-center pt-3 pb-1 sm:hidden" aria-hidden="true">
+        <div className="flex justify-center pt-3 pb-1 sm:hidden shrink-0" aria-hidden="true">
           <div className="w-10 h-1 rounded-full bg-[#bcc9e6] dark:bg-[#2f3866]" />
         </div>
 
         {/* Sheet Header */}
-        <div className="px-5 pt-4 pb-3 flex items-center justify-between gap-3 border-b border-[#d2dcf0] dark:border-[#21284c]">
+        <div className="shrink-0 px-5 pt-4 pb-3 flex items-center justify-between gap-3 border-b border-[#d2dcf0] dark:border-[#21284c]">
           <div className="min-w-0">
             <h2
               id="export-sheet-title"
@@ -200,7 +200,7 @@ export function ExportSheet({
 
         {/* Format Switcher (available when idle) */}
         {!isExporting && (
-          <div className="px-5 pt-4">
+          <div className="shrink-0 px-5 pt-4">
             <div
               role="tablist"
               aria-label="Export format"
@@ -245,7 +245,7 @@ export function ExportSheet({
         )}
 
         {/* Sheet Body */}
-        <div className="px-5 py-5 space-y-5">
+        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-5 py-5 space-y-5">
           {isExporting && progress && (
             <>
               {/* Numeric progress + active phase */}
@@ -469,9 +469,9 @@ export function ExportSheet({
 
           {!isExporting && !result && error && (
             <>
-              <div className="flex items-start gap-3 p-3.5 rounded-lg border border-red-200 dark:border-red-900/60 bg-red-50/75 dark:bg-red-950/35">
+              <div className="flex items-start gap-3 p-3.5 rounded-lg border border-red-200 dark:border-red-900/60 bg-red-50/75 dark:bg-red-950/35 max-h-48 overflow-y-auto overscroll-contain">
                 <AlertCircle className="w-5 h-5 text-red-600 dark:text-red-400 shrink-0 mt-0.5" />
-                <p className="text-sm text-[#0c1026] dark:text-[#f3f5fc] leading-relaxed">
+                <p className="min-w-0 text-sm text-[#0c1026] dark:text-[#f3f5fc] leading-relaxed break-words">
                   {error}
                 </p>
               </div>

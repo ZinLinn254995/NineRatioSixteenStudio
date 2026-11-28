@@ -914,7 +914,7 @@ export default function App() {
 
     const resolvedMime = inferVideoMimeType(rawFile.name, rawFile.type);
     let file: File = rawFile;
-    if (rawFile.size > 0 && rawFile.size <= 64 * 1024 * 1024) {
+    if (rawFile.size > 0 && rawFile.size <= 128 * 1024 * 1024) {
       try {
         const byteBlob = await materializeReadableBlob(rawFile, resolvedMime);
         if (activeRunIdRef.current !== uploadRunId) return;
@@ -1101,7 +1101,7 @@ export default function App() {
       } else {
         const resolvedMime = inferVideoMimeType(rawFile.name, rawFile.type);
         let file: File = rawFile;
-        if (rawFile.size > 0 && rawFile.size <= 64 * 1024 * 1024) {
+        if (rawFile.size > 0 && rawFile.size <= 128 * 1024 * 1024) {
           try {
             const byteBlob = await materializeReadableBlob(rawFile, resolvedMime);
             if (activeRunIdRef.current !== sessionRunId) return;
@@ -1484,10 +1484,83 @@ export default function App() {
     []
   );
 
+  const resolveReadableLocalFile = useCallback(
+    async (media: LocalStudioMedia | null): Promise<LocalStudioMedia | null> => {
+      if (!media) return null;
+      const curFile = media.localFile;
+      if (curFile && curFile.size > 0) {
+        try {
+          const probeLen = Math.min(64, curFile.size);
+          const buf = await curFile.slice(0, probeLen).arrayBuffer();
+          if (buf.byteLength === probeLen) {
+            return media;
+          }
+        } catch {
+          // Android Chrome can revoke content:// read permission after backgrounding/idle
+        }
+      }
+
+      let recoveredBlob: Blob | null = null;
+      let recoveredName = curFile?.name || `${media.title || "video"}.mp4`;
+      let recoveredType = curFile?.type || "";
+
+      if (activeSavedId) {
+        try {
+          const blobEntry = await getSavedProjectBlob(activeSavedId);
+          if (blobEntry?.blob && blobEntry.blob.size > 0) {
+            recoveredBlob = blobEntry.blob;
+            recoveredName = blobEntry.fileName || recoveredName;
+            recoveredType = blobEntry.fileType || recoveredType;
+          }
+        } catch {
+          // ignore IndexedDB fallback errors
+        }
+      }
+
+      if (!recoveredBlob && media.localUrl?.startsWith("blob:")) {
+        try {
+          const resp = await fetch(media.localUrl);
+          if (resp.ok) {
+            const fetchedBlob = await resp.blob();
+            if (fetchedBlob.size > 0) {
+              recoveredBlob = fetchedBlob;
+              recoveredType = fetchedBlob.type || recoveredType;
+            }
+          }
+        } catch {
+          // ignore blob URL fallback errors
+        }
+      }
+
+      if (recoveredBlob) {
+        const resolvedMime = inferVideoMimeType(recoveredName, recoveredType);
+        const recoveredFile = new File(
+          [recoveredBlob],
+          recoveredName,
+          resolvedMime ? { type: resolvedMime } : undefined
+        );
+        const refreshedUrl = registerBlobUrl(recoveredFile);
+        const nextMedia: LocalStudioMedia = {
+          ...media,
+          localFile: recoveredFile,
+          localUrl: refreshedUrl,
+        };
+        setLocalMedia((prev) => (prev ? nextMedia : prev));
+        setProject((prev) =>
+          prev ? { ...prev, localFile: recoveredFile, localUrl: refreshedUrl } : prev
+        );
+        return nextMedia;
+      }
+
+      return media;
+    },
+    [activeSavedId, registerBlobUrl]
+  );
+
   // Triggered explicitly by the user after configuring Advanced Settings for Generate/Regenerate Subtitle
   const handleGenerateSubtitles = async (configOverride?: SubtitleGenerationConfig) => {
-    const targetMedia = localMedia;
-    if (!targetMedia || !targetMedia.localFile || selectedScenes.length === 0) return;
+    const initialMedia = localMedia;
+    if (!initialMedia || !initialMedia.localFile || selectedScenes.length === 0) return;
 
     const activeGenConfig = configOverride ?? subtitleGenConfig;
     if (configOverride) {
@@ -1515,12 +1588,15 @@ export default function App() {
     setProcessError(null);
     setGenerationProgress({
       stage: "extracting",
-      label: !targetMedia.uploadId ? "Extracting clip audio..." : "Preparing clips...",
+      label: !initialMedia.uploadId ? "Extracting clip audio..." : "Preparing clips...",
       percent: 4,
       totalClips: selectedScenes.length,
     });
 
     try {
+      const targetMedia = (await resolveReadableLocalFile(initialMedia)) ?? initialMedia;
+      if (!targetMedia.localFile || activeRunIdRef.current !== runId) return;
+
       const scenePayload = selectedScenes.map(({ startSec, endSec }) => ({
         startSec,
         endSec,
@@ -1678,6 +1754,7 @@ export default function App() {
           ...normalizedServerProj,
           localUrl: targetMedia.localUrl,
           localFile: targetMedia.localFile,
+          ...(uploadId ? { uploadId } : {}),
         };
         setProject(nextProj);
         setBaselineFromProject(nextProj);
@@ -1735,12 +1812,12 @@ export default function App() {
   };
 
   const handleExportAudioOnly = async () => {
-    const targetMedia = localMedia;
-    if (!targetMedia || isExportingAudio) return;
+    const initialAudioMedia = localMedia;
+    if (!initialAudioMedia || isExportingAudio) return;
 
     const totalDur = Math.max(
       1,
-      targetMedia.durationSec || project?.sourceDurationSec || 60
+      initialAudioMedia.durationSec || project?.sourceDurationSec || 60
     );
     const scenePayload =
       selectedScenes.length > 0
@@ -1752,6 +1829,7 @@ export default function App() {
     showShortcutToast("Extracting audio (.mp3)...");
 
     try {
+      const targetMedia = (await resolveReadableLocalFile(initialAudioMedia)) ?? initialAudioMedia;
       let uploadId = targetMedia.uploadId;
       let resp: Response | null = null;
 
@@ -1819,8 +1897,8 @@ export default function App() {
   };
 
   const handleGenerateSingleClip = async (sceneId: string) => {
-    const targetMedia = localMedia;
-    if (!targetMedia || !targetMedia.localFile || selectedScenes.length === 0) return;
+    const initialMedia = localMedia;
+    if (!initialMedia || !initialMedia.localFile || selectedScenes.length === 0) return;
 
     const targetIdx = selectedScenes.findIndex((s) => s.id === sceneId);
     if (targetIdx === -1) return;
@@ -1846,6 +1924,9 @@ export default function App() {
     });
 
     try {
+      const targetMedia = (await resolveReadableLocalFile(initialMedia)) ?? initialMedia;
+      if (!targetMedia.localFile || activeRunIdRef.current !== runId) return;
+
       const singleScenePayload = [{ startSec: targetScene.startSec, endSec: targetScene.endSec }];
       let resolvedMedia = targetMedia;
       let data: VideoProject & { error?: string };
@@ -4080,17 +4161,40 @@ export default function App() {
     exportAbortRef.current = ctrl;
 
     try {
+      const recoveredMedia = await resolveReadableLocalFile(
+        localMedia ??
+          (project.localFile || project.localUrl
+            ? {
+                sourceType: "local",
+                localUrl: project.localUrl,
+                localFile: project.localFile,
+                uploadId: project.uploadId,
+                title: project.title,
+                channel: project.channel,
+                durationSec: project.sourceDurationSec,
+              }
+            : null)
+      );
+      if (ctrl.signal.aborted) return;
+
+      const exportProj: VideoProject = {
+        ...project,
+        ...(recoveredMedia?.localFile ? { localFile: recoveredMedia.localFile } : {}),
+        ...(recoveredMedia?.localUrl ? { localUrl: recoveredMedia.localUrl } : {}),
+        scenes: project.scenes.map((sc) => ({ ...sc })),
+      };
+
       const result =
         targetFormat === "mp3"
           ? await exportProjectToMp3(
-              project,
+              exportProj,
               voiceSettings,
               videoEdit,
               setExportProgress,
               ctrl.signal
             )
           : await exportProjectToMp4(
-              project,
+              exportProj,
               darkMode,
               voiceSettings,
               videoEdit,
@@ -4127,7 +4231,7 @@ export default function App() {
           result: null,
           signature: null,
           hasSaved: false,
-          error: err instanceof Error ? err.message : fallbackMsg,
+          error: formatReadableApiError(err, fallbackMsg),
         },
       }));
     } finally {
@@ -4686,7 +4790,7 @@ export default function App() {
     try {
       const resolvedMime = inferVideoMimeType(rawFile.name, rawFile.type);
       let file: File = rawFile;
-      if (rawFile.size > 0 && rawFile.size <= 64 * 1024 * 1024) {
+      if (rawFile.size > 0 && rawFile.size <= 128 * 1024 * 1024) {
         try {
           const byteBlob = await materializeReadableBlob(rawFile, resolvedMime);
           file = new File(

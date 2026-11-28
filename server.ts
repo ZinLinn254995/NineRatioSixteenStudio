@@ -23,6 +23,36 @@ import { buildTranslatorSystemInstruction } from "./server/thaiBurmeseTranslator
 const execFileAsync = promisify(execFile);
 const FFMPEG_EXEC_OPTS = { maxBuffer: 16 * 1024 * 1024 };
 
+function formatFfmpegExportError(err: unknown, fallback: string): string {
+  const rec = err && typeof err === "object" ? (err as { killed?: boolean; signal?: string; stderr?: string; message?: string }) : {};
+  if (rec.killed || rec.signal === "SIGTERM" || rec.signal === "SIGKILL") {
+    return "Video encoding timed out on the server. Please try again or export a shorter segment.";
+  }
+  const raw = typeof rec.stderr === "string" && rec.stderr.trim()
+    ? rec.stderr
+    : err instanceof Error
+      ? err.message
+      : String(err || "");
+  if (!raw.trim()) return fallback;
+  if (/AbortError|aborted/i.test(raw)) {
+    return "Export was cancelled or timed out. Please try again.";
+  }
+  const lines = raw
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .filter(
+      (l) =>
+        !/^Command failed:/i.test(l) &&
+        !/^(frame|fps|q|size|time|bitrate|speed)=/i.test(l) &&
+        !/^frame=\s*\d+/i.test(l) &&
+        !/^(Input|Output|Stream mapping|Press \[q\]|Metadata:|Duration:|Stream #|\[libx264|\[aac|\[mp3)/i.test(l)
+    );
+  const picked = (lines.slice(-2).join(" ") || "").trim();
+  if (!picked) return fallback;
+  return picked.length > 220 ? `${picked.slice(0, 217)}...` : picked;
+}
+
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
@@ -6757,7 +6787,7 @@ app.post("/api/mux-mp4", async (req, res) => {
   } catch (err) {
     console.error("Mux MP4 error:", err);
     res.status(500).json({
-      error: err instanceof Error ? err.message : "Failed to encode 9:16 MP4.",
+      error: formatFfmpegExportError(err, "Failed to encode 9:16 MP4."),
     });
   } finally {
     if (renderedVideoUploadId) {
@@ -6953,7 +6983,6 @@ app.post("/api/export-fast-mp4", async (req, res) => {
     const speed = Math.max(0.5, Math.min(2.5, Number(voiceSettings?.speed) || 1));
 
     const outputMp4Path = path.join(tmpDir, "output.mp4");
-    const execOpts = { ...FFMPEG_EXEC_OPTS, signal: ffmpegAbort.signal, timeout: 110_000 };
 
     const normalizedScenes = (Array.isArray(scenes) ? scenes : [])
       .map((sc) => {
@@ -6967,6 +6996,14 @@ app.post("/api/export-fast-mp4", async (req, res) => {
         return { startSec, durationSec };
       })
       .filter((sc) => Number.isFinite(sc.startSec) && Number.isFinite(sc.durationSec));
+
+    const totalClipDur =
+      normalizedScenes.reduce((acc, sc) => acc + sc.durationSec, 0) ||
+      Math.max(10, Number(targetDurationSec) || 60);
+    const effectiveOutputDur = Math.max(10, totalClipDur / speed);
+    const fastTimeoutMs = Math.max(240_000, Math.min(600_000, Math.round(effectiveOutputDur * 3000)));
+    const x264Preset = effectiveOutputDur > 90 ? "ultrafast" : "superfast";
+    const execOpts = { ...FFMPEG_EXEC_OPTS, signal: ffmpegAbort.signal, timeout: fastTimeoutMs };
 
     const entry = await withUploadSessionLock(
       uploadId,
@@ -7182,6 +7219,9 @@ app.post("/api/export-fast-mp4", async (req, res) => {
           "ffmpeg",
           [
             "-y",
+            "-nostats",
+            "-loglevel",
+            "error",
             ...ffmpegInputs,
             "-filter_complex",
             filterChains.join(";"),
@@ -7191,7 +7231,9 @@ app.post("/api/export-fast-mp4", async (req, res) => {
             "-c:v",
             "libx264",
             "-preset",
-            "superfast",
+            x264Preset,
+            "-threads",
+            "0",
             "-crf",
             "25",
             "-maxrate",
@@ -7243,7 +7285,7 @@ app.post("/api/export-fast-mp4", async (req, res) => {
     }
     console.error("Fast export MP4 error:", err);
     res.status(500).json({
-      error: err instanceof Error ? err.message : "Failed to export 9:16 MP4.",
+      error: formatFfmpegExportError(err, "Failed to export 9:16 MP4."),
     });
   } finally {
     res.off("close", onClientClose);
@@ -7350,7 +7392,7 @@ app.post("/api/export-mp3", async (req, res) => {
       returnDownloadUrl?: boolean;
     };
 
-    const execOpts = { ...FFMPEG_EXEC_OPTS, signal: ffmpegAbort.signal };
+    const execOpts = { ...FFMPEG_EXEC_OPTS, signal: ffmpegAbort.signal, timeout: 300_000 };
     const normalizedScenes = (Array.isArray(scenes) ? scenes : [])
       .map((sc) => {
         const startSec = Math.max(0, Number(sc.startSec) || 0);
@@ -7587,7 +7629,7 @@ app.post("/api/export-mp3", async (req, res) => {
     console.error("Export MP3 error:", err);
     if (!res.headersSent) {
       res.status(500).json({
-        error: err instanceof Error ? err.message : "Failed to export MP3 audio.",
+        error: formatFfmpegExportError(err, "Failed to export MP3 audio."),
       });
     }
   } finally {
@@ -8034,6 +8076,8 @@ async function startServer() {
   }, UPLOAD_SWEEP_INTERVAL_MS).unref();
 
   const server = http.createServer(app);
+  server.requestTimeout = 0;
+  server.headersTimeout = 65_000;
 
   if (process.env.NODE_ENV !== "production") {
     const disableHmr = process.env.DISABLE_HMR === "true";

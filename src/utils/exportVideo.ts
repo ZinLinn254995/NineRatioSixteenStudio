@@ -8,7 +8,7 @@ import {
   resolveSubtitleFontMultiplier,
   resolveSubtitleFontStack,
 } from "./videoFilters";
-import { uploadBlobInChunks } from "./uploadFile";
+import { formatReadableApiError, uploadBlobInChunks } from "./uploadFile";
 import { getEffectivePlaybackSpeed } from "./voicePresets";
 import { getSceneDurationSec } from "./projectTimeline";
 
@@ -1589,7 +1589,7 @@ export async function exportProjectToMp4(
       let subtitleFormat: "mp4" | "webm" = "mp4";
       let subtitleForceCfr = false;
       let subtitleRecordedDurationSec: number | undefined;
-      const subFps = 15;
+      const subFps = totalDuration > 90 ? 10 : 15;
 
       if (useSplitSubtitleLayout && listH >= 120) {
         const subCanvas = document.createElement("canvas");
@@ -1733,6 +1733,8 @@ export async function exportProjectToMp4(
                   percent: 28 + Math.round((frameIdx / subTotalFrames) * 34),
                   detail: `Frame ${frameIdx} / ${subTotalFrames}`,
                 });
+              }
+              if (frameIdx % 2 === 0) {
                 await new Promise((r) => setTimeout(r, 0));
               }
             }
@@ -1821,7 +1823,7 @@ export async function exportProjectToMp4(
               renderSubtitleOnlyFrame((frameIdx / subFps) * speed);
               if (useManual) {
                 track?.requestFrame?.();
-                if (frameIdx % 4 === 0) await new Promise((r) => setTimeout(r, 0));
+                if (frameIdx % 2 === 0) await new Promise((r) => setTimeout(r, 0));
               } else {
                 const waitMs = Math.max(4, intervalMs - (performance.now() - fStart));
                 await new Promise((r) => setTimeout(r, waitMs));
@@ -1879,7 +1881,8 @@ export async function exportProjectToMp4(
         });
       }, 900);
 
-      const fastTimed = makeTimedController(115_000);
+      const fastTimeoutMs = Math.max(250_000, Math.min(610_000, Math.round(totalDuration * 3200)));
+      const fastTimed = makeTimedController(fastTimeoutMs);
       try {
         const fastResp = await fetch("/api/export-fast-mp4", {
           method: "POST",
@@ -1930,7 +1933,7 @@ export async function exportProjectToMp4(
           } catch {
             // plain text
           }
-          throw new Error(errMsg || "Failed to export 9:16 MP4.");
+          throw new Error(formatReadableApiError(errMsg, "Failed to export 9:16 MP4."));
         }
       } catch (err) {
         throwIfAborted(signal);
@@ -2873,7 +2876,7 @@ export async function exportProjectToMp3(
   throwIfAborted(signal);
   onProgress({ phase: "muxing", percent: 65, detail: "Encoding MP3 audio..." });
 
-  const exportTimed = makeTimedController(120_000);
+  const exportTimed = makeTimedController(240_000);
   let resp: Response;
   try {
     resp = await fetch("/api/export-mp3", {
@@ -2907,7 +2910,7 @@ export async function exportProjectToMp3(
     } catch {
       // Keep plain text
     }
-    throw new Error(errMsg || "Failed to export MP3 audio.");
+    throw new Error(formatReadableApiError(errMsg, "Failed to export MP3 audio."));
   }
 
   const data = (await resp.json()) as {

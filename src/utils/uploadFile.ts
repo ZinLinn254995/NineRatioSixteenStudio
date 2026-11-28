@@ -81,8 +81,19 @@ export function formatReadableApiError(
   ) {
     return "Gemini API key is invalid or lacks permission. Please check your API key in Settings > Secrets.";
   }
+  if (
+    (raw instanceof DOMException && raw.name === "NotReadableError") ||
+    /NotReadableError|could not be read|permission problems that have occurred after a reference to a file was acquired/i.test(
+      msg
+    )
+  ) {
+    return "Your browser lost read access to this local video file (common on Android after switching tabs or sleep). Please re-link or re-select the video file and try again.";
+  }
+  if (/Command failed:\s*ffmpeg|\[libx264|frame=\s*\d+\s+fps=/i.test(msg)) {
+    return "Video encoding timed out or failed on the server. Please try again.";
+  }
 
-  return msg;
+  return msg.length > 320 ? `${msg.slice(0, 317)}...` : msg;
 }
 
 export async function readStreamingProcessResponse<T extends { error?: string }>(
