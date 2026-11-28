@@ -51,10 +51,6 @@ import type {
   SpeakingScene,
   SubtitleGenerationProgress,
   SubtitleItem,
-  SubtitleSourceLanguage,
-  TranscriptModelId,
-  TranscriptProgress,
-  TranscriptResult,
   TranslationTone,
   VideoEditSettings,
   VideoProject,
@@ -71,7 +67,6 @@ import { ProjectTimelineEditor } from "./ProjectTimelineEditor";
 import { SubtitleStylePanel } from "./SubtitleStylePanel";
 import { SubtitleDesignPanel, isSubtitleDesignModified } from "./SubtitleDesignPanel";
 import { SubtitleClipEditor } from "./SubtitleClipEditor";
-import { TranscriptPanel } from "./TranscriptPanel";
 import { SavedProjectsPanel } from "./SavedProjectsPanel";
 import { PasteTranscriptModal } from "./PasteTranscriptModal";
 import {
@@ -106,7 +101,7 @@ const NOOP_RESTORE_SNAPSHOT = () => {};
 
 export type WorkspaceTab = "youtube" | "studio" | "projects";
 
-export type StudioSectionId = "edit" | "visual" | "audio" | "subtitle" | "transcript";
+export type StudioSectionId = "edit" | "visual" | "audio" | "subtitle";
 
 interface WorkspaceSidebarProps {
   activeTab: WorkspaceTab;
@@ -189,7 +184,7 @@ interface WorkspaceSidebarProps {
     },
     opts?: { select?: boolean; seekToStart?: boolean }
   ) => void;
-  onOpenPasteTranscript?: () => void;
+  onOpenGenerateSubtitles?: () => void;
   onClearAllSubtitles?: () => void;
   onDeleteSubtitle: (id: string) => void;
   onUpdateSubtitleTiming: (id: string, startTime: number, endTime: number) => void;
@@ -285,20 +280,6 @@ interface WorkspaceSidebarProps {
   onApplyPasteTranscriptSync?: (nextSubtitles: SubtitleItem[], changedCount: number) => void;
   onPreviewSourceSeek?: (sourceSec: number | null, opts?: { skipResync?: boolean }) => void;
   hideCaptions?: boolean;
-  transcriptModelId?: TranscriptModelId;
-  transcriptLanguage?: SubtitleSourceLanguage;
-  transcriptWordTimestamps?: boolean;
-  isTranscribingStandalone?: boolean;
-  transcriptProgress?: TranscriptProgress | null;
-  transcriptError?: string | null;
-  transcriptResult?: TranscriptResult | null;
-  onChangeTranscriptModel?: (modelId: TranscriptModelId) => void;
-  onChangeTranscriptLanguage?: (lang: SubtitleSourceLanguage) => void;
-  onChangeTranscriptWordTimestamps?: (enabled: boolean) => void;
-  onStartStandaloneTranscript?: () => void;
-  onCancelStandaloneTranscript?: () => void;
-  onClearTranscriptError?: () => void;
-  onUpdateTranscriptSegmentText?: (segmentId: string, text: string) => void;
 }
 
 const SUBTITLE_TONE_OPTIONS: { id: TranslationTone; label: string }[] = [
@@ -385,7 +366,7 @@ export function WorkspaceSidebar({
   onUpdateWordGloss,
   onFindReplaceSubtitles,
   onAddSubtitle,
-  onOpenPasteTranscript,
+  onOpenGenerateSubtitles,
   onClearAllSubtitles,
   onDeleteSubtitle,
   onUpdateSubtitleTiming,
@@ -458,20 +439,6 @@ export function WorkspaceSidebar({
   onApplyPasteTranscriptSync,
   onPreviewSourceSeek,
   hideCaptions = false,
-  transcriptModelId = "whisper-base",
-  transcriptLanguage = "auto",
-  transcriptWordTimestamps = false,
-  isTranscribingStandalone = false,
-  transcriptProgress = null,
-  transcriptError = null,
-  transcriptResult = null,
-  onChangeTranscriptModel,
-  onChangeTranscriptLanguage,
-  onChangeTranscriptWordTimestamps,
-  onStartStandaloneTranscript,
-  onCancelStandaloneTranscript,
-  onClearTranscriptError,
-  onUpdateTranscriptSegmentText,
 }: WorkspaceSidebarProps) {
   const scrollRootRef = useRef<HTMLDivElement | null>(null);
   const loadMoreSentinelRef = useRef<HTMLDivElement | null>(null);
@@ -1083,15 +1050,6 @@ export function WorkspaceSidebar({
       label: "Subtitle",
       icon: Captions,
       dirty: isSubtitleDesignModified(editSettings),
-    },
-    {
-      id: "transcript",
-      label: "Transcript",
-      icon: FileText,
-      count:
-        transcriptResult && transcriptResult.segments.length > 0
-          ? transcriptResult.segments.length
-          : undefined,
     },
   ];
 
@@ -1834,7 +1792,7 @@ export function WorkspaceSidebar({
                         onUpdateScenes={onUpdateProjectScenes}
                         onUpdateSubtitleTiming={onUpdateSubtitleTiming}
                         onAddSubtitle={onAddSubtitle}
-                        onOpenPasteTranscript={onOpenPasteTranscript}
+                        onOpenGenerateSubtitles={onOpenGenerateSubtitles}
                         onClearAllSubtitles={onClearAllSubtitles}
                         onShiftAllSubtitles={onShiftAllSubtitles}
                         onUndo={onUndoProp ?? onUndoSubtitles}
@@ -2444,7 +2402,7 @@ export function WorkspaceSidebar({
                         onUpdateScenes={onUpdateProjectScenes}
                         onUpdateSubtitleTiming={onUpdateSubtitleTiming}
                         onAddSubtitle={onAddSubtitle}
-                        onOpenPasteTranscript={onOpenPasteTranscript}
+                        onOpenGenerateSubtitles={onOpenGenerateSubtitles}
                         onClearAllSubtitles={onClearAllSubtitles}
                         onEditSubtitle={onEditSubtitle}
                         onDeleteSubtitle={onDeleteSubtitle}
@@ -4335,47 +4293,6 @@ export function WorkspaceSidebar({
                 />
               </div>
             )}
-
-            {studioSection === "transcript" && (
-              <div
-                aria-label="Audio transcript"
-                className="min-h-full"
-              >
-                <TranscriptPanel
-                  hasVideo={hasStudioVideo}
-                  videoTitle={localMedia?.title || project?.title || "Video"}
-                  durationSec={
-                    hasGeneratedProject(project)
-                      ? project.targetDurationSec
-                      : selectedScenes.length > 0
-                        ? selectedScenes.reduce(
-                            (acc, sc) => acc + Math.max(0, sc.endSec - sc.startSec),
-                            0
-                          )
-                        : localMedia?.durationSec ?? 0
-                  }
-                  selectedModelId={transcriptModelId}
-                  selectedLanguage={transcriptLanguage}
-                  wordTimestamps={transcriptWordTimestamps}
-                  isTranscribing={isTranscribingStandalone}
-                  progress={transcriptProgress}
-                  error={transcriptError}
-                  result={transcriptResult}
-                  onChangeModel={(m) => onChangeTranscriptModel?.(m)}
-                  onChangeLanguage={(lang) => onChangeTranscriptLanguage?.(lang)}
-                  onChangeWordTimestamps={(enabled) =>
-                    onChangeTranscriptWordTimestamps?.(enabled)
-                  }
-                  onStartTranscribe={() => onStartStandaloneTranscript?.()}
-                  onCancelTranscribe={() => onCancelStandaloneTranscript?.()}
-                  onClearError={() => onClearTranscriptError?.()}
-                  onUpdateSegmentText={(segId, text) =>
-                    onUpdateTranscriptSegmentText?.(segId, text)
-                  }
-                  onSeek={(sec) => onSeek(sec)}
-                />
-              </div>
-            )}
           </div>
           )}
 
@@ -4400,7 +4317,7 @@ export function WorkspaceSidebar({
                 onUpdateScenes={onUpdateProjectScenes}
                 onUpdateSubtitleTiming={onUpdateSubtitleTiming}
                 onAddSubtitle={onAddSubtitle}
-                onOpenPasteTranscript={onOpenPasteTranscript}
+                onOpenGenerateSubtitles={onOpenGenerateSubtitles}
                 onClearAllSubtitles={onClearAllSubtitles}
                 onEditSubtitle={onEditSubtitle}
                 onDeleteSubtitle={onDeleteSubtitle}

@@ -125,6 +125,7 @@ interface CompletedExportEntry {
   filePath: string;
   dirPath: string;
   fileName: string;
+  mimeType: "video/mp4" | "audio/mpeg";
   sizeBytes: number;
   createdAt: number;
 }
@@ -132,27 +133,41 @@ interface CompletedExportEntry {
 const COMPLETED_EXPORT_TTL_MS = 15 * 60 * 1000;
 const completedExports = new Map<string, CompletedExportEntry>();
 
-function sanitizeExportFileName(rawName?: string): string {
-  const base = String(rawName || "thai-burmese-9x16.mp4")
+function sanitizeExportFileName(rawName?: string, format?: "mp4" | "mp3"): string {
+  const inferredExt: "mp4" | "mp3" =
+    format === "mp3" || String(rawName || "").toLowerCase().endsWith(".mp3") ? "mp3" : "mp4";
+  const defaultName =
+    inferredExt === "mp3" ? "thai-burmese-audio.mp3" : "thai-burmese-9x16.mp4";
+  const base = String(rawName || defaultName)
     .replace(/[^a-zA-Z0-9._-]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 64);
-  if (!base) return "thai-burmese-9x16.mp4";
+  if (!base) return defaultName;
+  if (inferredExt === "mp3") {
+    return base.toLowerCase().endsWith(".mp3") ? base : `${base.replace(/\.mp4$/i, "")}.mp3`;
+  }
   return base.toLowerCase().endsWith(".mp4") ? base : `${base}.mp4`;
 }
 
 async function registerCompletedExport(
-  sourceMp4Path: string,
-  fileName?: string
+  sourceFilePath: string,
+  fileName?: string,
+  mimeType?: "video/mp4" | "audio/mpeg"
 ): Promise<CompletedExportEntry> {
   const id = crypto.randomBytes(12).toString("hex");
   const dirPath = await fs.promises.mkdtemp(path.join(os.tmpdir(), "thai-export-"));
-  const safeFileName = sanitizeExportFileName(fileName);
+  const resolvedMimeType: "video/mp4" | "audio/mpeg" =
+    mimeType ??
+    (String(fileName || "").toLowerCase().endsWith(".mp3") ? "audio/mpeg" : "video/mp4");
+  const safeFileName = sanitizeExportFileName(
+    fileName,
+    resolvedMimeType === "audio/mpeg" ? "mp3" : "mp4"
+  );
   const destPath = path.join(dirPath, safeFileName);
   try {
-    await fs.promises.rename(sourceMp4Path, destPath);
+    await fs.promises.rename(sourceFilePath, destPath);
   } catch {
-    await fs.promises.copyFile(sourceMp4Path, destPath);
+    await fs.promises.copyFile(sourceFilePath, destPath);
   }
   const stat = await fs.promises.stat(destPath);
   const entry: CompletedExportEntry = {
@@ -160,6 +175,7 @@ async function registerCompletedExport(
     filePath: destPath,
     dirPath,
     fileName: safeFileName,
+    mimeType: resolvedMimeType,
     sizeBytes: stat.size,
     createdAt: Date.now(),
   };
@@ -4860,6 +4876,365 @@ RULES:
   }
 });
 
+function normalizeDetectedSourceLanguage(
+  raw?: unknown
+): SubtitleGenerationConfig["sourceLanguage"] | null {
+  if (typeof raw !== "string") return null;
+  const val = raw.trim().toLowerCase();
+  if (!val || val === "auto") return null;
+  const aliasMap: Record<string, SubtitleGenerationConfig["sourceLanguage"]> = {
+    th: "th",
+    tha: "th",
+    thai: "th",
+    my: "my",
+    mya: "my",
+    bur: "my",
+    burmese: "my",
+    myanmar: "my",
+    en: "en",
+    eng: "en",
+    english: "en",
+    zh: "zh",
+    zho: "zh",
+    chi: "zh",
+    chinese: "zh",
+    mandarin: "zh",
+    ja: "ja",
+    jpn: "ja",
+    japanese: "ja",
+    ko: "ko",
+    kor: "ko",
+    korean: "ko",
+    vi: "vi",
+    vie: "vi",
+    vietnamese: "vi",
+    lo: "lo",
+    lao: "lo",
+    km: "km",
+    khm: "km",
+    khmer: "km",
+    id: "id",
+    ind: "id",
+    indonesian: "id",
+    ms: "id",
+    msa: "id",
+    malay: "id",
+    hi: "hi",
+    hin: "hi",
+    hindi: "hi",
+    es: "es",
+    spa: "es",
+    spanish: "es",
+    fr: "fr",
+    fra: "fr",
+    fre: "fr",
+    french: "fr",
+  };
+  return aliasMap[val] ?? null;
+}
+
+app.post("/api/translate-transcript-segments", async (req, res) => {
+  const {
+    segments,
+    generationConfig,
+    translationTone,
+    detectedLanguage,
+    stream,
+  } = (req.body || {}) as {
+    segments?: Array<{
+      id?: string;
+      startSec?: number;
+      endSec?: number;
+      text?: string;
+      words?: Array<{ text?: string; startSec?: number; endSec?: number }>;
+    }>;
+    generationConfig?: Partial<SubtitleGenerationConfig>;
+    translationTone?: TranslationTone;
+    detectedLanguage?: string;
+    stream?: boolean;
+  };
+
+  const wantStream =
+    Boolean(stream) || Boolean(req.headers.accept?.includes("application/x-ndjson"));
+  let clientClosed = false;
+  req.on("close", () => {
+    clientClosed = true;
+  });
+
+  const sendNdjson = (payload: Record<string, unknown>) => {
+    if (!res.writableEnded && !clientClosed) {
+      res.write(`${JSON.stringify(payload)}\n`);
+    }
+  };
+
+  try {
+    if (!Array.isArray(segments) || segments.length === 0) {
+      res.status(400).json({ error: "No transcript segments provided to translate." });
+      return;
+    }
+
+    const sanitizedSegments = segments
+      .slice(0, 500)
+      .map((seg, idx) => {
+        const id =
+          typeof seg?.id === "string" && seg.id.trim()
+            ? seg.id.trim().slice(0, 80)
+            : `tr-seg-${idx + 1}`;
+        const startSec = Number.isFinite(Number(seg?.startSec))
+          ? Math.max(0, Number(seg?.startSec))
+          : 0;
+        const endSec = Number.isFinite(Number(seg?.endSec))
+          ? Math.max(startSec + 0.15, Number(seg?.endSec))
+          : startSec + 1.5;
+        const text = typeof seg?.text === "string" ? seg.text.trim().slice(0, 1200) : "";
+        const words = Array.isArray(seg?.words)
+          ? seg.words
+              .map((w) => ({
+                text: typeof w?.text === "string" ? w.text.trim() : "",
+                startSec: Number(w?.startSec),
+                endSec: Number(w?.endSec),
+              }))
+              .filter(
+                (w) =>
+                  w.text.length > 0 &&
+                  Number.isFinite(w.startSec) &&
+                  Number.isFinite(w.endSec)
+              )
+          : [];
+        return { id, startSec, endSec, text, words };
+      })
+      .filter((s) => s.text.length > 0);
+
+    if (sanitizedSegments.length === 0) {
+      res.status(400).json({ error: "Transcript segments contain no spoken text." });
+      return;
+    }
+
+    if (wantStream) {
+      res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache, no-transform");
+      res.setHeader("X-Accel-Buffering", "no");
+      res.flushHeaders?.();
+    }
+
+    const tone = normalizeTranslationTone(translationTone);
+    const baseCfg = normalizeSubtitleGenerationConfig(generationConfig, tone);
+    const detectedSource = normalizeDetectedSourceLanguage(detectedLanguage);
+    const effectiveSourceLanguage =
+      baseCfg.sourceLanguage === "auto" && detectedSource
+        ? detectedSource
+        : baseCfg.sourceLanguage;
+    const effectiveCfg: SubtitleGenerationConfig = {
+      ...baseCfg,
+      sourceLanguage: effectiveSourceLanguage,
+    };
+
+    const emitTranslateProgress = (percent: number, label: string) => {
+      if (wantStream) {
+        sendNdjson({
+          type: "progress",
+          stage: "generating",
+          percent: Math.max(0, Math.min(100, Math.round(percent))),
+          label,
+        });
+      }
+    };
+
+    const ai = getGeminiClient();
+    const chunkSize = 25;
+    const totalCount = sanitizedSegments.length;
+    const translatedById = new Map<
+      string,
+      {
+        thaiScript: string;
+        thaiPhonetic: string;
+        burmese: string;
+        words: RawSceneWord[];
+      }
+    >();
+
+    emitTranslateProgress(8, `Translating ${totalCount} transcript lines...`);
+
+    for (let i = 0; i < sanitizedSegments.length; i += chunkSize) {
+      if (clientClosed) {
+        return;
+      }
+
+      const slice = sanitizedSegments.slice(i, i + chunkSize);
+      const prevContext = sanitizedSegments.slice(Math.max(0, i - 2), i).map((s) => ({
+        startSec: Number(s.startSec.toFixed(2)),
+        endSec: Number(s.endSec.toFixed(2)),
+        spokenText: s.text,
+      }));
+      const compactInput = slice.map((s) => ({
+        id: s.id,
+        startSec: Number(s.startSec.toFixed(2)),
+        endSec: Number(s.endSec.toFixed(2)),
+        spokenText: s.text,
+      }));
+
+      const contextSection =
+        prevContext.length > 0
+          ? `\nPRECEDING CONTEXT LINES (for pronoun, speaker & topic continuity — do NOT return these in "items"):\n${JSON.stringify(prevContext)}\n`
+          : "";
+
+      const prompt = `Translate and format the verbatim spoken transcript segments below into structured subtitle cards matching every style and language rule below.
+
+First read ALL segments in the batch together to understand the topic, speakers, interpersonal relationships, and emotional situation so pronouns, kinship terms, and phrasing stay completely cohesive.
+${contextSection}
+${getAdvancedStylePromptBlock(effectiveCfg)}
+
+INPUT TRANSCRIPT SEGMENTS (JSON):
+${JSON.stringify(compactInput)}
+
+STRICT OUTPUT RULES:
+- Return an entry in "items" for EVERY input segment using its EXACT matching "id" (do NOT skip, merge, or split segments).
+- Follow the OUTPUT FIELD MAPPING above strictly for "thaiScript", "thaiPhonetic", "burmese", and "words".
+- Keep "words" tokens aligned space-for-space in exact reading order with "thaiPhonetic" (each having "phonetic", "thai", and concise "burmeseGloss").`;
+
+      const batchNum = Math.floor(i / chunkSize) + 1;
+      const totalBatches = Math.ceil(totalCount / chunkSize);
+      emitTranslateProgress(
+        10 + Math.round((i / totalCount) * 80),
+        totalBatches > 1
+          ? `Translating subtitles (${batchNum}/${totalBatches})...`
+          : `Translating ${totalCount} subtitle lines...`
+      );
+
+      const resp = await generateGroundedWithFailover(
+        ai,
+        prompt,
+        batchRetranslateSchema,
+        ThinkingLevel.LOW,
+        {
+          systemInstruction: buildTranslatorSystemInstruction({
+            includeAudioSegmentation: false,
+            sourceLangCode:
+              effectiveSourceLanguage === "auto" ? "th" : effectiveSourceLanguage,
+            targetLangCode: effectiveCfg.targetLanguage,
+          }),
+          onRetry: ({ attempt, maxAttempts }) => {
+            emitTranslateProgress(
+              10 + Math.round((i / totalCount) * 80),
+              `AI busy, retrying translation (${attempt}/${maxAttempts})...`
+            );
+          },
+        }
+      );
+
+      const parsed = JSON.parse((resp.text || "{}").trim()) as {
+        items?: Array<{
+          id?: string;
+          thaiScript?: string;
+          thaiPhonetic?: string;
+          burmese?: string;
+          words?: RawSceneWord[];
+        }>;
+      };
+
+      for (const item of Array.isArray(parsed.items) ? parsed.items : []) {
+        if (!item?.id) continue;
+        translatedById.set(item.id, {
+          thaiScript: (item.thaiScript || "").trim(),
+          thaiPhonetic: (item.thaiPhonetic || "").trim(),
+          burmese: (item.burmese || "").trim(),
+          words: Array.isArray(item.words) ? item.words : [],
+        });
+      }
+    }
+
+    if (clientClosed) {
+      return;
+    }
+
+    emitTranslateProgress(95, "Finalizing timeline subtitles...");
+
+    const items = sanitizedSegments.map((seg) => {
+      const patch = translatedById.get(seg.id);
+      const lineDur = Math.max(0.15, seg.endSec - seg.startSec);
+      const fallbackText = seg.text;
+      const thaiPhonetic = patch?.thaiPhonetic || fallbackText;
+      const thaiScript =
+        effectiveCfg.includeNativeScript || effectiveCfg.subtitleFormat === "bilingual_native"
+          ? patch?.thaiScript || fallbackText
+          : "";
+      const burmese =
+        effectiveCfg.subtitleFormat === "translation_only" ||
+        effectiveCfg.subtitleFormat === "original_only" ||
+        effectiveCfg.targetLanguage === "none"
+          ? ""
+          : patch?.burmese || "";
+
+      const rawWords: RawSceneWord[] =
+        patch && patch.words.length > 0
+          ? patch.words.map((w, wi) => {
+              const matchedWhisperWord =
+                seg.words.length === patch.words.length ? seg.words[wi] : undefined;
+              return {
+                phonetic: (w.phonetic || "").trim() || fallbackText,
+                thai: (w.thai || "").trim() || (w.phonetic || "").trim() || fallbackText,
+                burmeseGloss: effectiveCfg.includeWordGloss
+                  ? (w.burmeseGloss || "").trim()
+                  : "",
+                ...(matchedWhisperWord
+                  ? {
+                      startSec: Math.max(0, matchedWhisperWord.startSec - seg.startSec),
+                      endSec: Math.max(0.05, matchedWhisperWord.endSec - seg.startSec),
+                    }
+                  : {}),
+              };
+            })
+          : thaiPhonetic
+              .split(/\s+/)
+              .filter(Boolean)
+              .map((tok, wi) => {
+                const matchedWhisperWord =
+                  seg.words.length > 0 && seg.words[wi] ? seg.words[wi] : undefined;
+                return {
+                  phonetic: tok,
+                  thai: tok,
+                  burmeseGloss: "",
+                  ...(matchedWhisperWord
+                    ? {
+                        startSec: Math.max(0, matchedWhisperWord.startSec - seg.startSec),
+                        endSec: Math.max(0.05, matchedWhisperWord.endSec - seg.startSec),
+                      }
+                    : {}),
+                };
+              });
+
+      const alignedWords = buildAlignedWords(rawWords, 0, lineDur, false, 0);
+
+      return {
+        id: seg.id,
+        originalSpokenText: fallbackText,
+        thaiScript,
+        thaiPhonetic,
+        burmese,
+        words: alignedWords,
+      };
+    });
+
+    if (wantStream) {
+      sendNdjson({ type: "progress", stage: "generating", percent: 100, label: "Done" });
+      sendNdjson({ type: "result", data: { items } });
+      res.end();
+      return;
+    }
+
+    res.json({ items });
+  } catch (err) {
+    console.error("Translate transcript segments error:", err);
+    const formatted = formatGeminiError(err, "Failed to translate transcript into subtitles.");
+    if (wantStream && res.headersSent) {
+      sendNdjson({ type: "error", error: formatted.message });
+      res.end();
+      return;
+    }
+    res.status(formatted.status).json({ error: formatted.message });
+  }
+});
+
 const resyncSubtitlesSchema = {
   type: Type.OBJECT,
   properties: {
@@ -5911,7 +6286,10 @@ app.post("/api/prepare-export-clip", async (req, res) => {
   }
 });
 
-function buildVoiceAudioFilters(voiceSettings?: VoiceSettings): string[] {
+function buildVoiceAudioFilters(
+  voiceSettings?: VoiceSettings,
+  options?: { padInfinite?: boolean }
+): string[] {
   const audioFilters: string[] = [];
   let hasNonCleanEffect = false;
 
@@ -6011,7 +6389,9 @@ function buildVoiceAudioFilters(voiceSettings?: VoiceSettings): string[] {
     }
   }
 
-  audioFilters.push("apad");
+  if (options?.padInfinite !== false) {
+    audioFilters.push("apad");
+  }
   return audioFilters;
 }
 
@@ -6884,7 +7264,7 @@ app.get("/api/download-export/:exportId", (req, res) => {
   const entry = completedExports.get(exportId);
   if (!entry || !fs.existsSync(entry.filePath)) {
     completedExports.delete(exportId);
-    res.status(404).json({ error: "Exported video expired or not found. Please export again." });
+    res.status(404).json({ error: "Exported file expired or not found. Please export again." });
     return;
   }
   // Refresh TTL on download so user can re-save or finish chunked transfer safely
@@ -6893,7 +7273,7 @@ app.get("/api/download-export/:exportId", (req, res) => {
   const rangeHeader = typeof req.headers.range === "string" ? req.headers.range.trim() : "";
 
   res.setHeader("Accept-Ranges", "bytes");
-  res.setHeader("Content-Type", "video/mp4");
+  res.setHeader("Content-Type", entry.mimeType || "video/mp4");
   res.setHeader("Content-Disposition", `attachment; filename="${entry.fileName}"`);
   res.setHeader("Cache-Control", "no-store");
 
@@ -6923,7 +7303,7 @@ app.get("/api/download-export/:exportId", (req, res) => {
     const stream = fs.createReadStream(entry.filePath, { start, end });
     stream.on("error", () => {
       if (!res.headersSent) {
-        res.status(500).json({ error: "Failed to stream exported video chunk." });
+        res.status(500).json({ error: "Failed to stream exported file chunk." });
       } else {
         res.end();
       }
@@ -6936,12 +7316,284 @@ app.get("/api/download-export/:exportId", (req, res) => {
   const stream = fs.createReadStream(entry.filePath);
   stream.on("error", () => {
     if (!res.headersSent) {
-      res.status(500).json({ error: "Failed to stream exported video." });
+      res.status(500).json({ error: "Failed to stream exported file." });
     } else {
       res.end();
     }
   });
   stream.pipe(res);
+});
+
+// Export edited project audio (scenes + voice filters + effective speed) as 192kbps MP3
+app.post("/api/export-mp3", async (req, res) => {
+  const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "thai-mp3-"));
+  const ffmpegAbort = new AbortController();
+  const onClientClose = () => {
+    if (!res.writableEnded) {
+      ffmpegAbort.abort();
+    }
+  };
+  res.on("close", onClientClose);
+
+  try {
+    const {
+      uploadId,
+      scenes = [],
+      voiceSettings,
+      fileName = "thai-burmese-audio.mp3",
+      returnDownloadUrl = true,
+    } = (req.body || {}) as {
+      uploadId?: string;
+      scenes?: SpeakingScene[];
+      voiceSettings?: VoiceSettings;
+      fileName?: string;
+      returnDownloadUrl?: boolean;
+    };
+
+    const execOpts = { ...FFMPEG_EXEC_OPTS, signal: ffmpegAbort.signal };
+    const normalizedScenes = (Array.isArray(scenes) ? scenes : [])
+      .map((sc) => {
+        const startSec = Math.max(0, Number(sc.startSec) || 0);
+        const rawEnd = Number(sc.endSec);
+        const rawDur = Number(sc.durationSec);
+        const durationSec =
+          Number.isFinite(rawEnd) && rawEnd > startSec
+            ? Math.max(0.1, rawEnd - startSec)
+            : Math.max(0.1, Number.isFinite(rawDur) ? rawDur : 0.1);
+        const mediaType = sc.mediaType === "image" ? "image" : "video";
+        const scUploadId =
+          typeof sc.uploadId === "string" && sc.uploadId.trim() ? sc.uploadId.trim() : uploadId;
+        return { startSec, durationSec, mediaType, uploadId: scUploadId };
+      })
+      .filter((sc) => Number.isFinite(sc.startSec) && Number.isFinite(sc.durationSec));
+
+    if (normalizedScenes.length === 0) {
+      res.status(400).json({ error: "No scenes provided for MP3 export." });
+      return;
+    }
+
+    const hasAnyAudioUpload =
+      Boolean(uploadId) ||
+      normalizedScenes.some((sc) => sc.mediaType !== "image" && Boolean(sc.uploadId));
+    if (!hasAnyAudioUpload) {
+      res.status(400).json({ error: "No source video upload found for MP3 export." });
+      return;
+    }
+
+    const segResults: (string | null)[] = new Array(normalizedScenes.length).fill(null);
+    const hasAudioByUploadId = new Map<string, boolean>();
+    let hasAnyRealAudio = false;
+    let foundUploadSession = false;
+
+    const writeSilenceSegment = async (segOut: string, durationSec: number): Promise<boolean> => {
+      try {
+        await execFileAsync(
+          "ffmpeg",
+          [
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=44100:cl=stereo",
+            "-t",
+            durationSec.toFixed(4),
+            "-ac",
+            "2",
+            "-ar",
+            "44100",
+            segOut,
+          ],
+          execOpts
+        );
+        return fs.existsSync(segOut) && fs.statSync(segOut).size > 44;
+      } catch {
+        return false;
+      }
+    };
+
+    const extractOne = async (i: number) => {
+      if (ffmpegAbort.signal.aborted) return;
+      const sc = normalizedScenes[i];
+      const segOut = path.join(tmpDir, `seg-${i}.wav`);
+      let extracted = false;
+
+      if (sc.mediaType !== "image" && sc.uploadId) {
+        await withUploadSessionLock(
+          sc.uploadId,
+          async (uploadedPath) => {
+            foundUploadSession = true;
+            let hasAudio = hasAudioByUploadId.get(sc.uploadId!);
+            if (hasAudio === undefined) {
+              const sourceProbe = await probeMediaInfo(uploadedPath);
+              hasAudio = sourceProbe.hasAudio;
+              hasAudioByUploadId.set(sc.uploadId!, hasAudio);
+            }
+            if (!hasAudio) return;
+
+            try {
+              await execFileAsync(
+                "ffmpeg",
+                [
+                  "-y",
+                  "-vn",
+                  "-ss",
+                  String(sc.startSec),
+                  "-t",
+                  String(sc.durationSec),
+                  "-i",
+                  uploadedPath,
+                  "-af",
+                  `aresample=44100:async=1,apad,atrim=0:${sc.durationSec.toFixed(4)}`,
+                  "-ac",
+                  "2",
+                  "-ar",
+                  "44100",
+                  segOut,
+                ],
+                execOpts
+              );
+              extracted = fs.existsSync(segOut) && fs.statSync(segOut).size > 44;
+              if (extracted) hasAnyRealAudio = true;
+            } catch {
+              extracted = false;
+            }
+          },
+          { markFinalized: true }
+        );
+      }
+
+      if (!extracted && !ffmpegAbort.signal.aborted) {
+        extracted = await writeSilenceSegment(segOut, sc.durationSec);
+      }
+      if (extracted) {
+        segResults[i] = segOut;
+      }
+    };
+
+    for (let batchStart = 0; batchStart < normalizedScenes.length; batchStart += 4) {
+      if (ffmpegAbort.signal.aborted) break;
+      const batch: Promise<void>[] = [];
+      for (
+        let idx = batchStart;
+        idx < Math.min(normalizedScenes.length, batchStart + 4);
+        idx++
+      ) {
+        batch.push(extractOne(idx));
+      }
+      await Promise.all(batch);
+    }
+
+    if (ffmpegAbort.signal.aborted) {
+      return;
+    }
+
+    if (!foundUploadSession) {
+      res.status(404).json({ error: "Uploaded source media expired or was not found. Please try exporting again." });
+      return;
+    }
+
+    const segFiles = segResults.filter((s): s is string => Boolean(s));
+    if (segFiles.length === 0 || !hasAnyRealAudio) {
+      res.status(422).json({ error: "No audio track was found in this project's clips." });
+      return;
+    }
+
+    let origWavPath = segFiles[0];
+    if (segFiles.length > 1) {
+      origWavPath = path.join(tmpDir, "original-cuts.wav");
+      const concatInputArgs: string[] = [];
+      const concatLabels: string[] = [];
+      for (let i = 0; i < segFiles.length; i++) {
+        concatInputArgs.push("-i", segFiles[i]);
+        concatLabels.push(`[${i}:a]`);
+      }
+      await execFileAsync(
+        "ffmpeg",
+        [
+          "-y",
+          ...concatInputArgs,
+          "-filter_complex",
+          `${concatLabels.join("")}concat=n=${segFiles.length}:v=0:a=1[outa]`,
+          "-map",
+          "[outa]",
+          "-ac",
+          "2",
+          "-ar",
+          "44100",
+          origWavPath,
+        ],
+        execOpts
+      );
+    }
+
+    const audioFilters = buildVoiceAudioFilters(voiceSettings, { padInfinite: false });
+    const outputMp3Path = path.join(tmpDir, "output.mp3");
+    await execFileAsync(
+      "ffmpeg",
+      [
+        "-y",
+        "-i",
+        origWavPath,
+        ...(audioFilters.length > 0 ? ["-af", audioFilters.join(",")] : []),
+        "-vn",
+        "-sn",
+        "-dn",
+        "-c:a",
+        "libmp3lame",
+        "-b:a",
+        "192k",
+        "-ar",
+        "44100",
+        "-ac",
+        "2",
+        "-id3v2_version",
+        "3",
+        outputMp3Path,
+      ],
+      execOpts
+    );
+
+    if (ffmpegAbort.signal.aborted) {
+      return;
+    }
+    if (!fs.existsSync(outputMp3Path) || fs.statSync(outputMp3Path).size < 256) {
+      res.status(500).json({ error: "Failed to encode MP3 audio file." });
+      return;
+    }
+
+    if (returnDownloadUrl) {
+      const entry = await registerCompletedExport(outputMp3Path, fileName, "audio/mpeg");
+      res.json({
+        exportId: entry.id,
+        downloadUrl: `/api/download-export/${encodeURIComponent(entry.id)}`,
+        fileName: entry.fileName,
+        sizeBytes: entry.sizeBytes,
+      });
+      return;
+    }
+
+    const outBuffer = await fs.promises.readFile(outputMp3Path);
+    res.setHeader("Content-Type", "audio/mpeg");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${sanitizeExportFileName(fileName, "mp3")}"`
+    );
+    res.setHeader("Content-Length", String(outBuffer.length));
+    res.send(outBuffer);
+  } catch (err) {
+    if (ffmpegAbort.signal.aborted) {
+      return;
+    }
+    console.error("Export MP3 error:", err);
+    if (!res.headersSent) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : "Failed to export MP3 audio.",
+      });
+    }
+  } finally {
+    res.off("close", onClientClose);
+    await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
 });
 
 app.post("/api/extract-audio-pcm", async (req, res) => {

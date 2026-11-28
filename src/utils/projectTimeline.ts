@@ -28,16 +28,45 @@ export function ensureSceneIds(scenes: SpeakingScene[]): SpeakingScene[] {
 }
 
 export function withSceneId(sub: SubtitleItem, scenes: SpeakingScene[]): SubtitleItem {
-  const matchedScene = scenes[sub.sceneIndex];
+  if (scenes.length === 0) {
+    return sub.sceneId !== undefined ? { ...sub, sceneId: undefined } : sub;
+  }
+
+  let resolvedIndex =
+    sub.sceneIndex >= 0 && sub.sceneIndex < scenes.length ? sub.sceneIndex : -1;
+
+  if (resolvedIndex === -1 && sub.sceneId) {
+    resolvedIndex = scenes.findIndex((sc) => sc.id === sub.sceneId);
+  }
+
+  if (resolvedIndex === -1) {
+    const midCut = Math.max(0, (sub.startTime + sub.endTime) / 2);
+    let acc = 0;
+    for (let i = 0; i < scenes.length; i++) {
+      const dur = getSceneDurationSec(scenes[i]);
+      if (midCut <= acc + dur || i === scenes.length - 1) {
+        resolvedIndex = i;
+        break;
+      }
+      acc += dur;
+    }
+  }
+
+  const matchedScene = resolvedIndex >= 0 ? scenes[resolvedIndex] : undefined;
   if (matchedScene) {
     const matchedSceneId = matchedScene.id;
     const nextMediaUrl = matchedScene.mediaUrl;
-    if (sub.sceneId === matchedSceneId && sub.mediaUrl === nextMediaUrl) {
+    if (
+      sub.sceneIndex === resolvedIndex &&
+      sub.sceneId === matchedSceneId &&
+      sub.mediaUrl === nextMediaUrl
+    ) {
       return sub;
     }
     return {
       ...sub,
-      ...(matchedSceneId ? { sceneId: matchedSceneId } : {}),
+      sceneIndex: resolvedIndex,
+      ...(matchedSceneId ? { sceneId: matchedSceneId } : { sceneId: undefined }),
       mediaUrl: nextMediaUrl,
     };
   }
@@ -100,6 +129,8 @@ export interface BlockSceneRef {
   sceneId?: string;
   startSec: number;
   endSec: number;
+  cutStart: number;
+  cutEnd: number;
 }
 
 export interface ContiguousClipBlock {
@@ -145,6 +176,8 @@ export function buildContiguousClipBlocks(scenes: SpeakingScene[]): ContiguousCl
         sceneId: sc.id,
         startSec: scStart,
         endSec: scEnd,
+        cutStart: sceneCutStarts[i],
+        cutEnd: sceneCutStarts[i] + dur,
       });
     } else {
       blocks.push({
@@ -160,6 +193,8 @@ export function buildContiguousClipBlocks(scenes: SpeakingScene[]): ContiguousCl
             sceneId: sc.id,
             startSec: scStart,
             endSec: scEnd,
+            cutStart: sceneCutStarts[i],
+            cutEnd: sceneCutStarts[i] + dur,
           },
         ],
       });
@@ -255,28 +290,15 @@ export function mapCutRangeToSourceMetadata(
         Math.max(srcStart + 0.02, Math.min(sc.endSec, sc.startSec + relEnd)).toFixed(3)
       );
       const mediaType = sc.mediaType === "image" ? "image" : "video";
-      const prev = overlaps[overlaps.length - 1];
-      if (
-        prev &&
-        (prev.mediaUrl || "") === (sc.mediaUrl || "") &&
-        prev.mediaType !== "image" &&
-        mediaType !== "image" &&
-        Math.abs(prev.sourceEndSec - srcStart) < 0.03 &&
-        srcEnd > prev.sourceStartSec
-      ) {
-        prev.sourceEndSec = srcEnd;
-        prev.cutOverlapDur += ovEnd - ovStart;
-      } else {
-        overlaps.push({
-          sceneIndex: i,
-          sceneId: sc.id,
-          mediaUrl: sc.mediaUrl,
-          mediaType,
-          cutOverlapDur: ovEnd - ovStart,
-          sourceStartSec: srcStart,
-          sourceEndSec: srcEnd,
-        });
-      }
+      overlaps.push({
+        sceneIndex: i,
+        sceneId: sc.id,
+        mediaUrl: sc.mediaUrl,
+        mediaType,
+        cutOverlapDur: ovEnd - ovStart,
+        sourceStartSec: srcStart,
+        sourceEndSec: srcEnd,
+      });
     }
   }
 
@@ -298,15 +320,61 @@ export function mapCutRangeToSourceMetadata(
     };
   }
 
-  let dominant = overlaps[0];
-  for (let i = 1; i < overlaps.length; i++) {
-    if (overlaps[i].cutOverlapDur > dominant.cutOverlapDur + 0.01) {
-      dominant = overlaps[i];
+  // Group adjacent contiguous video overlaps so top-level sourceStartSec/sourceEndSec spans
+  // the dominant contiguous audio run while sourceSegments retains per-scene ownership.
+  interface MergedSourceRun {
+    mediaUrl?: string;
+    mediaType: "video" | "image";
+    cutOverlapDur: number;
+    sourceStartSec: number;
+    sourceEndSec: number;
+    sceneIndices: Set<number>;
+  }
+  const mergedRuns: MergedSourceRun[] = [];
+  for (const ov of overlaps) {
+    const prevRun = mergedRuns[mergedRuns.length - 1];
+    if (
+      prevRun &&
+      (prevRun.mediaUrl || "") === (ov.mediaUrl || "") &&
+      prevRun.mediaType !== "image" &&
+      ov.mediaType !== "image" &&
+      Math.abs(prevRun.sourceEndSec - ov.sourceStartSec) < 0.03 &&
+      ov.sourceEndSec > prevRun.sourceStartSec
+    ) {
+      prevRun.sourceEndSec = ov.sourceEndSec;
+      prevRun.cutOverlapDur += ov.cutOverlapDur;
+      prevRun.sceneIndices.add(ov.sceneIndex);
+    } else {
+      mergedRuns.push({
+        mediaUrl: ov.mediaUrl,
+        mediaType: ov.mediaType,
+        cutOverlapDur: ov.cutOverlapDur,
+        sourceStartSec: ov.sourceStartSec,
+        sourceEndSec: ov.sourceEndSec,
+        sceneIndices: new Set([ov.sceneIndex]),
+      });
     }
   }
 
-  const sourceStartSec = Number(dominant.sourceStartSec.toFixed(3));
-  const sourceEndSec = Number(Math.max(sourceStartSec + 0.05, dominant.sourceEndSec).toFixed(3));
+  let dominantSceneOverlap = overlaps[0];
+  for (let i = 1; i < overlaps.length; i++) {
+    if (overlaps[i].cutOverlapDur > dominantSceneOverlap.cutOverlapDur + 0.01) {
+      dominantSceneOverlap = overlaps[i];
+    }
+  }
+
+  let dominantRun = mergedRuns[0];
+  for (let i = 1; i < mergedRuns.length; i++) {
+    if (mergedRuns[i].cutOverlapDur > dominantRun.cutOverlapDur + 0.01) {
+      dominantRun = mergedRuns[i];
+    }
+  }
+
+  const useRunSpan = dominantRun.sceneIndices.has(dominantSceneOverlap.sceneIndex);
+  const rawSrcStart = useRunSpan ? dominantRun.sourceStartSec : dominantSceneOverlap.sourceStartSec;
+  const rawSrcEnd = useRunSpan ? dominantRun.sourceEndSec : dominantSceneOverlap.sourceEndSec;
+  const sourceStartSec = Number(rawSrcStart.toFixed(3));
+  const sourceEndSec = Number(Math.max(sourceStartSec + 0.05, rawSrcEnd).toFixed(3));
 
   const sourceSegments: SubtitleSourceSegment[] | undefined =
     overlaps.length > 1
@@ -319,9 +387,9 @@ export function mapCutRangeToSourceMetadata(
       : undefined;
 
   return {
-    sceneIndex: dominant.sceneIndex,
-    sceneId: dominant.sceneId,
-    mediaUrl: dominant.mediaUrl,
+    sceneIndex: dominantSceneOverlap.sceneIndex,
+    sceneId: dominantSceneOverlap.sceneId,
+    mediaUrl: dominantSceneOverlap.mediaUrl,
     sourceStartSec,
     sourceEndSec,
     ...(sourceSegments ? { sourceSegments } : {}),
@@ -387,7 +455,16 @@ export function remapSubtitlesToScenes(
     if (candidates.length > 1 && preferredSceneId) {
       const ownMatches = candidates.filter((c) => c.hasSceneId);
       if (ownMatches.length > 0) {
-        return ownMatches;
+        // Keep owned blocks plus any non-owned blocks covering a disjoint source portion
+        // (e.g. a split clip that was later reordered), while still dropping cloned duplicates.
+        const nonRedundantOthers = candidates.filter((c) => {
+          if (c.hasSceneId) return false;
+          const overlapsOwn = ownMatches.some(
+            (own) => Math.min(own.ovEnd, c.ovEnd) - Math.max(own.ovStart, c.ovStart) >= minOverlapSec
+          );
+          return !overlapsOwn;
+        });
+        return nonRedundantOthers.length > 0 ? [...ownMatches, ...nonRedundantOthers] : ownMatches;
       }
     }
     return candidates;
@@ -497,17 +574,10 @@ export function remapSubtitlesToScenes(
             }
           }
 
-          let bestGroup = groups[0];
-          let bestGroupDur = 0;
-          for (const grp of groups) {
-            const gDur = grp[grp.length - 1].cutEnd - grp[0].cutStart;
-            if (gDur > bestGroupDur) {
-              bestGroupDur = gDur;
-              bestGroup = grp;
-            }
-          }
+          for (const bestGroup of groups) {
+            const bestGroupDur = bestGroup[bestGroup.length - 1].cutEnd - bestGroup[0].cutStart;
+            if (bestGroupDur < 0.12 || bestGroup.length === 0) continue;
 
-          if (bestGroupDur >= 0.12 && bestGroup.length > 0) {
             const cutStart = Number(bestGroup[0].cutStart.toFixed(2));
             const cutEnd = Number(
               Math.max(cutStart + 0.12, bestGroup[bestGroup.length - 1].cutEnd).toFixed(2)
@@ -519,6 +589,34 @@ export function remapSubtitlesToScenes(
                 dominantSlice = sl;
               }
             }
+
+            // If slices around dominantSlice form a single contiguous source run, span the full run
+            let groupSrcStart = dominantSlice.sourceStartSec;
+            let groupSrcEnd = dominantSlice.sourceEndSec;
+            const domIdx = bestGroup.indexOf(dominantSlice);
+            for (let k = domIdx - 1; k >= 0; k--) {
+              const cur = bestGroup[k];
+              if (
+                (cur.mediaUrl || "") === (dominantSlice.mediaUrl || "") &&
+                Math.abs(groupSrcStart - cur.sourceEndSec) < 0.04
+              ) {
+                groupSrcStart = cur.sourceStartSec;
+              } else {
+                break;
+              }
+            }
+            for (let k = domIdx + 1; k < bestGroup.length; k++) {
+              const cur = bestGroup[k];
+              if (
+                (cur.mediaUrl || "") === (dominantSlice.mediaUrl || "") &&
+                Math.abs(cur.sourceStartSec - groupSrcEnd) < 0.04
+              ) {
+                groupSrcEnd = cur.sourceEndSec;
+              } else {
+                break;
+              }
+            }
+
             const minRatio = bestGroup.reduce((m, s) => Math.min(m, s.ratioStart), 1);
             const maxRatio = bestGroup.reduce((m, s) => Math.max(m, s.ratioEnd), 0);
 
@@ -536,10 +634,12 @@ export function remapSubtitlesToScenes(
                   ...sub,
                   id: uniqueId,
                   sceneIndex: dominantSlice.sceneIndex,
+                  sceneId: nextScenes[dominantSlice.sceneIndex]?.id,
+                  mediaUrl: nextScenes[dominantSlice.sceneIndex]?.mediaUrl,
                   startTime: cutStart,
                   endTime: cutEnd,
-                  sourceStartSec: dominantSlice.sourceStartSec,
-                  sourceEndSec: dominantSlice.sourceEndSec,
+                  sourceStartSec: Number(groupSrcStart.toFixed(2)),
+                  sourceEndSec: Number(Math.max(groupSrcStart + 0.12, groupSrcEnd).toFixed(2)),
                   sourceSegments:
                     bestGroup.length > 1
                       ? bestGroup.map((sl) => ({
@@ -596,17 +696,46 @@ export function remapSubtitlesToScenes(
       usedIds.add(uniqueId);
 
       const mappedSceneIndex = findSceneIndexInBlock(block, ovStart, sub.sceneId);
+      const blockSlices = block.sceneRefs
+        .map((ref) => {
+          const s = Math.max(ovStart, ref.startSec);
+          const e = Math.min(ovEnd, ref.endSec);
+          return e - s >= 0.02
+            ? {
+                ...(ref.sceneId ? { sceneId: ref.sceneId } : {}),
+                ...(nextScenes[ref.sceneIndex]?.mediaUrl !== undefined
+                  ? { mediaUrl: nextScenes[ref.sceneIndex].mediaUrl }
+                  : {}),
+                sourceStartSec: Number(s.toFixed(2)),
+                sourceEndSec: Number(e.toFixed(2)),
+              }
+            : null;
+        })
+        .filter((item): item is NonNullable<typeof item> => item !== null);
+      const dominantSceneRefIndex =
+        blockSlices.length > 1
+          ? block.sceneRefs.reduce((bestIdx, ref) => {
+              const bestRef = block.sceneRefs.find((r) => r.sceneIndex === bestIdx);
+              const bestDur = bestRef
+                ? Math.min(ovEnd, bestRef.endSec) - Math.max(ovStart, bestRef.startSec)
+                : 0;
+              const curDur = Math.min(ovEnd, ref.endSec) - Math.max(ovStart, ref.startSec);
+              return curDur > bestDur ? ref.sceneIndex : bestIdx;
+            }, mappedSceneIndex)
+          : mappedSceneIndex;
       mapped.push(
         withSceneId(
           {
             ...sub,
             id: uniqueId,
-            sceneIndex: mappedSceneIndex,
+            sceneIndex: dominantSceneRefIndex,
+            sceneId: nextScenes[dominantSceneRefIndex]?.id,
+            mediaUrl: nextScenes[dominantSceneRefIndex]?.mediaUrl,
             startTime: cutStart,
             endTime: cutEnd,
             sourceStartSec: Number(ovStart.toFixed(2)),
             sourceEndSec: Number(ovEnd.toFixed(2)),
-            sourceSegments: undefined,
+            sourceSegments: blockSlices.length > 1 ? blockSlices : undefined,
             words: sliceWordsToWindow(sub, clipLeftRatio, clipRightRatio, clippedDur),
             isManuallyEdited: Boolean(sub.isManuallyEdited),
           },

@@ -74,6 +74,7 @@ export interface SubtitleItem {
   sourceSegments?: SubtitleSourceSegment[];
   aiSourceStartSec?: number;
   aiSourceEndSec?: number;
+  aiSourceSegments?: SubtitleSourceSegment[];
   originalSpokenText: string;
   thaiPhonetic: string;
   thaiScript: string;
@@ -348,11 +349,16 @@ export interface TranscriptResult {
   durationSec: number;
   text: string;
   segments: TranscriptSegment[];
+  audioScenes?: Array<{
+    id?: string;
+    startSec: number;
+    endSec: number;
+  }>;
   createdAt: number;
 }
 
 export interface TranscriptProgress {
-  phase: "extracting" | "downloading" | "loading" | "transcribing";
+  phase: "extracting" | "downloading" | "loading" | "transcribing" | "translating";
   label: string;
   percent: number;
   file?: string;

@@ -14,6 +14,7 @@ interface PasteStructuredTranscriptDialogProps {
   scenes?: SpeakingScene[];
   totalDurationSec: number;
   sourceDurationSec?: number;
+  primaryMediaUrl?: string;
   existingSubtitleCount: number;
   onApply: (result: StructuredTranscriptImportResult, mode: "replace" | "append") => void;
 }
@@ -46,6 +47,7 @@ export function PasteStructuredTranscriptDialog({
   scenes,
   totalDurationSec,
   sourceDurationSec,
+  primaryMediaUrl,
   existingSubtitleCount,
   onApply,
 }: PasteStructuredTranscriptDialogProps) {
@@ -84,8 +86,9 @@ export function PasteStructuredTranscriptDialog({
         timingMode,
         scenes,
         sourceDurationSec,
+        primaryMediaUrl,
       }),
-    [rawText, selectedScenes, scenes, totalDurationSec, sourceDurationSec, timingMode]
+    [rawText, selectedScenes, scenes, totalDurationSec, sourceDurationSec, primaryMediaUrl, timingMode]
   );
 
   const effectiveTimelineDur =
@@ -140,8 +143,14 @@ export function PasteStructuredTranscriptDialog({
     }
   };
 
+  const subCount = parsedResult.subtitles.length;
+  const applicableSubCount = parsedResult.subtitles.filter(
+    (s) => effectiveTimelineDur <= 0 || s.startTime < effectiveTimelineDur - 0.05
+  ).length;
+  const allPastTimelineEnd = subCount > 0 && applicableSubCount === 0;
+
   const handleSubmit = () => {
-    if (parsedResult.subtitles.length === 0) return;
+    if (subCount === 0 || applicableSubCount === 0) return;
     const freshResult = buildSubtitlesFromStructuredTranscript(
       rawText,
       selectedScenes,
@@ -150,18 +159,15 @@ export function PasteStructuredTranscriptDialog({
         timingMode,
         scenes,
         sourceDurationSec,
+        primaryMediaUrl,
       }
     );
     onApply(freshResult, existingSubtitleCount > 0 ? applyMode : "replace");
   };
 
-  const subCount = parsedResult.subtitles.length;
-  const applicableSubCount = parsedResult.subtitles.filter(
-    (s) => effectiveTimelineDur <= 0 || s.startTime < effectiveTimelineDur - 0.05
-  ).length;
-  const effectiveApplyCount = applicableSubCount > 0 ? applicableSubCount : subCount;
+  const effectiveApplyCount = applicableSubCount;
   const applyButtonLabel =
-    subCount === 0
+    subCount === 0 || applicableSubCount === 0
       ? "Add Subtitles"
       : existingSubtitleCount > 0 && applyMode === "replace"
         ? `Replace with ${effectiveApplyCount} ${effectiveApplyCount === 1 ? "Subtitle" : "Subtitles"}`
@@ -381,12 +387,19 @@ export function PasteStructuredTranscriptDialog({
                 </div>
               )}
 
-              {(parsedResult.warnings.length > 0 || exceedsVideoEnd) && (
+              {(parsedResult.warnings.length > 0 || exceedsVideoEnd || allPastTimelineEnd) && (
                 <div className="px-3 py-2 rounded-md border border-amber-300/70 dark:border-amber-500/35 bg-amber-50/70 dark:bg-amber-950/30 text-[11px] text-amber-800 dark:text-amber-200 space-y-1">
                   {parsedResult.warnings.map((warn, i) => (
                     <p key={i}>{warn}</p>
                   ))}
-                  {exceedsVideoEnd && parsedResult.exceedsTimelineCount === 0 && (
+                  {allPastTimelineEnd && (
+                    <p>
+                      All {subCount} pasted subtitles start past the timeline end (
+                      {formatClockTime(effectiveTimelineDur)}). Adjust timestamps or switch Timestamp
+                      Match to Source Video before applying.
+                    </p>
+                  )}
+                  {!allPastTimelineEnd && exceedsVideoEnd && parsedResult.exceedsTimelineCount === 0 && (
                     <p className="font-mono-tabular">
                       Last subtitle reaches {formatClockTime(parsedResult.spanEndSec)}, past timeline
                       end ({formatClockTime(effectiveTimelineDur)}) and will trim to fit the clip end.
@@ -401,6 +414,30 @@ export function PasteStructuredTranscriptDialog({
                   {parsedResult.subtitles.map((sub, idx) => {
                     const outOfTimelineBounds =
                       effectiveTimelineDur > 0 && sub.startTime >= effectiveTimelineDur - 0.05;
+                    let clipBadgeText = `Clip ${sub.sceneIndex + 1}`;
+                    if (
+                      clipCount > 1 &&
+                      Array.isArray(sub.sourceSegments) &&
+                      sub.sourceSegments.length > 1
+                    ) {
+                      const clipNums = sub.sourceSegments
+                        .map((seg) => {
+                          if (seg.sceneId) {
+                            const found = parsedResult.scenes.findIndex((sc) => sc.id === seg.sceneId);
+                            if (found !== -1) return found + 1;
+                          }
+                          return null;
+                        })
+                        .filter((n): n is number => n !== null);
+                      if (clipNums.length >= 2) {
+                        const firstClip = clipNums[0];
+                        const lastClip = clipNums[clipNums.length - 1];
+                        clipBadgeText =
+                          firstClip === lastClip
+                            ? `Clip ${firstClip}`
+                            : `Clip ${firstClip}–${lastClip}`;
+                      }
+                    }
                     return (
                       <div
                         key={sub.id}
@@ -415,7 +452,7 @@ export function PasteStructuredTranscriptDialog({
                             </span>
                             {clipCount > 1 && (
                               <span className="px-1.5 py-0.5 rounded bg-[#e7ecf8] dark:bg-[#1a2142] text-[10px] font-medium text-[#31406b] dark:text-[#b4c1e6]">
-                                Clip {sub.sceneIndex + 1}
+                                {clipBadgeText}
                               </span>
                             )}
                             {outOfTimelineBounds && (
@@ -510,7 +547,7 @@ export function PasteStructuredTranscriptDialog({
 
         <button
           type="button"
-          disabled={subCount === 0}
+          disabled={subCount === 0 || applicableSubCount === 0}
           onClick={handleSubmit}
           className="h-11 px-5 rounded-lg bg-teal-700 hover:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 text-white dark:text-[#060918] text-xs sm:text-sm font-semibold inline-flex items-center justify-center gap-2 disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer transition-colors whitespace-nowrap"
         >

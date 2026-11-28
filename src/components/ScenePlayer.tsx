@@ -597,7 +597,7 @@ export const ScenePlayer = memo(
       autoMutedFallbackRef.current = false;
       setAutoMutedFallback(false);
 
-      const totalDur = curScenes.reduce((acc, s) => acc + s.durationSec, 0);
+      const totalDur = curScenes.reduce((acc, s) => acc + getSceneDurationSec(s), 0);
       let startCut = readCurrentCutTime();
       if ((vid?.ended && curScenes.length === 1) || startCut >= Math.max(0, totalDur - 0.08)) {
         startCut = 0;
@@ -1166,7 +1166,7 @@ export const ScenePlayer = memo(
             imageTickLastTsRef.current = now;
             const dtSec = Math.max(0, Math.min(0.25, (now - prevTs) / 1000)) * targetRate;
             imageElapsedInSceneRef.current += dtSec;
-            const scDur = Math.max(0.1, sc.durationSec);
+            const scDur = getSceneDurationSec(sc);
 
             if (imageElapsedInSceneRef.current >= scDur - 0.015) {
               if (idx + 1 < curScenes.length) {
@@ -1270,7 +1270,8 @@ export const ScenePlayer = memo(
                 return;
               }
             } else {
-              const localOffset = Math.max(0, Math.min(sc.durationSec, srcT - sc.startSec));
+              const scDur = getSceneDurationSec(sc);
+              const localOffset = Math.max(0, Math.min(scDur, srcT - sc.startSec));
               onTimeUpdateRef.current(getSceneCutStart(curScenes, idx) + localOffset);
             }
           }

@@ -60,6 +60,11 @@ interface TranscriptPanelProps {
   onClearError: () => void;
   onUpdateSegmentText: (segmentId: string, text: string) => void;
   onSeek: (sec: number) => void;
+  autoTranslateSmallToSubtitles?: boolean;
+  onChangeAutoTranslateSmallToSubtitles?: (enabled: boolean) => void;
+  isTranslatingToSubtitles?: boolean;
+  appliedSubtitlesCount?: number | null;
+  onApplySmallTranscriptToSubtitles?: () => void;
 }
 
 function formatBytesMb(bytes?: number): string | null {
@@ -118,6 +123,11 @@ export function TranscriptPanel({
   onClearError,
   onUpdateSegmentText,
   onSeek,
+  autoTranslateSmallToSubtitles = true,
+  onChangeAutoTranslateSmallToSubtitles,
+  isTranslatingToSubtitles = false,
+  appliedSubtitlesCount = null,
+  onApplySmallTranscriptToSubtitles,
 }: TranscriptPanelProps) {
   const [cachedModels, setCachedModels] = useState<Set<TranscriptModelId>>(new Set());
   const [hasWebGpu, setHasWebGpu] = useState<boolean | null>(null);
@@ -252,7 +262,9 @@ export function TranscriptPanel({
           </span>
         </div>
         <p className="text-[11px] text-[#4d597d] dark:text-[#919ec4] leading-snug">
-          Standalone speech-to-text transcript &amp; multi-format export (kept separate from video subtitles).
+          {selectedModelId === "whisper-small" && autoTranslateSmallToSubtitles
+            ? "Speech-to-text transcript & automatic translation into Timeline subtitles (Small model)."
+            : "Standalone speech-to-text transcript & multi-format export (kept separate from video subtitles)."}
         </p>
       </div>
 
@@ -486,6 +498,46 @@ export function TranscriptPanel({
               </div>
             </div>
           )}
+          {selectedModelId === "whisper-small" && (
+            <div className="pt-2">
+              <div className="px-3 py-2.5 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-[#f8faff] dark:bg-[#11162e] flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-xs font-semibold text-[#0c1026] dark:text-[#f3f5fc]">
+                      Auto-translate to Timeline Subtitles
+                    </span>
+                    <span className="px-1.5 py-0.5 rounded-xs text-[10px] font-mono-tabular font-semibold bg-teal-50 dark:bg-teal-950/60 text-teal-700 dark:text-teal-300 border border-teal-200 dark:border-teal-800/70">
+                      Small
+                    </span>
+                  </div>
+                  <p className="text-[10.5px] text-[#4d597d] dark:text-[#919ec4] leading-snug mt-0.5">
+                    Automatically translates transcript segments and adds them to Timeline subtitles using your Subtitle style &amp; language settings.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={autoTranslateSmallToSubtitles}
+                  aria-label="Auto-translate Small transcript to Timeline Subtitles"
+                  disabled={isTranscribing || isTranslatingToSubtitles}
+                  onClick={() =>
+                    onChangeAutoTranslateSmallToSubtitles?.(!autoTranslateSmallToSubtitles)
+                  }
+                  className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors cursor-pointer disabled:opacity-50 ${
+                    autoTranslateSmallToSubtitles
+                      ? "bg-teal-700 border-teal-700 dark:bg-teal-400 dark:border-teal-400"
+                      : "bg-[#d2dcf0] border-[#bcc9e3] dark:bg-[#21284c] dark:border-[#323d70]"
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white dark:bg-[#060918] transition-transform ${
+                      autoTranslateSmallToSubtitles ? "translate-x-4" : "translate-x-0.5"
+                    }`}
+                  />
+                </button>
+              </div>
+            </div>
+          )}
         </section>
 
         {/* Active Progress + Generate CTA */}
@@ -525,14 +577,16 @@ export function TranscriptPanel({
             </div>
           )}
 
-          {isTranscribing ? (
+          {isTranscribing || isTranslatingToSubtitles ? (
             <button
               type="button"
               onClick={onCancelTranscribe}
               className="w-full h-10 px-4 rounded-md border border-red-300 dark:border-red-800/70 bg-red-50/80 dark:bg-red-950/35 hover:bg-red-100 dark:hover:bg-red-900/50 text-xs font-semibold text-red-700 dark:text-red-300 flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors"
             >
               <Square className="w-3.5 h-3.5 fill-current" />
-              <span>Stop Transcription</span>
+              <span>
+                {isTranslatingToSubtitles ? "Stop Translation" : "Stop Transcription"}
+              </span>
             </button>
           ) : (
             <button
@@ -544,8 +598,12 @@ export function TranscriptPanel({
               <Sparkles className="w-3.5 h-3.5 shrink-0" />
               <span>
                 {result
-                  ? `Re-transcribe (${selectedSpec.label})`
-                  : `Transcribe with ${selectedSpec.label}`}
+                  ? selectedModelId === "whisper-small" && autoTranslateSmallToSubtitles
+                    ? "Re-transcribe & Add Subtitles (Small)"
+                    : `Re-transcribe (${selectedSpec.label})`
+                  : selectedModelId === "whisper-small" && autoTranslateSmallToSubtitles
+                    ? "Transcribe & Add Subtitles (Small)"
+                    : `Transcribe with ${selectedSpec.label}`}
               </span>
             </button>
           )}
@@ -554,6 +612,42 @@ export function TranscriptPanel({
         {/* Transcript Result + Export */}
         {result && (
           <>
+            {result.modelId === "whisper-small" && result.segments.length > 0 && (
+              <section className="px-3 py-2.5 rounded-md border border-teal-200 dark:border-teal-800/70 bg-teal-50/60 dark:bg-teal-950/30 flex flex-wrap items-center justify-between gap-2.5">
+                <div className="min-w-0">
+                  <p className="text-xs font-semibold text-[#0c1026] dark:text-[#f3f5fc]">
+                    Timeline Subtitles (Small Model)
+                  </p>
+                  <p className="text-[11px] text-[#4d597d] dark:text-[#919ec4]">
+                    {appliedSubtitlesCount && appliedSubtitlesCount > 0
+                      ? `Inserted ${appliedSubtitlesCount} translated subtitle lines into Timeline.`
+                      : "Translate these segments and add them directly to Timeline subtitles."}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  disabled={isTranscribing || isTranslatingToSubtitles || !onApplySmallTranscriptToSubtitles}
+                  onClick={() => onApplySmallTranscriptToSubtitles?.()}
+                  className="h-8 px-3 rounded-md bg-teal-700 hover:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 text-white dark:text-[#060918] text-[11px] font-semibold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer disabled:opacity-50 transition-colors shrink-0"
+                >
+                  {isTranslatingToSubtitles ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                      <span>Translating...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-3.5 h-3.5 shrink-0" />
+                      <span>
+                        {appliedSubtitlesCount && appliedSubtitlesCount > 0
+                          ? "Re-translate to Subtitles"
+                          : "Translate & Apply to Subtitles"}
+                      </span>
+                    </>
+                  )}
+                </button>
+              </section>
+            )}
             {/* Export Formats Section */}
             <section className="space-y-2.5 pt-3 border-t border-[#d2dcf0] dark:border-[#21284c]">
               <div className="flex items-center justify-between gap-2">

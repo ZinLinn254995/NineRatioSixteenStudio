@@ -1,15 +1,33 @@
 import { useEffect } from "react";
-import { AlertCircle, Check, Download, RefreshCw, RotateCcw, Share2, X } from "lucide-react";
-import type { ExportedVideoResult, ExportProgress } from "../utils/exportVideo";
+import {
+  AlertCircle,
+  Check,
+  Download,
+  Film,
+  Music,
+  RefreshCw,
+  RotateCcw,
+  Share2,
+  X,
+} from "lucide-react";
+import type {
+  ExportedVideoResult,
+  ExportFormat,
+  ExportProgress,
+} from "../utils/exportVideo";
 
 interface ExportSheetProps {
   open: boolean;
+  format: ExportFormat;
   progress: ExportProgress | null;
   result: ExportedVideoResult | null;
   hasSaved: boolean;
   isStale?: boolean;
   error: string | null;
   canShare: boolean;
+  hasMp4Ready?: boolean;
+  hasMp3Ready?: boolean;
+  onSelectFormat: (format: ExportFormat) => void;
   onMinimize: () => void;
   onCancel: () => void;
   onSave: (item: ExportedVideoResult) => void;
@@ -18,14 +36,34 @@ interface ExportSheetProps {
   onDiscardResult: () => void;
 }
 
-const STEPS: { key: ExportProgress["phase"]; label: string }[] = [
+const MP4_STEPS: { key: ExportProgress["phase"]; label: string }[] = [
   { key: "uploading", label: "Upload" },
   { key: "rendering", label: "Subtitles" },
   { key: "muxing", label: "Encode" },
   { key: "downloading", label: "Transfer" },
 ];
 
-function getPhaseIndex(phase: ExportProgress["phase"]): number {
+const MP3_STEPS: { key: ExportProgress["phase"]; label: string }[] = [
+  { key: "uploading", label: "Upload" },
+  { key: "muxing", label: "Audio" },
+  { key: "downloading", label: "Transfer" },
+];
+
+function getPhaseIndex(phase: ExportProgress["phase"], format: ExportFormat): number {
+  if (format === "mp3") {
+    switch (phase) {
+      case "preparing":
+      case "uploading":
+        return 0;
+      case "rendering":
+      case "muxing":
+        return 1;
+      case "downloading":
+        return 2;
+      default:
+        return 0;
+    }
+  }
   switch (phase) {
     case "preparing":
     case "uploading":
@@ -41,29 +79,34 @@ function getPhaseIndex(phase: ExportProgress["phase"]): number {
   }
 }
 
-function getPhaseHeadline(phase: ExportProgress["phase"]): string {
+function getPhaseHeadline(phase: ExportProgress["phase"], format: ExportFormat): string {
+  const isMp3 = format === "mp3";
   switch (phase) {
     case "uploading":
-      return "Uploading source video";
+      return "Uploading source media";
     case "rendering":
       return "Rendering subtitle track";
     case "muxing":
-      return "Encoding 9:16 MP4";
+      return isMp3 ? "Encoding MP3 audio" : "Encoding 9:16 MP4";
     case "downloading":
-      return "Transferring MP4";
+      return isMp3 ? "Transferring MP3" : "Transferring MP4";
     default:
-      return "Preparing export";
+      return isMp3 ? "Preparing audio export" : "Preparing export";
   }
 }
 
 export function ExportSheet({
   open,
+  format,
   progress,
   result,
   hasSaved,
   isStale = false,
   error,
   canShare,
+  hasMp4Ready = false,
+  hasMp3Ready = false,
+  onSelectFormat,
   onMinimize,
   onCancel,
   onSave,
@@ -85,7 +128,13 @@ export function ExportSheet({
   if (!open) return null;
 
   const isExporting = Boolean(progress);
-  const activeStepIdx = progress ? getPhaseIndex(progress.phase) : 0;
+  const activeFormat: ExportFormat =
+    result?.format ??
+    (result?.fileName?.toLowerCase().endsWith(".mp3") ? "mp3" : format);
+  const isMp3 = activeFormat === "mp3";
+  const formatLabel = isMp3 ? "MP3" : "MP4";
+  const steps = format === "mp3" ? MP3_STEPS : MP4_STEPS;
+  const activeStepIdx = progress ? getPhaseIndex(progress.phase, format) : 0;
   const percent = progress ? Math.max(0, Math.min(100, progress.percent)) : 0;
 
   return (
@@ -114,14 +163,18 @@ export function ExportSheet({
               className="font-display text-base font-semibold tracking-tight text-[#0c1026] dark:text-[#f3f5fc] truncate"
             >
               {isExporting
-                ? "Exporting Video"
+                ? format === "mp3"
+                  ? "Exporting Audio"
+                  : "Exporting Video"
                 : result
                   ? isStale
-                    ? "Previous Export"
+                    ? `Previous ${formatLabel} Export`
                     : hasSaved
                       ? "Saved to Device"
-                      : "Export Ready"
-                  : "Export Failed"}
+                      : `${formatLabel} Ready`
+                  : error
+                    ? "Export Failed"
+                    : `Export ${format === "mp3" ? "MP3 Audio" : "9:16 MP4"}`}
             </h2>
             {result && !isExporting && (
               <p className="text-xs text-[#4d597d] dark:text-[#919ec4] mt-0.5 truncate font-mono-tabular">
@@ -129,7 +182,7 @@ export function ExportSheet({
                 <span aria-hidden="true"> · </span>
                 {(result.sizeBytes / (1024 * 1024)).toFixed(1)} MB
                 <span aria-hidden="true"> · </span>
-                9:16 MP4
+                {isMp3 ? "MP3 Audio" : "9:16 MP4"}
               </p>
             )}
           </div>
@@ -145,6 +198,52 @@ export function ExportSheet({
           </button>
         </div>
 
+        {/* Format Switcher (available when idle) */}
+        {!isExporting && (
+          <div className="px-5 pt-4">
+            <div
+              role="tablist"
+              aria-label="Export format"
+              className="grid grid-cols-2 gap-1.5 p-1 rounded-lg bg-[#f3f5fc] dark:bg-[#141933] border border-[#d2dcf0] dark:border-[#21284c]"
+            >
+              <button
+                type="button"
+                role="tab"
+                aria-selected={format === "mp4"}
+                onClick={() => onSelectFormat("mp4")}
+                className={`h-8 px-3 rounded-md text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                  format === "mp4"
+                    ? "bg-white dark:bg-[#0d1022] text-[#0c1026] dark:text-[#f3f5fc] shadow-xs"
+                    : "text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
+                }`}
+              >
+                <Film className="w-3.5 h-3.5 shrink-0" />
+                <span>MP4 Video</span>
+                {hasMp4Ready && (
+                  <Check className="w-3 h-3 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                )}
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={format === "mp3"}
+                onClick={() => onSelectFormat("mp3")}
+                className={`h-8 px-3 rounded-md text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                  format === "mp3"
+                    ? "bg-white dark:bg-[#0d1022] text-[#0c1026] dark:text-[#f3f5fc] shadow-xs"
+                    : "text-[#4d597d] dark:text-[#919ec4] hover:text-[#0c1026] dark:hover:text-[#f3f5fc]"
+                }`}
+              >
+                <Music className="w-3.5 h-3.5 shrink-0" />
+                <span>MP3 Audio</span>
+                {hasMp3Ready && (
+                  <Check className="w-3 h-3 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                )}
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Sheet Body */}
         <div className="px-5 py-5 space-y-5">
           {isExporting && progress && (
@@ -153,7 +252,7 @@ export function ExportSheet({
               <div className="flex items-end justify-between gap-4">
                 <div className="min-w-0">
                   <p className="text-sm font-medium text-[#0c1026] dark:text-[#f3f5fc] truncate">
-                    {getPhaseHeadline(progress.phase)}
+                    {getPhaseHeadline(progress.phase, format)}
                   </p>
                   <p className="text-xs text-[#4d597d] dark:text-[#919ec4] mt-0.5 font-mono-tabular truncate">
                     {progress.detail || "Running in background..."}
@@ -172,9 +271,13 @@ export function ExportSheet({
                 />
               </div>
 
-              {/* 4-step quiet pipeline indicator */}
-              <div className="grid grid-cols-4 gap-2 pt-1">
-                {STEPS.map((step, idx) => {
+              {/* Pipeline indicator */}
+              <div
+                className={`grid gap-2 pt-1 ${
+                  steps.length === 3 ? "grid-cols-3" : "grid-cols-4"
+                }`}
+              >
+                {steps.map((step, idx) => {
                   const isDone = idx < activeStepIdx;
                   const isActive = idx === activeStepIdx;
                   return (
@@ -236,16 +339,40 @@ export function ExportSheet({
                 </div>
               )}
 
-              {/* Built-in 9:16 MP4 verification player */}
-              <div className="rounded-lg bg-[#04050e] border border-[#d2dcf0] dark:border-[#21284c] overflow-hidden flex items-center justify-center">
-                <video
-                  src={result.blobUrl}
-                  controls
-                  playsInline
-                  preload="metadata"
-                  className="w-full max-h-[260px] object-contain"
-                />
-              </div>
+              {/* Built-in verification player (MP3 audio or 9:16 MP4 video) */}
+              {isMp3 ? (
+                <div className="rounded-lg bg-[#f3f5fc] dark:bg-[#141933] border border-[#d2dcf0] dark:border-[#21284c] p-4 space-y-3">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-lg bg-teal-700/10 dark:bg-teal-400/15 text-teal-700 dark:text-teal-400 flex items-center justify-center shrink-0">
+                      <Music className="w-5 h-5" />
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-[#0c1026] dark:text-[#f3f5fc] truncate">
+                        {result.fileName}
+                      </p>
+                      <p className="text-xs text-[#4d597d] dark:text-[#919ec4] font-mono-tabular">
+                        {(result.sizeBytes / (1024 * 1024)).toFixed(2)} MB · 192 kbps MP3
+                      </p>
+                    </div>
+                  </div>
+                  <audio
+                    src={result.blobUrl}
+                    controls
+                    preload="metadata"
+                    className="w-full h-10"
+                  />
+                </div>
+              ) : (
+                <div className="rounded-lg bg-[#04050e] border border-[#d2dcf0] dark:border-[#21284c] overflow-hidden flex items-center justify-center">
+                  <video
+                    src={result.blobUrl}
+                    controls
+                    playsInline
+                    preload="metadata"
+                    className="w-full max-h-[260px] object-contain"
+                  />
+                </div>
+              )}
 
               {/* Explicit single-save & clear Re-export controls */}
               <div className="space-y-2.5">
@@ -257,7 +384,7 @@ export function ExportSheet({
                       className="w-full h-11 px-4 rounded-lg bg-teal-700 hover:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 text-white dark:text-[#060918] text-sm font-semibold flex items-center justify-center gap-2 active:scale-[0.99] transition-all cursor-pointer shadow-xs"
                     >
                       <RefreshCw className="w-4 h-4" />
-                      <span>Re-export Updated MP4</span>
+                      <span>Re-export Updated {formatLabel}</span>
                     </button>
                     <button
                       type="button"
@@ -265,7 +392,7 @@ export function ExportSheet({
                       className="w-full h-10 px-4 rounded-lg border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-sm font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center justify-center gap-2 transition-colors cursor-pointer"
                     >
                       <Download className="w-4 h-4" />
-                      <span>Save Previous MP4</span>
+                      <span>Save Previous {formatLabel}</span>
                     </button>
                   </>
                 ) : !hasSaved ? (
@@ -275,7 +402,7 @@ export function ExportSheet({
                     className="w-full h-11 px-4 rounded-lg bg-teal-700 hover:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 text-white dark:text-[#060918] text-sm font-semibold flex items-center justify-center gap-2 active:scale-[0.99] transition-all cursor-pointer shadow-xs"
                   >
                     <Download className="w-4 h-4" />
-                    <span>Save MP4 to Device</span>
+                    <span>Save {formatLabel} to Device</span>
                   </button>
                 ) : (
                   <div className="space-y-2">
@@ -367,8 +494,40 @@ export function ExportSheet({
               </div>
             </>
           )}
+
+          {!isExporting && !result && !error && (
+            <div className="space-y-4">
+              <p className="text-sm text-[#4d597d] dark:text-[#919ec4] leading-relaxed">
+                {format === "mp3"
+                  ? "Export the audio track from your edited timeline clips, playback speed, and voice settings as a 192 kbps MP3 file."
+                  : "Export your 9:16 portrait video with subtitles, visual adjustments, timeline edits, and voice settings as an MP4 file."}
+              </p>
+              <div className="grid grid-cols-2 gap-2.5">
+                <button
+                  type="button"
+                  onClick={onMinimize}
+                  className="h-10 px-4 rounded-lg border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-sm font-medium text-[#4d597d] dark:text-[#919ec4] transition-colors cursor-pointer"
+                >
+                  Close
+                </button>
+                <button
+                  type="button"
+                  onClick={onRetry}
+                  className="h-10 px-4 rounded-lg bg-teal-700 hover:bg-teal-800 dark:bg-teal-400 dark:hover:bg-teal-300 text-white dark:text-[#060918] text-sm font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                >
+                  {format === "mp3" ? (
+                    <Music className="w-4 h-4 shrink-0" />
+                  ) : (
+                    <Film className="w-4 h-4 shrink-0" />
+                  )}
+                  <span>Export {format === "mp3" ? "MP3" : "MP4"}</span>
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>
   );
 }
+

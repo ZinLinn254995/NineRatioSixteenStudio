@@ -12,6 +12,8 @@ import { uploadBlobInChunks } from "./uploadFile";
 import { getEffectivePlaybackSpeed } from "./voicePresets";
 import { getSceneDurationSec } from "./projectTimeline";
 
+export type ExportFormat = "mp4" | "mp3";
+
 export interface ExportProgress {
   phase: "preparing" | "uploading" | "rendering" | "muxing" | "downloading";
   percent: number;
@@ -23,6 +25,8 @@ export interface ExportedVideoResult {
   blobUrl: string;
   fileName: string;
   sizeBytes: number;
+  format?: ExportFormat;
+  mimeType?: "video/mp4" | "audio/mpeg";
 }
 
 function buildSafeMp4FileName(title: string): string {
@@ -32,6 +36,15 @@ function buildSafeMp4FileName(title: string): string {
     .replace(/^-|-$/g, "")
     .slice(0, 36);
   return `${safeName || "thai-burmese"}-9x16.mp4`;
+}
+
+function buildSafeMp3FileName(title: string): string {
+  const safeName = title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 36);
+  return `${safeName || "thai-burmese"}-audio.mp3`;
 }
 
 function formatMb(bytes: number): string {
@@ -47,6 +60,22 @@ function isLikelyValidMp4Header(bytes: Uint8Array): boolean {
     bytes[6] === 0x79 &&
     bytes[7] === 0x70
   );
+}
+
+function isLikelyValidMp3Header(bytes: Uint8Array): boolean {
+  if (bytes.byteLength < 4) return false;
+  // ID3v2 header ("ID3")
+  if (bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) {
+    return true;
+  }
+  // MPEG audio frame sync (11 set bits: 0xFF 0xE0+) within initial header bytes
+  const scanLimit = Math.min(bytes.byteLength - 1, 512);
+  for (let i = 0; i < scanLimit; i++) {
+    if (bytes[i] === 0xff && (bytes[i + 1] & 0xe0) === 0xe0) {
+      return true;
+    }
+  }
+  return false;
 }
 
 const DOWNLOAD_CHUNK_BYTES = 8 * 1024 * 1024; // 8 MB Range chunks (4x below Cloud Run 32 MB limit)
@@ -134,16 +163,19 @@ async function fetchRangeChunkWithRetry(
     : new Error("Failed to transfer exported MP4. Please try again.");
 }
 
-async function fetchVerifiedMp4Blob(
+async function fetchVerifiedExportBlob(
   downloadUrl: string,
   expectedSizeBytes: number,
   fileName: string,
+  format: ExportFormat,
   onProgress: (p: ExportProgress) => void,
   signal?: AbortSignal
 ): Promise<ExportedVideoResult> {
   const chunks: BlobPart[] = [];
   let offset = 0;
   let totalSize = Math.max(0, expectedSizeBytes);
+  const label = format === "mp3" ? "MP3" : "MP4";
+  const mimeType: "video/mp4" | "audio/mpeg" = format === "mp3" ? "audio/mpeg" : "video/mp4";
 
   onProgress({
     phase: "downloading",
@@ -173,8 +205,10 @@ async function fetchVerifiedMp4Blob(
     }
 
     if (offset === 0) {
-      if (bytes.byteLength < 12 || !isLikelyValidMp4Header(bytes)) {
-        throw new Error("Server returned an invalid file instead of MP4. Please retry.");
+      const validHeader =
+        format === "mp3" ? isLikelyValidMp3Header(bytes) : isLikelyValidMp4Header(bytes);
+      if (!validHeader) {
+        throw new Error(`Server returned an invalid file instead of ${label}. Please retry.`);
       }
     }
 
@@ -204,10 +238,10 @@ async function fetchVerifiedMp4Blob(
   }
 
   if (offset < 256) {
-    throw new Error("Exported MP4 file was empty or incomplete. Please retry.");
+    throw new Error(`Exported ${label} file was empty or incomplete. Please retry.`);
   }
 
-  const blob = new Blob(chunks, { type: "video/mp4" });
+  const blob = new Blob(chunks, { type: mimeType });
   onProgress({
     phase: "downloading",
     percent: 100,
@@ -219,7 +253,26 @@ async function fetchVerifiedMp4Blob(
     blobUrl: URL.createObjectURL(blob),
     fileName,
     sizeBytes: blob.size,
+    format,
+    mimeType,
   };
+}
+
+async function fetchVerifiedMp4Blob(
+  downloadUrl: string,
+  expectedSizeBytes: number,
+  fileName: string,
+  onProgress: (p: ExportProgress) => void,
+  signal?: AbortSignal
+): Promise<ExportedVideoResult> {
+  return fetchVerifiedExportBlob(
+    downloadUrl,
+    expectedSizeBytes,
+    fileName,
+    "mp4",
+    onProgress,
+    signal
+  );
 }
 
 function uint8ToBase64(bytes: Uint8Array): string {
@@ -2650,4 +2703,228 @@ export async function exportProjectToMp4(
       URL.revokeObjectURL(u);
     }
   }
+}
+
+export async function exportProjectToMp3(
+  project: VideoProject,
+  voiceSettings: VoiceSettings,
+  editSettings: VideoEditSettings,
+  onProgress: (p: ExportProgress) => void,
+  signal?: AbortSignal
+): Promise<ExportedVideoResult> {
+  if (
+    !project.uploadId &&
+    !project.localUrl &&
+    !project.localFile &&
+    !project.scenes.some((sc) => Boolean(sc.uploadId || sc.mediaUrl || sc.mediaFile))
+  ) {
+    throw new Error("Local video file is not linked. Please re-link or upload the video first.");
+  }
+
+  const fileName = buildSafeMp3FileName(project.title);
+  const speed = getEffectivePlaybackSpeed(
+    editSettings.playbackSpeed,
+    voiceSettings.speed
+  );
+
+  onProgress({ phase: "preparing", percent: 5, detail: "Checking source media..." });
+
+  const makeTimedController = (timeoutMs: number) => {
+    const ctrl = new AbortController();
+    let timedOut = false;
+    const timer = window.setTimeout(() => {
+      timedOut = true;
+      ctrl.abort();
+    }, timeoutMs);
+    const onExtAbort = () => ctrl.abort();
+    if (signal) {
+      if (signal.aborted) ctrl.abort();
+      else signal.addEventListener("abort", onExtAbort, { once: true });
+    }
+    return {
+      signal: ctrl.signal,
+      didTimeout: () => timedOut,
+      cleanup: () => {
+        window.clearTimeout(timer);
+        signal?.removeEventListener("abort", onExtAbort);
+      },
+    };
+  };
+
+  const checkUploadExists = async (uploadId: string): Promise<boolean> => {
+    const existsTimed = makeTimedController(6000);
+    try {
+      const checkResp = await fetch(
+        `/api/upload-exists/${encodeURIComponent(uploadId)}`,
+        { signal: existsTimed.signal }
+      );
+      if (checkResp.ok) {
+        const checkData = (await checkResp.json()) as { exists?: boolean };
+        return Boolean(checkData.exists);
+      }
+      return true;
+    } catch {
+      throwIfAborted(signal);
+      return true;
+    } finally {
+      existsTimed.cleanup();
+    }
+  };
+
+  throwIfAborted(signal);
+  let resolvedUploadId = project.uploadId;
+  if (resolvedUploadId && !(await checkUploadExists(resolvedUploadId))) {
+    resolvedUploadId = undefined;
+  }
+
+  if (!resolvedUploadId) {
+    let primaryBlob: Blob | undefined = project.localFile;
+    let primaryName = project.localFile?.name || `${project.title || "source"}.mp4`;
+    if (!primaryBlob && project.localUrl?.startsWith("blob:")) {
+      try {
+        const r = await fetch(project.localUrl, { signal });
+        if (r.ok) {
+          primaryBlob = await r.blob();
+        }
+      } catch {
+        throwIfAborted(signal);
+      }
+    }
+    if (primaryBlob) {
+      throwIfAborted(signal);
+      const totalMb = formatMb(primaryBlob.size);
+      onProgress({
+        phase: "uploading",
+        percent: 10,
+        detail: `0.0 / ${totalMb} MB`,
+      });
+      resolvedUploadId = await uploadBlobInChunks(
+        primaryBlob,
+        primaryName,
+        signal,
+        (fraction) => {
+          const sentMb = formatMb(primaryBlob!.size * fraction);
+          onProgress({
+            phase: "uploading",
+            percent: 10 + Math.round(fraction * 40),
+            detail: `${sentMb} / ${totalMb} MB`,
+          });
+        }
+      );
+      project.uploadId = resolvedUploadId;
+    }
+  }
+
+  const sceneUploadCache = new Map<string, string>();
+  for (const sc of project.scenes) {
+    if (sc.mediaType === "image") continue;
+    if (sc.mediaUrl && sc.mediaUrl === project.localUrl && resolvedUploadId) {
+      continue;
+    }
+    const cacheKey =
+      sc.mediaUrl || (sc.mediaFile ? `${sc.mediaFile.name}:${sc.mediaFile.size}` : "");
+    if (cacheKey && sceneUploadCache.has(cacheKey)) {
+      sc.uploadId = sceneUploadCache.get(cacheKey);
+      continue;
+    }
+
+    let scUploadId = sc.uploadId;
+    if (scUploadId && !(await checkUploadExists(scUploadId))) {
+      scUploadId = undefined;
+    }
+
+    if (!scUploadId) {
+      let sceneBlob: Blob | undefined = sc.mediaFile;
+      const sceneName = sc.mediaFile?.name || "clip.mp4";
+      if (!sceneBlob && sc.mediaUrl?.startsWith("blob:")) {
+        try {
+          const r = await fetch(sc.mediaUrl, { signal });
+          if (r.ok) {
+            sceneBlob = await r.blob();
+          }
+        } catch {
+          throwIfAborted(signal);
+        }
+      }
+      if (sceneBlob) {
+        throwIfAborted(signal);
+        onProgress({
+          phase: "uploading",
+          percent: 52,
+          detail: "Uploading timeline clip...",
+        });
+        scUploadId = await uploadBlobInChunks(sceneBlob, sceneName, signal);
+      }
+    }
+
+    if (scUploadId) {
+      sc.uploadId = scUploadId;
+      if (cacheKey) sceneUploadCache.set(cacheKey, scUploadId);
+    }
+  }
+
+  const hasAnyAudioUpload =
+    Boolean(resolvedUploadId) ||
+    project.scenes.some((sc) => sc.mediaType !== "image" && Boolean(sc.uploadId));
+  if (!hasAnyAudioUpload) {
+    throw new Error("Source video file is not linked. Please re-link or upload the video first.");
+  }
+
+  throwIfAborted(signal);
+  onProgress({ phase: "muxing", percent: 65, detail: "Encoding MP3 audio..." });
+
+  const exportTimed = makeTimedController(120_000);
+  let resp: Response;
+  try {
+    resp = await fetch("/api/export-mp3", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        uploadId: resolvedUploadId,
+        scenes: project.scenes.map(({ mediaFile: _mf, mediaUrl: _mu, ...rest }) => rest),
+        voiceSettings: { ...voiceSettings, speed },
+        fileName,
+        returnDownloadUrl: true,
+      }),
+      signal: exportTimed.signal,
+    });
+  } catch (err) {
+    throwIfAborted(signal);
+    if (exportTimed.didTimeout()) {
+      throw new Error("MP3 export timed out on the server. Please try again.");
+    }
+    throw err;
+  } finally {
+    exportTimed.cleanup();
+  }
+
+  if (!resp.ok) {
+    const errText = await resp.text();
+    let errMsg = errText;
+    try {
+      const parsed = JSON.parse(errText) as { error?: string };
+      if (parsed?.error) errMsg = parsed.error;
+    } catch {
+      // Keep plain text
+    }
+    throw new Error(errMsg || "Failed to export MP3 audio.");
+  }
+
+  const data = (await resp.json()) as {
+    downloadUrl?: string;
+    fileName?: string;
+    sizeBytes?: number;
+  };
+  if (!data.downloadUrl) {
+    throw new Error("Server did not return a download link for the exported MP3.");
+  }
+
+  return await fetchVerifiedExportBlob(
+    data.downloadUrl,
+    Number(data.sizeBytes) || 0,
+    data.fileName || fileName,
+    "mp3",
+    onProgress,
+    signal
+  );
 }

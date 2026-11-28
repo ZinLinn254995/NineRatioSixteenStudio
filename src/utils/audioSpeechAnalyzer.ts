@@ -28,17 +28,30 @@ export function projectSpeechRegionsToCutTimeline(
       if (sr.mediaUrl !== undefined && (sr.mediaUrl || "") !== segMediaUrl) {
         continue;
       }
-      if (sr.sceneId && seg.sceneId && sr.sceneId !== seg.sceneId) {
-        continue;
-      }
       const ovStart = Math.max(seg.startSec, sr.sourceStartSec);
       const ovEnd = Math.min(seg.endSec, sr.sourceEndSec);
-      if (ovEnd - ovStart >= 0.04) {
-        projected.push({
-          cutStart: seg.cutStart + (ovStart - seg.startSec),
-          cutEnd: seg.cutStart + (ovEnd - seg.startSec),
-        });
+      if (ovEnd - ovStart < 0.04) {
+        continue;
       }
+      if (sr.sceneId && seg.sceneId && sr.sceneId !== seg.sceneId) {
+        // Skip duplicate/cloned clips covering the same source slice already owned by sr.sceneId,
+        // while allowing split siblings (e.g. second half after splitting a clip) to keep theirs.
+        const srMediaUrl = sr.mediaUrl !== undefined ? sr.mediaUrl || "" : undefined;
+        const ownedByAnotherSeg = segments.some(
+          (other) =>
+            other.sceneId === sr.sceneId &&
+            (srMediaUrl === undefined || (other.mediaUrl || "") === srMediaUrl) &&
+            other.startSec < ovEnd - 0.02 &&
+            other.endSec > ovStart + 0.02
+        );
+        if (ownedByAnotherSeg) {
+          continue;
+        }
+      }
+      projected.push({
+        cutStart: seg.cutStart + (ovStart - seg.startSec),
+        cutEnd: seg.cutStart + (ovEnd - seg.startSec),
+      });
     }
   }
 

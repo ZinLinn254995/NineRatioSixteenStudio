@@ -1,4 +1,10 @@
-import type { SceneSelection, SpeakingScene, SubtitleItem, SubtitleWord } from "../types";
+import type {
+  SceneSelection,
+  SpeakingScene,
+  SubtitleItem,
+  SubtitleSourceSegment,
+  SubtitleWord,
+} from "../types";
 import {
   buildContiguousClipBlocks,
   getSceneDurationSec,
@@ -73,6 +79,11 @@ const TIMESTAMP_SEP = "(?:[–—\\-→]+|-->|->|to)";
 
 const TIMESTAMP_RANGE_RE = new RegExp(
   `^${TIMESTAMP_TOKEN}\\s*${TIMESTAMP_SEP}\\s*${TIMESTAMP_TOKEN}(?:\\s+(.*))?$`,
+  "i"
+);
+
+const WRAPPED_TIMESTAMP_RANGE_RE = new RegExp(
+  `^[\\[(]\\s*${TIMESTAMP_TOKEN}\\s*${TIMESTAMP_SEP}\\s*${TIMESTAMP_TOKEN}\\s*[\\])](?:\\s+(.*))?$`,
   "i"
 );
 
@@ -282,7 +293,7 @@ function stripLeadingTimestamp(text: string): {
 } {
   const trimmed = text.trim();
   if (!trimmed) return { hadTimestamp: false, rest: "" };
-  const tsMatch = trimmed.match(TIMESTAMP_RANGE_RE);
+  const tsMatch = trimmed.match(WRAPPED_TIMESTAMP_RANGE_RE) ?? trimmed.match(TIMESTAMP_RANGE_RE);
   if (tsMatch) {
     const startSec = parseFlexibleTimestampSec(tsMatch[1] || "");
     const endSec = parseFlexibleTimestampSec(tsMatch[2] || "");
@@ -326,27 +337,51 @@ export function parsePastedTranscript(rawInput: string): ParsedTranscriptResult 
   const hasTimestampBlockHeader = lines.some((line) => {
     const t = line.trim();
     if (NUMBERED_TIMESTAMP_HEADER_RE.test(t)) return true;
-    if (TIMESTAMP_RANGE_RE.test(t) && hasFieldLabel) return true;
+    if (stripLeadingTimestamp(t).hadTimestamp) return true;
     const bm = t.match(STRUCTURED_HEADER_BRACKET_RE);
     if (!bm) return false;
     return stripLeadingTimestamp(bm[2] || "").hadTimestamp || !(bm[2] || "").trim();
   });
 
-  // 1. Structured multi-line block mode
+  // 1. Structured multi-line or timestamped block mode
   if (hasFieldLabel || hasTimestampBlockHeader) {
     const entries: ParsedTranscriptEntry[] = [];
     let current: (ParsedTranscriptEntry & {
       hasExplicitFields: boolean;
-      inlineAfterHeader?: string;
+      unlabeledLines: string[];
       sawBlankLineAfterContent?: boolean;
       lastField?: "phonetic" | "thai" | "burmese" | "words";
     }) | null = null;
+    let pendingCueIndex: number | null = null;
+
+    const mergeInlineText = (
+      target: ParsedTranscriptEntry,
+      payload: string
+    ) => {
+      const classified = classifySingleLinePayload(payload);
+      if (classified.thaiPhonetic) {
+        target.thaiPhonetic = target.thaiPhonetic
+          ? `${target.thaiPhonetic} ${classified.thaiPhonetic}`
+          : classified.thaiPhonetic;
+      }
+      if (classified.thaiScript) {
+        target.thaiScript = target.thaiScript
+          ? `${target.thaiScript} ${classified.thaiScript}`
+          : classified.thaiScript;
+      }
+      if (classified.burmese) {
+        target.burmese = target.burmese
+          ? `${target.burmese} ${classified.burmese}`
+          : classified.burmese;
+      }
+    };
 
     const finalizeCurrent = () => {
       if (!current) return;
-      if (!current.hasExplicitFields && current.inlineAfterHeader) {
-        const inlineParsed = classifySingleLinePayload(current.inlineAfterHeader);
-        Object.assign(current, inlineParsed);
+      if (!current.hasExplicitFields && current.unlabeledLines.length > 0) {
+        for (const line of current.unlabeledLines) {
+          mergeInlineText(current, line);
+        }
       }
       if (
         current.thaiPhonetic !== undefined ||
@@ -369,10 +404,11 @@ export function parsePastedTranscript(rawInput: string): ParsedTranscriptResult 
       current = null;
     };
 
-    for (const rawLine of lines) {
-      const trimmed = rawLine.trim();
+    for (let li = 0; li < lines.length; li++) {
+      const trimmed = lines[li].trim();
 
       if (!trimmed) {
+        pendingCueIndex = null;
         if (current) {
           current.sawBlankLineAfterContent = true;
         }
@@ -380,7 +416,23 @@ export function parsePastedTranscript(rawInput: string): ParsedTranscriptResult 
       }
 
       if (/^={3,}$|^-{3,}$/.test(trimmed)) {
+        pendingCueIndex = null;
         continue;
+      }
+
+      if (!current && entries.length === 0 && /^(?:WEBVTT(?:\s.*)?|NOTE(?:\s.*)?)$/i.test(trimmed)) {
+        pendingCueIndex = null;
+        continue;
+      }
+
+      // Skip SRT/VTT bare numeric cue index line immediately preceding a timestamp line
+      if (/^\d{1,4}$/.test(trimmed)) {
+        const nextLine = lines[li + 1]?.trim() ?? "";
+        if (stripLeadingTimestamp(nextLine).hadTimestamp) {
+          const parsedCueIdx = parseInt(trimmed, 10);
+          pendingCueIndex = Number.isFinite(parsedCueIdx) ? parsedCueIdx : null;
+          continue;
+        }
       }
 
       // Check block header: [01] MM:SS – MM:SS
@@ -390,16 +442,15 @@ export function parsePastedTranscript(rawInput: string): ParsedTranscriptResult 
         const afterBracket = (bracketMatch[2] || "").trim();
         const tsInfo = stripLeadingTimestamp(afterBracket);
 
-        // If this is a single-line numbered entry without any structured fields anywhere,
-        // it still works, and if fields follow it attaches to this block.
         finalizeCurrent();
+        pendingCueIndex = null;
         current = {
           index: Number.isFinite(idx) ? idx : null,
           ...(tsInfo.startSec !== undefined ? { startSec: tsInfo.startSec } : {}),
           ...(tsInfo.endSec !== undefined ? { endSec: tsInfo.endSec } : {}),
           rawHeader: trimmed,
           hasExplicitFields: false,
-          inlineAfterHeader: tsInfo.rest || undefined,
+          unlabeledLines: tsInfo.rest ? [tsInfo.rest] : [],
           rawText: trimmed,
         };
         continue;
@@ -412,35 +463,38 @@ export function parsePastedTranscript(rawInput: string): ParsedTranscriptResult 
         const tsStart = parseFlexibleTimestampSec(numTsMatch[3] || "");
         const tsEnd = parseFlexibleTimestampSec(numTsMatch[4] || "");
         finalizeCurrent();
+        pendingCueIndex = null;
+        const inlineRest = (numTsMatch[5] || "").trim();
         current = {
           index: Number.isFinite(idx) ? idx : null,
           ...(tsStart !== null ? { startSec: tsStart } : {}),
           ...(tsEnd !== null ? { endSec: tsEnd } : {}),
           rawHeader: trimmed,
           hasExplicitFields: false,
-          inlineAfterHeader: (numTsMatch[5] || "").trim() || undefined,
+          unlabeledLines: inlineRest ? [inlineRest] : [],
           rawText: trimmed,
         };
         continue;
       }
 
-      // Check standalone MM:SS – MM:SS header when structured fields are present
-      if (hasFieldLabel) {
-        const bareTs = stripLeadingTimestamp(trimmed);
-        if (bareTs.hadTimestamp) {
-          finalizeCurrent();
-          current = {
-            index: null,
-            ...(bareTs.startSec !== undefined ? { startSec: bareTs.startSec } : {}),
-            ...(bareTs.endSec !== undefined ? { endSec: bareTs.endSec } : {}),
-            rawHeader: trimmed,
-            hasExplicitFields: false,
-            inlineAfterHeader: bareTs.rest || undefined,
-            rawText: trimmed,
-          };
-          continue;
-        }
+      // Check standalone MM:SS – MM:SS, [MM:SS – MM:SS], or SRT/VTT cue timestamp header
+      const bareTs = stripLeadingTimestamp(trimmed);
+      if (bareTs.hadTimestamp) {
+        finalizeCurrent();
+        current = {
+          index: pendingCueIndex,
+          ...(bareTs.startSec !== undefined ? { startSec: bareTs.startSec } : {}),
+          ...(bareTs.endSec !== undefined ? { endSec: bareTs.endSec } : {}),
+          rawHeader: trimmed,
+          hasExplicitFields: false,
+          unlabeledLines: bareTs.rest ? [bareTs.rest] : [],
+          rawText: trimmed,
+        };
+        pendingCueIndex = null;
+        continue;
       }
+
+      pendingCueIndex = null;
 
       // Check bare "01." header before Phonetic:/Thai:/Burmese:
       const bareNumMatch = trimmed.match(BARE_NUMBERED_HEADER_RE);
@@ -451,6 +505,7 @@ export function parsePastedTranscript(rawInput: string): ParsedTranscriptResult 
           index: Number.isFinite(idx) ? idx : null,
           rawHeader: trimmed,
           hasExplicitFields: false,
+          unlabeledLines: [],
           rawText: trimmed,
         };
         continue;
@@ -466,6 +521,7 @@ export function parsePastedTranscript(rawInput: string): ParsedTranscriptResult 
             current = {
               index: null,
               hasExplicitFields: true,
+              unlabeledLines: [],
               rawText: trimmed,
             };
           }
@@ -485,19 +541,23 @@ export function parsePastedTranscript(rawInput: string): ParsedTranscriptResult 
         }
       }
 
-      // Continuation line inside an active block (only before a blank line)
-      if (current && current.hasExplicitFields && !current.sawBlankLineAfterContent) {
-        if (current.lastField === "burmese") {
-          current.burmese = current.burmese ? `${current.burmese} ${trimmed}` : trimmed;
-        } else if (current.lastField === "phonetic") {
-          current.thaiPhonetic = current.thaiPhonetic
-            ? `${current.thaiPhonetic} ${trimmed}`
-            : trimmed;
-        } else if (current.lastField === "thai") {
-          current.thaiScript = current.thaiScript ? `${current.thaiScript}${trimmed}` : trimmed;
-        } else if (current.lastField === "words") {
-          const extra = parseWordsLine(trimmed);
-          current.words = [...(current.words ?? []), ...extra];
+      // Continuation or unlabeled cue body lines inside an active block (before a blank line)
+      if (current && !current.sawBlankLineAfterContent) {
+        if (current.hasExplicitFields) {
+          if (current.lastField === "burmese") {
+            current.burmese = current.burmese ? `${current.burmese} ${trimmed}` : trimmed;
+          } else if (current.lastField === "phonetic") {
+            current.thaiPhonetic = current.thaiPhonetic
+              ? `${current.thaiPhonetic} ${trimmed}`
+              : trimmed;
+          } else if (current.lastField === "thai") {
+            current.thaiScript = current.thaiScript ? `${current.thaiScript}${trimmed}` : trimmed;
+          } else if (current.lastField === "words") {
+            const extra = parseWordsLine(trimmed);
+            current.words = [...(current.words ?? []), ...extra];
+          }
+        } else if (current.startSec !== undefined || current.index !== null) {
+          current.unlabeledLines.push(trimmed);
         }
       }
     }
@@ -850,6 +910,7 @@ export interface PasteTranscriptBuildOptions {
   timingMode?: TranscriptTimingCoordinateMode;
   scenes?: SpeakingScene[];
   sourceDurationSec?: number;
+  primaryMediaUrl?: string;
 }
 
 export interface StructuredTranscriptImportResult {
@@ -971,6 +1032,12 @@ export function buildSubtitlesFromStructuredTranscript(
       ? options.sourceDurationSec
       : undefined;
 
+  const primaryVideoUrl =
+    options?.primaryMediaUrl &&
+    videoBlocks.some((b) => (b.mediaUrl || "") === options.primaryMediaUrl)
+      ? options.primaryMediaUrl
+      : (videoBlocks[0]?.mediaUrl ?? "");
+
   const isContiguousFullFromZero =
     !hasImages &&
     videoBlocks.length === 1 &&
@@ -986,50 +1053,58 @@ export function buildSubtitlesFromStructuredTranscript(
   if (
     timedEntries.length > 0 &&
     !isContiguousFullFromZero &&
-    videoBlocks.length > 0 &&
-    distinctVideoMediaUrls.size <= 1
+    videoBlocks.length > 0
   ) {
-    const primaryVideoUrl = videoBlocks[0].mediaUrl;
-    const primaryBlocks = videoBlocks.filter((b) => b.mediaUrl === primaryVideoUrl);
-    const minVideoStart = primaryBlocks.reduce((m, b) => Math.min(m, b.startSec), Infinity);
-    const maxVideoEnd = primaryBlocks.reduce((m, b) => Math.max(m, b.endSec), 0);
-    const minTimedStart = timedEntries.reduce(
-      (m, e) => Math.min(m, Math.max(0, e.startSec!)),
-      Infinity
-    );
+    const primaryBlocks = videoBlocks.filter((b) => (b.mediaUrl || "") === (primaryVideoUrl || ""));
+    if (primaryBlocks.length > 0) {
+      const minVideoStart = primaryBlocks.reduce((m, b) => Math.min(m, b.startSec), Infinity);
+      const maxVideoEnd = primaryBlocks.reduce((m, b) => Math.max(m, b.endSec), 0);
 
-    const matchesInSourceBlocks = timedEntries.filter((e) => {
-      const s = Math.max(0, e.startSec!);
-      const end = typeof e.endSec === "number" && e.endSec > s ? e.endSec : s + 1.5;
-      return primaryBlocks.some((b) => end > b.startSec + 0.05 && s < b.endSec - 0.05);
-    }).length;
+      let timelineInRangeCount = 0;
+      let sourceOverlapCount = 0;
+      let matchesPastCutEndInSource = 0;
+      let beforeMinVideoCount = 0;
 
-    const matchesPastCutEndInSource = timedEntries.filter((e) => {
-      const s = Math.max(0, e.startSec!);
-      const end = typeof e.endSec === "number" && e.endSec > s ? e.endSec : s + 1.5;
-      return (
-        s >= clipTotalDurationSec + 0.45 &&
-        primaryBlocks.some((b) => end > b.startSec + 0.05 && s < b.endSec - 0.05)
-      );
-    }).length;
+      for (const e of timedEntries) {
+        const s = Math.max(0, e.startSec!);
+        const end = typeof e.endSec === "number" && e.endSec > s ? e.endSec : s + 1.5;
 
-    const hasEarlyLineBeforeTrim =
-      minVideoStart > 0.6 && minTimedStart < Math.min(1.5, minVideoStart - 0.15);
+        if (s < clipTotalDurationSec - 0.05) {
+          timelineInRangeCount++;
+        }
+        const overlapsSource = primaryBlocks.some(
+          (b) => Math.min(b.endSec, end) - Math.max(b.startSec, s) >= 0.08
+        );
+        if (overlapsSource) {
+          sourceOverlapCount++;
+          if (s >= clipTotalDurationSec + 0.45) {
+            matchesPastCutEndInSource++;
+          }
+        }
+        if (s < minVideoStart - 0.25 && end <= minVideoStart + 0.25) {
+          beforeMinVideoCount++;
+        }
+      }
 
-    if (matchesPastCutEndInSource > 0) {
-      autoDetectedTimingMode = "source";
-    } else if (
-      minVideoStart > 0.8 &&
-      !hasEarlyLineBeforeTrim &&
-      matchesInSourceBlocks >= Math.ceil(timedEntries.length * 0.5)
-    ) {
-      autoDetectedTimingMode = "source";
-    } else if (
-      maxVideoEnd > clipTotalDurationSec + 0.5 &&
-      timedEntries.some((e) => e.startSec! >= clipTotalDurationSec + 0.45) &&
-      matchesInSourceBlocks > 0
-    ) {
-      autoDetectedTimingMode = "source";
+      if (matchesPastCutEndInSource > 0) {
+        autoDetectedTimingMode = "source";
+      } else if (beforeMinVideoCount > 0 && timelineInRangeCount === timedEntries.length) {
+        autoDetectedTimingMode = "timeline";
+      } else if (
+        minVideoStart > 0.8 &&
+        beforeMinVideoCount === 0 &&
+        sourceOverlapCount === timedEntries.length
+      ) {
+        autoDetectedTimingMode = "source";
+      } else if (
+        maxVideoEnd > clipTotalDurationSec + 0.5 &&
+        timedEntries.some((e) => e.startSec! >= clipTotalDurationSec + 0.45) &&
+        sourceOverlapCount > 0
+      ) {
+        autoDetectedTimingMode = "source";
+      } else if (sourceOverlapCount > timelineInRangeCount) {
+        autoDetectedTimingMode = "source";
+      }
     }
   }
 
@@ -1080,18 +1155,38 @@ export function buildSubtitlesFromStructuredTranscript(
     opts?: {
       clipLeftFrac?: number;
       clipRightFrac?: number;
+      bounds?: { minCutStart: number; maxCutEnd: number };
       explicitSource?: {
         sceneIndex: number;
         sceneId?: string;
         mediaUrl?: string;
         sourceStartSec: number;
         sourceEndSec: number;
+        sourceSegments?: SubtitleSourceSegment[];
       };
     }
   ): SubtitleItem => {
-    const cleanStart = Number(Math.max(0, startTime).toFixed(3));
-    const cleanEnd = Number(Math.max(cleanStart + 0.15, endTime).toFixed(3));
-    const duration = Math.max(0.15, cleanEnd - cleanStart);
+    let cleanStartNum = Math.max(0, startTime);
+    let cleanEndNum = endTime;
+    if (opts?.bounds) {
+      const minBound = Math.max(0, opts.bounds.minCutStart);
+      const maxBound = Math.max(minBound + 0.08, opts.bounds.maxCutEnd);
+      cleanStartNum = Math.max(minBound, Math.min(maxBound - 0.08, cleanStartNum));
+      cleanEndNum = Math.min(maxBound, Math.max(cleanStartNum + 0.08, cleanEndNum));
+      if (cleanEndNum - cleanStartNum < 0.15 && maxBound - minBound >= 0.15) {
+        if (cleanStartNum + 0.15 <= maxBound) {
+          cleanEndNum = cleanStartNum + 0.15;
+        } else {
+          cleanEndNum = maxBound;
+          cleanStartNum = Math.max(minBound, maxBound - 0.15);
+        }
+      }
+    } else {
+      cleanEndNum = Math.max(cleanStartNum + 0.15, cleanEndNum);
+    }
+    const cleanStart = Number(cleanStartNum.toFixed(3));
+    const cleanEnd = Number(cleanEndNum.toFixed(3));
+    const duration = Math.max(0.08, cleanEnd - cleanStart);
 
     let parsedWords = Array.isArray(entry.words) ? entry.words : [];
     if (
@@ -1138,7 +1233,10 @@ export function buildSubtitlesFromStructuredTranscript(
         startTime: cleanStart,
         endTime: cleanEnd,
         sourceStartSec: Number(Math.max(0, ex.sourceStartSec).toFixed(3)),
-        sourceEndSec: Number(Math.max(ex.sourceStartSec + 0.12, ex.sourceEndSec).toFixed(3)),
+        sourceEndSec: Number(Math.max(ex.sourceStartSec + 0.08, ex.sourceEndSec).toFixed(3)),
+        ...(ex.sourceSegments && ex.sourceSegments.length > 1
+          ? { sourceSegments: ex.sourceSegments }
+          : {}),
         thaiPhonetic,
         thaiScript,
         burmese,
@@ -1168,8 +1266,9 @@ export function buildSubtitlesFromStructuredTranscript(
     };
   };
 
-  const primaryVideoUrl = videoBlocks[0]?.mediaUrl ?? "";
-  const sourceMatchingBlocks = videoBlocks.filter((b) => b.mediaUrl === primaryVideoUrl);
+  const sourceMatchingBlocks = videoBlocks.filter(
+    (b) => (b.mediaUrl || "") === (primaryVideoUrl || "")
+  );
 
   if (resolvedTimingMode === "source" && distinctVideoMediaUrls.size > 1) {
     warnings.push(
@@ -1190,40 +1289,138 @@ export function buildSubtitlesFromStructuredTranscript(
           : rawStart + 2.0;
 
       if (resolvedTimingMode === "source") {
-        let matchedAny = false;
         const entryDur = Math.max(0.15, rawEnd - rawStart);
+        interface SourceSliceMatch {
+          sceneIndex: number;
+          sceneId?: string;
+          mediaUrl?: string;
+          sourceStartSec: number;
+          sourceEndSec: number;
+          cutStart: number;
+          cutEnd: number;
+          sceneCutStart: number;
+          sceneCutEnd: number;
+        }
+        const sliceMatches: SourceSliceMatch[] = [];
+
         for (const block of sourceMatchingBlocks) {
-          if (rawEnd > block.startSec + 0.05 && rawStart < block.endSec - 0.05) {
-            const ovStart = Math.max(block.startSec, rawStart);
-            const ovEnd = Math.min(block.endSec, rawEnd);
-            if (ovEnd - ovStart >= 0.08) {
-              matchedAny = true;
-              const cutStart = block.cutStart + (ovStart - block.startSec);
-              const cutEnd = block.cutStart + (ovEnd - block.startSec);
-              const matchedRef =
-                block.sceneRefs.find(
-                  (r) => ovStart >= r.startSec - 0.05 && ovStart <= r.endSec + 0.05
-                ) ?? block.sceneRefs[0];
-              const scIdx = matchedRef?.sceneIndex ?? 0;
-              rawBuilt.push(
-                createSubtitleItem(entry, cutStart, cutEnd, rawBuilt.length, {
-                  clipLeftFrac: Math.max(0, (ovStart - rawStart) / entryDur),
-                  clipRightFrac: Math.min(1, (ovEnd - rawStart) / entryDur),
-                  explicitSource: {
-                    sceneIndex: scIdx,
-                    sceneId: matchedRef?.sceneId ?? scenes[scIdx]?.id,
-                    mediaUrl: scenes[scIdx]?.mediaUrl,
-                    sourceStartSec: ovStart,
-                    sourceEndSec: ovEnd,
-                  },
-                })
-              );
-              fallbackCursor = Math.max(fallbackCursor, cutEnd);
+          const blockOvStart = Math.max(block.startSec, rawStart);
+          const blockOvEnd = Math.min(block.endSec, rawEnd);
+          if (blockOvEnd - blockOvStart < 0.08) continue;
+
+          for (const ref of block.sceneRefs) {
+            const ovStart = Math.max(ref.startSec, rawStart);
+            const ovEnd = Math.min(ref.endSec, rawEnd);
+            if (ovEnd - ovStart >= 0.04) {
+              const cutStart = ref.cutStart + (ovStart - ref.startSec);
+              const cutEnd = ref.cutStart + (ovEnd - ref.startSec);
+              sliceMatches.push({
+                sceneIndex: ref.sceneIndex,
+                sceneId: ref.sceneId ?? scenes[ref.sceneIndex]?.id,
+                mediaUrl: scenes[ref.sceneIndex]?.mediaUrl,
+                sourceStartSec: Number(ovStart.toFixed(3)),
+                sourceEndSec: Number(ovEnd.toFixed(3)),
+                cutStart,
+                cutEnd,
+                sceneCutStart: ref.cutStart,
+                sceneCutEnd: ref.cutEnd,
+              });
             }
           }
         }
-        if (!matchedAny) {
+
+        if (sliceMatches.length === 0) {
           outsideSourceClipsCount++;
+          return;
+        }
+
+        sliceMatches.sort((a, b) => a.cutStart - b.cutStart);
+
+        const groups: SourceSliceMatch[][] = [];
+        for (const sl of sliceMatches) {
+          const curGroup = groups[groups.length - 1];
+          if (!curGroup) {
+            groups.push([sl]);
+            continue;
+          }
+          const prev = curGroup[curGroup.length - 1];
+          if (sl.cutStart - prev.cutEnd <= 0.08) {
+            curGroup.push(sl);
+          } else {
+            groups.push([sl]);
+          }
+        }
+
+        for (const group of groups) {
+          const groupCutStart = group[0].cutStart;
+          const groupCutEnd = group[group.length - 1].cutEnd;
+          const boundsMinCut = group[0].sceneCutStart;
+          const boundsMaxCut = group[group.length - 1].sceneCutEnd;
+
+          let bestPos = 0;
+          let bestDur = -1;
+          group.forEach((g, gi) => {
+            const d = g.sourceEndSec - g.sourceStartSec;
+            if (d > bestDur) {
+              bestDur = d;
+              bestPos = gi;
+            }
+          });
+          const dom = group[bestPos];
+
+          let runStart = dom.sourceStartSec;
+          let runEnd = dom.sourceEndSec;
+          for (let i = bestPos - 1; i >= 0; i--) {
+            const g = group[i];
+            if (
+              (g.mediaUrl || "") === (dom.mediaUrl || "") &&
+              Math.abs(runStart - g.sourceEndSec) <= 0.05
+            ) {
+              runStart = Math.min(runStart, g.sourceStartSec);
+            } else {
+              break;
+            }
+          }
+          for (let i = bestPos + 1; i < group.length; i++) {
+            const g = group[i];
+            if (
+              (g.mediaUrl || "") === (dom.mediaUrl || "") &&
+              Math.abs(g.sourceStartSec - runEnd) <= 0.05
+            ) {
+              runEnd = Math.max(runEnd, g.sourceEndSec);
+            } else {
+              break;
+            }
+          }
+
+          const minSrc = group.reduce((m, g) => Math.min(m, g.sourceStartSec), Infinity);
+          const maxSrc = group.reduce((m, g) => Math.max(m, g.sourceEndSec), 0);
+
+          const sourceSegments: SubtitleSourceSegment[] | undefined =
+            group.length > 1
+              ? group.map((g) => ({
+                  ...(g.sceneId ? { sceneId: g.sceneId } : {}),
+                  ...(g.mediaUrl !== undefined ? { mediaUrl: g.mediaUrl } : {}),
+                  sourceStartSec: g.sourceStartSec,
+                  sourceEndSec: g.sourceEndSec,
+                }))
+              : undefined;
+
+          const created = createSubtitleItem(entry, groupCutStart, groupCutEnd, rawBuilt.length, {
+            clipLeftFrac: Math.max(0, (minSrc - rawStart) / entryDur),
+            clipRightFrac: Math.min(1, (maxSrc - rawStart) / entryDur),
+            bounds: { minCutStart: boundsMinCut, maxCutEnd: boundsMaxCut },
+            explicitSource: {
+              sceneIndex: dom.sceneIndex,
+              sceneId: dom.sceneId,
+              mediaUrl: dom.mediaUrl,
+              sourceStartSec: runStart,
+              sourceEndSec: runEnd,
+              ...(sourceSegments ? { sourceSegments } : {}),
+            },
+          });
+          rawBuilt.push(created);
+          fallbackCursor = Math.max(fallbackCursor, created.endTime);
         }
       } else {
         if (hasExplicitScenes && rawStart >= clipTotalDurationSec - 0.05) {
@@ -1274,27 +1471,80 @@ export function buildSubtitlesFromStructuredTranscript(
       const adjustedEnd = Number(next.startTime.toFixed(3));
       const nextDur = Math.max(0.15, adjustedEnd - sub.startTime);
       const oldDur = Math.max(0.15, sub.endTime - sub.startTime);
+      const cutDelta = Math.max(0, sub.endTime - adjustedEnd);
       const ratio = nextDur / oldDur;
       const mapped = mapCutRangeToSourceMetadata(scenes, sub.startTime, adjustedEnd);
+
+      if (resolvedTimingMode === "source") {
+        let nextSourceSegments = sub.sourceSegments
+          ? sub.sourceSegments.map((seg) => ({ ...seg }))
+          : undefined;
+        let trimmedDelta = cutDelta;
+        if (nextSourceSegments && nextSourceSegments.length > 0) {
+          const kept: SubtitleSourceSegment[] = [];
+          // Trim cutDelta cleanly from trailing source segments so we never bleed across deleted gaps
+          for (let sIdx = nextSourceSegments.length - 1; sIdx >= 0; sIdx--) {
+            const seg = nextSourceSegments[sIdx];
+            const segDur = Math.max(0, seg.sourceEndSec - seg.sourceStartSec);
+            if (trimmedDelta <= 0.001) {
+              kept.unshift(seg);
+              continue;
+            }
+            if (segDur - trimmedDelta >= 0.04) {
+              kept.unshift({
+                ...seg,
+                sourceEndSec: Number((seg.sourceEndSec - trimmedDelta).toFixed(3)),
+              });
+              trimmedDelta = 0;
+            } else {
+              trimmedDelta = Math.max(0, trimmedDelta - segDur);
+            }
+          }
+          if (kept.length > 0) {
+            nextSourceSegments = kept;
+          } else {
+            nextSourceSegments = [
+              {
+                ...nextSourceSegments[0],
+                sourceEndSec: Number((nextSourceSegments[0].sourceStartSec + 0.08).toFixed(3)),
+              },
+            ];
+          }
+        }
+
+        const nextSourceEnd =
+          nextSourceSegments && nextSourceSegments.length > 0
+            ? nextSourceSegments[nextSourceSegments.length - 1].sourceEndSec
+            : Number(
+                Math.max(sub.sourceStartSec + 0.08, sub.sourceEndSec - cutDelta).toFixed(3)
+              );
+
+        return {
+          ...sub,
+          endTime: adjustedEnd,
+          sourceEndSec: nextSourceEnd,
+          ...(nextSourceSegments && nextSourceSegments.length > 1
+            ? { sourceSegments: nextSourceSegments }
+            : { sourceSegments: undefined }),
+          words: sub.words.map((w) => ({
+            ...w,
+            startOffsetSec: Number((w.startOffsetSec * ratio).toFixed(2)),
+            endOffsetSec: Number((w.endOffsetSec * ratio).toFixed(2)),
+          })),
+        };
+      }
+
       return {
         ...sub,
         endTime: adjustedEnd,
-        sceneIndex: resolvedTimingMode === "source" ? sub.sceneIndex : mapped.sceneIndex,
-        ...(resolvedTimingMode === "source"
-          ? {
-              sourceEndSec: Number(
-                Math.max(sub.sourceStartSec + 0.12, sub.sourceStartSec + nextDur).toFixed(3)
-              ),
-            }
-          : {
-              ...(mapped.sceneId ? { sceneId: mapped.sceneId } : {}),
-              ...(mapped.mediaUrl !== undefined ? { mediaUrl: mapped.mediaUrl } : {}),
-              sourceStartSec: mapped.sourceStartSec,
-              sourceEndSec: mapped.sourceEndSec,
-              ...(mapped.sourceSegments
-                ? { sourceSegments: mapped.sourceSegments }
-                : { sourceSegments: undefined }),
-            }),
+        sceneIndex: mapped.sceneIndex,
+        ...(mapped.sceneId ? { sceneId: mapped.sceneId } : {}),
+        ...(mapped.mediaUrl !== undefined ? { mediaUrl: mapped.mediaUrl } : {}),
+        sourceStartSec: mapped.sourceStartSec,
+        sourceEndSec: mapped.sourceEndSec,
+        ...(mapped.sourceSegments
+          ? { sourceSegments: mapped.sourceSegments }
+          : { sourceSegments: undefined }),
         words: sub.words.map((w) => ({
           ...w,
           startOffsetSec: Number((w.startOffsetSec * ratio).toFixed(2)),

@@ -4,11 +4,14 @@ import {
   ArrowUpFromLine,
   Bookmark,
   Check,
+  ChevronDown,
   Clapperboard,
   Compass,
+  Film,
   FolderOpen,
   Loader2,
   Moon,
+  Music,
   RefreshCw,
   Sun,
 } from "lucide-react";
@@ -21,11 +24,7 @@ import type {
   SubtitleGenerationConfig,
   SubtitleGenerationProgress,
   SubtitleItem,
-  SubtitleSourceLanguage,
   SubtitleWord,
-  TranscriptModelId,
-  TranscriptProgress,
-  TranscriptResult,
   TranslationTone,
   VideoEditSettings,
   VideoProject,
@@ -43,11 +42,13 @@ import {
 import { ProjectTimelineEditor } from "./components/ProjectTimelineEditor";
 import { EmptyStudioUpload } from "./components/EmptyStudioUpload";
 import { ExportSheet } from "./components/ExportSheet";
-import { PasteStructuredTranscriptDialog } from "./components/PasteStructuredTranscriptDialog";
+import { GenerateSubtitlesDialog } from "./components/GenerateSubtitlesDialog";
 import { OfflineIndicator, PWAInstallButton } from "./components/PWAInstallButton";
 import {
+  exportProjectToMp3,
   exportProjectToMp4,
   type ExportedVideoResult,
+  type ExportFormat,
   type ExportProgress,
 } from "./utils/exportVideo";
 import { DEFAULT_VOICE_SETTINGS } from "./utils/voicePresets";
@@ -64,8 +65,6 @@ import {
   uploadBlobInChunks,
 } from "./utils/uploadFile";
 import { extractMp4AudioClips } from "./utils/mp4ClipAudio";
-import { runTranscriptGeneration } from "./utils/whisperTranscriber";
-import type { StructuredTranscriptImportResult } from "./utils/pasteTranscriptSync";
 import { makeSafeFileSlug } from "./utils/exportSubtitles";
 import {
   ensureSceneIds,
@@ -166,7 +165,7 @@ export default function App() {
   const [loopingSubId, setLoopingSubId] = useState<string | null>(null);
   const [selectedSubtitleId, setSelectedSubtitleId] = useState<string | null>(null);
   const [editingSubtitleId, setEditingSubtitleId] = useState<string | null>(null);
-  const [showPasteTranscriptDialog, setShowPasteTranscriptDialog] = useState(false);
+  const [showGenerateSubtitlesDialog, setShowGenerateSubtitlesDialog] = useState(false);
   const [subtitleGenConfig, setSubtitleGenConfig] = useState<SubtitleGenerationConfig>(
     () => loadSavedSubtitleGenConfig()
   );
@@ -195,13 +194,31 @@ export default function App() {
   const [seekNonce, setSeekNonce] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [muted, setMuted] = useState(false);
+  const [exportFormat, setExportFormat] = useState<ExportFormat>("mp4");
+  const [exportingFormat, setExportingFormat] = useState<ExportFormat | null>(null);
   const [exportProgress, setExportProgress] = useState<ExportProgress | null>(null);
-  const [readyDownload, setReadyDownload] = useState<ExportedVideoResult | null>(null);
-  const [exportedSignature, setExportedSignature] = useState<string | null>(null);
-  const [hasSavedExport, setHasSavedExport] = useState(false);
-  const [exportError, setExportError] = useState<string | null>(null);
+  const [exportsByFormat, setExportsByFormat] = useState<
+    Record<
+      ExportFormat,
+      {
+        result: ExportedVideoResult | null;
+        signature: string | null;
+        hasSaved: boolean;
+        error: string | null;
+      }
+    >
+  >({
+    mp4: { result: null, signature: null, hasSaved: false, error: null },
+    mp3: { result: null, signature: null, hasSaved: false, error: null },
+  });
   const [exportSheetOpen, setExportSheetOpen] = useState(false);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const exportMenuRef = useRef<HTMLDivElement | null>(null);
   const exportAbortRef = useRef<AbortController | null>(null);
+  const prevExportUrlsRef = useRef<Record<ExportFormat, string | null>>({
+    mp4: null,
+    mp3: null,
+  });
 
   const [savedProjects, setSavedProjects] = useState<SavedProjectRecord[]>([]);
   const [activeSavedId, setActiveSavedId] = useState<string | null>(null);
@@ -218,21 +235,9 @@ export default function App() {
 
   const [isExportingAudio, setIsExportingAudio] = useState(false);
 
-  const [transcriptModelId, setTranscriptModelId] =
-    useState<TranscriptModelId>("whisper-base");
-  const [transcriptLanguage, setTranscriptLanguage] =
-    useState<SubtitleSourceLanguage>("auto");
-  const [transcriptWordTimestamps, setTranscriptWordTimestamps] = useState(false);
-  const [isTranscribingStandalone, setIsTranscribingStandalone] = useState(false);
-  const [transcriptProgress, setTranscriptProgress] =
-    useState<TranscriptProgress | null>(null);
-  const [transcriptError, setTranscriptError] = useState<string | null>(null);
-  const [transcriptResult, setTranscriptResult] = useState<TranscriptResult | null>(null);
-
   const activeRunIdRef = useRef(0);
   const lastGenActionRef = useRef<{ type: "all" } | { type: "clip"; sceneId: string } | null>(null);
   const generateAbortRef = useRef<AbortController | null>(null);
-  const standaloneTranscriptAbortRef = useRef<AbortController | null>(null);
   const resyncAbortRef = useRef<AbortController | null>(null);
   const transcribeRangeAbortRef = useRef<AbortController | null>(null);
   const retranslateAbortRef = useRef<AbortController | null>(null);
@@ -345,6 +350,12 @@ export default function App() {
     (subs: SubtitleItem[]): SubtitleItem[] =>
       subs.map((sub) => ({
         ...sub,
+        ...(sub.sourceSegments
+          ? { sourceSegments: sub.sourceSegments.map((seg) => ({ ...seg })) }
+          : {}),
+        ...(sub.aiSourceSegments
+          ? { aiSourceSegments: sub.aiSourceSegments.map((seg) => ({ ...seg })) }
+          : {}),
         words: (Array.isArray(sub.words) ? sub.words : []).map((w) => ({ ...w })),
       })),
     []
@@ -386,6 +397,30 @@ export default function App() {
         );
       setTimelineDirty(dirty);
     }
+
+    const snapGuideSource =
+      snap.baselineSubtitles && snap.baselineSubtitles.length > 0
+        ? snap.baselineSubtitles
+        : snap.subtitles;
+    setBaselineSubRegions(
+      snapGuideSource.flatMap((s) =>
+        Array.isArray(s.sourceSegments) && s.sourceSegments.length > 0
+          ? s.sourceSegments.map((seg) => ({
+              sourceStartSec: seg.sourceStartSec,
+              sourceEndSec: seg.sourceEndSec,
+              mediaUrl: seg.mediaUrl,
+              sceneId: seg.sceneId,
+            }))
+          : [
+              {
+                sourceStartSec: s.sourceStartSec,
+                sourceEndSec: s.sourceEndSec,
+                mediaUrl: s.mediaUrl,
+                sceneId: s.sceneId,
+              },
+            ]
+      )
+    );
 
     setProject((prev) => {
       if (!prev) return prev;
@@ -524,6 +559,12 @@ export default function App() {
       scenes: ensureSceneIds(proj.scenes).map((s) => ({ ...s })),
       subtitles: proj.subtitles.map((sub) => ({
         ...sub,
+        ...(sub.sourceSegments
+          ? { sourceSegments: sub.sourceSegments.map((seg) => ({ ...seg })) }
+          : {}),
+        ...(sub.aiSourceSegments
+          ? { aiSourceSegments: sub.aiSourceSegments.map((seg) => ({ ...seg })) }
+          : {}),
         words: sub.words.map((w) => ({ ...w })),
       })),
     };
@@ -870,12 +911,6 @@ export default function App() {
     setActiveSavedId(null);
     setProject(null);
     setBaselineFromProject(null);
-    standaloneTranscriptAbortRef.current?.abort();
-    standaloneTranscriptAbortRef.current = null;
-    setIsTranscribingStandalone(false);
-    setTranscriptProgress(null);
-    setTranscriptError(null);
-    setTranscriptResult(null);
 
     const resolvedMime = inferVideoMimeType(rawFile.name, rawFile.type);
     let file: File = rawFile;
@@ -1184,12 +1219,6 @@ export default function App() {
     setSaveNotice(null);
     setActiveSavedId(null);
     setLocalMedia(null);
-    standaloneTranscriptAbortRef.current?.abort();
-    standaloneTranscriptAbortRef.current = null;
-    setIsTranscribingStandalone(false);
-    setTranscriptProgress(null);
-    setTranscriptError(null);
-    setTranscriptResult(null);
     setProject((prev) => {
       if (prev) {
         setBaselineFromProject(null);
@@ -1200,115 +1229,6 @@ export default function App() {
     setActiveTab("studio");
     setStudioSection("edit");
   };
-
-  const handleCancelStandaloneTranscript = useCallback(() => {
-    standaloneTranscriptAbortRef.current?.abort();
-    standaloneTranscriptAbortRef.current = null;
-    setIsTranscribingStandalone(false);
-    setTranscriptProgress(null);
-  }, []);
-
-  const handleStartStandaloneTranscript = useCallback(async () => {
-    const file = projectRef.current?.localFile || localMedia?.localFile;
-    if (!file) {
-      setTranscriptError("Please upload or link a local video file first.");
-      return;
-    }
-
-    standaloneTranscriptAbortRef.current?.abort();
-    const ctrl = new AbortController();
-    standaloneTranscriptAbortRef.current = ctrl;
-
-    setTranscriptError(null);
-    setIsTranscribingStandalone(true);
-    setTranscriptProgress({
-      phase: "extracting",
-      label: "Preparing audio...",
-      percent: 5,
-    });
-
-    try {
-      const projectScenesById = new Map(
-        (projectRef.current?.scenes ?? []).map((sc, idx) => [
-          sc.id || `sc-${idx}-${sc.startSec}-${sc.endSec}`,
-          sc,
-        ])
-      );
-      const videoOnlyScenes = selectedScenes.filter((sel) => {
-        const matched = projectScenesById.get(sel.id);
-        return !matched || matched.mediaType !== "image";
-      });
-      const activeScenes =
-        videoOnlyScenes.length > 0
-          ? videoOnlyScenes
-          : [
-              {
-                id: "sc-full",
-                startSec: 0,
-                endSec: Math.max(1, localMedia?.durationSec ?? projectRef.current?.sourceDurationSec ?? 120),
-              },
-            ];
-
-      const result = await runTranscriptGeneration({
-        file,
-        title: localMedia?.title || projectRef.current?.title || file.name,
-        scenes: activeScenes,
-        modelId: transcriptModelId,
-        language: transcriptLanguage,
-        wordTimestamps: transcriptWordTimestamps,
-        uploadId: projectRef.current?.uploadId || localMedia?.uploadId,
-        onUploadId: (uploadId) => {
-          setLocalMedia((prev) => (prev ? { ...prev, uploadId } : prev));
-          setProject((prev) => (prev ? { ...prev, uploadId } : prev));
-        },
-        signal: ctrl.signal,
-        onProgress: (p) => {
-          if (!ctrl.signal.aborted) {
-            setTranscriptProgress(p);
-          }
-        },
-      });
-
-      if (ctrl.signal.aborted) return;
-      setTranscriptResult(result);
-    } catch (err) {
-      if (ctrl.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) {
-        return;
-      }
-      setTranscriptError(
-        formatReadableApiError(err, "Failed to generate transcript. Try a smaller model or Cloud AI.")
-      );
-    } finally {
-      if (standaloneTranscriptAbortRef.current === ctrl) {
-        standaloneTranscriptAbortRef.current = null;
-      }
-      setIsTranscribingStandalone(false);
-      setTranscriptProgress(null);
-    }
-  }, [
-    localMedia,
-    selectedScenes,
-    transcriptLanguage,
-    transcriptModelId,
-    transcriptWordTimestamps,
-  ]);
-
-  const handleUpdateTranscriptSegmentText = useCallback(
-    (segmentId: string, text: string) => {
-      setTranscriptResult((prev) => {
-        if (!prev) return prev;
-        const nextSegments = prev.segments.map((seg) =>
-          seg.id === segmentId ? { ...seg, text } : seg
-        );
-        return {
-          ...prev,
-          segments: nextSegments,
-          text: nextSegments.map((s) => s.text.trim()).filter(Boolean).join(" "),
-        };
-      });
-    },
-    []
-  );
 
   const handleCancelGenerateSubtitles = useCallback(() => {
     activeRunIdRef.current++;
@@ -1449,10 +1369,23 @@ export default function App() {
       const mergedSubtitles = [...preservedSubs, ...newClipSubs].sort(
         (a, b) => a.startTime - b.startTime
       );
-      const speechRegions = mergedSubtitles.map((s) => ({
-        sourceStartSec: s.sourceStartSec,
-        sourceEndSec: s.sourceEndSec,
-      }));
+      const speechRegions = mergedSubtitles.flatMap((s) =>
+        Array.isArray(s.sourceSegments) && s.sourceSegments.length > 0
+          ? s.sourceSegments.map((seg) => ({
+              sourceStartSec: seg.sourceStartSec,
+              sourceEndSec: seg.sourceEndSec,
+              mediaUrl: seg.mediaUrl,
+              sceneId: seg.sceneId,
+            }))
+          : [
+              {
+                sourceStartSec: s.sourceStartSec,
+                sourceEndSec: s.sourceEndSec,
+                mediaUrl: s.mediaUrl,
+                sceneId: s.sceneId,
+              },
+            ]
+      );
 
       const { isDraft: _dropDraft, ...baseProj } = prevProj || returnedData;
 
@@ -1477,36 +1410,52 @@ export default function App() {
   const attachSceneIdsFromServerProject = useCallback(
     (
       serverData: VideoProject,
-      priorScenes?: Array<{ id?: string; startSec: number; endSec: number }>
+      priorScenes?: Array<{
+        id?: string;
+        startSec: number;
+        endSec: number;
+        mediaType?: "video" | "image";
+        mediaUrl?: string;
+        mediaFile?: File;
+        uploadId?: string;
+        sourceDurationSec?: number;
+      }>
     ): VideoProject => {
       const rawScenes = Array.isArray(serverData.scenes) ? serverData.scenes : [];
       const usedIds = new Set<string>();
       const scenesWithPreservedIds = rawScenes.map((sc, idx) => {
-        if (sc.id) {
-          usedIds.add(sc.id);
+        if (!priorScenes || priorScenes.length === 0) {
+          if (sc.id) usedIds.add(sc.id);
           return sc;
         }
-        if (!priorScenes || priorScenes.length === 0) return sc;
         const sameIdx = priorScenes[idx];
         const matched =
           sameIdx &&
-          sameIdx.id &&
-          !usedIds.has(sameIdx.id) &&
+          (!sameIdx.id || !usedIds.has(sameIdx.id)) &&
           Math.abs(sameIdx.startSec - sc.startSec) < 0.15 &&
           Math.abs(sameIdx.endSec - sc.endSec) < 0.15
             ? sameIdx
             : priorScenes.find(
                 (ps) =>
-                  ps.id &&
-                  !usedIds.has(ps.id) &&
+                  (!ps.id || !usedIds.has(ps.id)) &&
                   Math.abs(ps.startSec - sc.startSec) < 0.15 &&
                   Math.abs(ps.endSec - sc.endSec) < 0.15
               );
-        if (matched?.id) {
-          usedIds.add(matched.id);
-          return { ...sc, id: matched.id };
+        const resolvedId = sc.id || matched?.id;
+        if (resolvedId) {
+          usedIds.add(resolvedId);
         }
-        return sc;
+        return {
+          ...sc,
+          ...(resolvedId ? { id: resolvedId } : {}),
+          ...(matched?.mediaType ? { mediaType: matched.mediaType } : {}),
+          ...(matched?.mediaUrl ? { mediaUrl: matched.mediaUrl } : {}),
+          ...(matched?.mediaFile ? { mediaFile: matched.mediaFile } : {}),
+          ...(matched?.uploadId ? { uploadId: matched.uploadId } : {}),
+          ...(typeof matched?.sourceDurationSec === "number"
+            ? { sourceDurationSec: matched.sourceDurationSec }
+            : {}),
+        };
       });
       const scenes = ensureSceneIds(scenesWithPreservedIds);
       const subtitles = (Array.isArray(serverData.subtitles) ? serverData.subtitles : []).map(
@@ -1721,7 +1670,10 @@ export default function App() {
           pushSubtitleUndo();
         }
 
-        const normalizedServerProj = attachSceneIdsFromServerProject(data, selectedScenes);
+        const normalizedServerProj = attachSceneIdsFromServerProject(
+          data,
+          projectRef.current?.scenes ?? selectedScenes
+        );
         const nextProj: VideoProject = {
           ...normalizedServerProj,
           localUrl: targetMedia.localUrl,
@@ -1748,6 +1700,16 @@ export default function App() {
                 : false,
         }));
 
+        setEditingSubtitleId(null);
+        setSelectedSubtitleId(nextProj.subtitles[0]?.id ?? null);
+        setShowGenerateSubtitlesDialog(false);
+        setSaveNotice(
+          nextProj.subtitles.length > 0
+            ? `Generated ${nextProj.subtitles.length} ${
+                nextProj.subtitles.length === 1 ? "subtitle" : "subtitles"
+              } with Gemini.`
+            : "No speech subtitles were detected in the selected clips."
+        );
         setActiveTab("studio");
         setStudioSection("edit");
       }
@@ -2303,6 +2265,27 @@ export default function App() {
     const nextDuration = Number(
       nextScenes.reduce((acc, sc) => acc + getSceneDurationSec(sc), 0).toFixed(2)
     );
+    const clonedBaselineSubs = cloneSubtitleList(base.subtitles);
+    const remappedSubs = remapSubtitlesToScenes(clonedBaselineSubs, nextScenes);
+    setBaselineSubRegions(
+      remappedSubs.flatMap((s) =>
+        Array.isArray(s.sourceSegments) && s.sourceSegments.length > 0
+          ? s.sourceSegments.map((seg) => ({
+              sourceStartSec: seg.sourceStartSec,
+              sourceEndSec: seg.sourceEndSec,
+              mediaUrl: seg.mediaUrl,
+              sceneId: seg.sceneId,
+            }))
+          : [
+              {
+                sourceStartSec: s.sourceStartSec,
+                sourceEndSec: s.sourceEndSec,
+                mediaUrl: s.mediaUrl,
+                sceneId: s.sceneId,
+              },
+            ]
+      )
+    );
     setTimelineDirty(false);
     setProject((prev) => {
       if (!prev) return prev;
@@ -2310,13 +2293,10 @@ export default function App() {
         ...prev,
         scenes: nextScenes,
         targetDurationSec: nextDuration,
-        subtitles: base.subtitles.map((sub) => ({
-          ...sub,
-          words: (Array.isArray(sub.words) ? sub.words : []).map((w) => ({ ...w })),
-        })),
+        subtitles: remappedSubs,
       };
     });
-  }, [pushProjectUndo]);
+  }, [cloneSubtitleList, pushProjectUndo]);
 
   const handleUpdateSubtitle = (
     id: string,
@@ -2525,189 +2505,6 @@ export default function App() {
     }
   };
 
-  const handleApplyPastedTranscript = (
-    result: StructuredTranscriptImportResult,
-    mode: "replace" | "append"
-  ) => {
-    const curProj = projectRef.current;
-    if (!curProj || result.subtitles.length === 0) return;
-
-    const computedScenesDur = curProj.scenes.reduce((acc, sc) => acc + getSceneDurationSec(sc), 0);
-    const maxCutDur = Math.max(
-      0.5,
-      computedScenesDur > 0
-        ? computedScenesDur
-        : curProj.targetDurationSec || localMedia?.durationSec || result.targetDurationSec || 10
-    );
-
-    const inRangeRaw = result.subtitles.filter((sub) => sub.startTime < maxCutDur - 0.05);
-    const skippedOutOfRange = result.subtitles.length - inRangeRaw.length;
-    const candidateSubs = inRangeRaw.length > 0 ? inRangeRaw : [result.subtitles[0]];
-
-    const normalizePastedSub = (sub: SubtitleItem): SubtitleItem => {
-      const startTime = Number(Math.max(0, Math.min(maxCutDur - 0.15, sub.startTime)).toFixed(2));
-      const endTime = Number(
-        Math.max(startTime + 0.15, Math.min(maxCutDur, sub.endTime)).toFixed(2)
-      );
-      const duration = Math.max(0.15, endTime - startTime);
-      const oldDur = Math.max(0.15, sub.endTime - sub.startTime);
-      const ratio = duration / oldDur;
-
-      const preserveSourceAnchor =
-        result.resolvedTimingMode === "source" &&
-        Number.isFinite(sub.sourceStartSec) &&
-        Number.isFinite(sub.sourceEndSec) &&
-        sub.sourceEndSec > sub.sourceStartSec &&
-        sub.sceneIndex >= 0 &&
-        sub.sceneIndex < curProj.scenes.length;
-
-      let sceneIndex: number;
-      let sceneId: string | undefined;
-      let mediaUrl: string | undefined;
-      let sourceStartSec: number;
-      let sourceEndSec: number;
-      let sourceSegments = undefined as SubtitleItem["sourceSegments"];
-
-      if (preserveSourceAnchor) {
-        const sc = curProj.scenes[sub.sceneIndex];
-        sceneIndex = sub.sceneIndex;
-        sceneId = sc?.id ?? sub.sceneId;
-        mediaUrl = sc?.mediaUrl !== undefined ? sc.mediaUrl : sub.mediaUrl;
-        const clampedSrcStart = Math.max(0, sub.sourceStartSec);
-        const clampedSrcEnd = Math.max(
-          clampedSrcStart + 0.12,
-          Math.min(sub.sourceEndSec, clampedSrcStart + duration)
-        );
-        sourceStartSec = Number(clampedSrcStart.toFixed(2));
-        sourceEndSec = Number(clampedSrcEnd.toFixed(2));
-      } else {
-        const mapped = mapCutRangeToSourceMetadata(curProj.scenes, startTime, endTime);
-        sceneIndex = mapped.sceneIndex;
-        sceneId = mapped.sceneId;
-        mediaUrl = mapped.mediaUrl;
-        sourceStartSec = Number(mapped.sourceStartSec.toFixed(2));
-        sourceEndSec = Number(mapped.sourceEndSec.toFixed(2));
-        sourceSegments = mapped.sourceSegments;
-      }
-
-      return withSceneId(
-        {
-          ...sub,
-          sceneIndex,
-          ...(sceneId ? { sceneId } : {}),
-          mediaUrl,
-          startTime,
-          endTime,
-          sourceStartSec,
-          sourceEndSec,
-          ...(sourceSegments ? { sourceSegments } : { sourceSegments: undefined }),
-          aiSourceStartSec: undefined,
-          aiSourceEndSec: undefined,
-          words: sub.words.map((w) => ({
-            ...w,
-            startOffsetSec: Number(
-              Math.max(0, Math.min(duration - 0.02, w.startOffsetSec * ratio)).toFixed(2)
-            ),
-            endOffsetSec: Number(
-              Math.max(0.02, Math.min(duration, w.endOffsetSec * ratio)).toFixed(2)
-            ),
-          })),
-        },
-        curProj.scenes
-      );
-    };
-
-    const normalizedSubs = candidateSubs
-      .map(normalizePastedSub)
-      .sort((a, b) => a.startTime - b.startTime);
-    if (normalizedSubs.length === 0) return;
-
-    pushSubtitleUndo();
-
-    const mergeSubtitles = (base: SubtitleItem[]) =>
-      mode === "replace"
-        ? normalizedSubs.map((s) => ({
-            ...s,
-            ...(s.sourceSegments
-              ? { sourceSegments: s.sourceSegments.map((seg) => ({ ...seg })) }
-              : {}),
-            words: s.words.map((w) => ({ ...w })),
-          }))
-        : [
-            ...base,
-            ...normalizedSubs.map((s) => ({
-              ...s,
-              ...(s.sourceSegments
-                ? { sourceSegments: s.sourceSegments.map((seg) => ({ ...seg })) }
-                : {}),
-              words: s.words.map((w) => ({ ...w })),
-            })),
-          ].sort((a, b) => a.startTime - b.startTime);
-
-    const nextBaselineSubs = mergeSubtitles(
-      timelineBaselineRef.current ? timelineBaselineRef.current.subtitles : curProj.subtitles
-    );
-    if (timelineBaselineRef.current) {
-      timelineBaselineRef.current.subtitles = nextBaselineSubs;
-    }
-
-    const nextSpeechRegions: SpeechRegion[] = nextBaselineSubs.flatMap((s) =>
-      Array.isArray(s.sourceSegments) && s.sourceSegments.length > 0
-        ? s.sourceSegments.map((seg) => ({
-            sourceStartSec: seg.sourceStartSec,
-            sourceEndSec: seg.sourceEndSec,
-            mediaUrl: seg.mediaUrl,
-            sceneId: seg.sceneId,
-          }))
-        : [
-            {
-              sourceStartSec: s.sourceStartSec,
-              sourceEndSec: s.sourceEndSec,
-              mediaUrl: s.mediaUrl,
-              sceneId: s.sceneId,
-            },
-          ]
-    );
-    setBaselineSubRegions(nextSpeechRegions);
-
-    setProject((prev) => {
-      if (!prev) return prev;
-      return {
-        ...prev,
-        isDraft: false,
-        speechRegions: mode === "replace" ? undefined : prev.speechRegions,
-        subtitles: mergeSubtitles(prev.subtitles),
-      };
-    });
-
-    setVideoEdit((prev) => ({
-      ...prev,
-      showBurmeseLine: result.hasBurmese ? true : prev.showBurmeseLine,
-      showWordGloss: result.hasWords ? true : prev.showWordGloss,
-      showThaiScript: result.hasThai ? true : prev.showThaiScript,
-    }));
-
-    const firstSub = normalizedSubs[0];
-    setEditingSubtitleId(null);
-    setSelectedSubtitleId(firstSub.id);
-    setStageSelectRequest({ id: firstSub.id, focusPhonetic: false, nonce: Date.now() });
-    handleSeek(firstSub.startTime);
-    setShowPasteTranscriptDialog(false);
-    const skippedSuffix =
-      skippedOutOfRange > 0 && inRangeRaw.length > 0
-        ? ` (${skippedOutOfRange} past timeline end skipped)`
-        : "";
-    setSaveNotice(
-      mode === "replace" && curProj.subtitles.length > 0
-        ? `Replaced subtitles with ${normalizedSubs.length} pasted ${
-            normalizedSubs.length === 1 ? "line" : "lines"
-          }${skippedSuffix}.`
-        : `Added ${normalizedSubs.length} pasted ${
-            normalizedSubs.length === 1 ? "subtitle" : "subtitles"
-          }${skippedSuffix}.`
-    );
-  };
-
   const handleDeleteSubtitle = (id: string) => {
     if (project?.subtitles.some((s) => s.id === id)) {
       pushSubtitleUndo();
@@ -2734,6 +2531,7 @@ export default function App() {
     if (timelineBaselineRef.current) {
       timelineBaselineRef.current.subtitles = [];
     }
+    setBaselineSubRegions([]);
     setProject((prev) => (prev ? { ...prev, subtitles: [] } : prev));
     setSelectedSubtitleId(null);
     setEditingSubtitleId(null);
@@ -2851,7 +2649,13 @@ export default function App() {
                 typeof sub.aiSourceEndSec === "number" && Number.isFinite(sub.aiSourceEndSec)
                   ? sub.aiSourceEndSec
                   : sub.sourceEndSec,
+              ...(sub.aiSourceSegments
+                ? { aiSourceSegments: sub.aiSourceSegments.map((seg) => ({ ...seg })) }
+                : sub.sourceSegments
+                  ? { aiSourceSegments: sub.sourceSegments.map((seg) => ({ ...seg })) }
+                  : {}),
               sceneIndex: mapped.sceneIndex,
+              sceneId: mapped.sceneId,
               mediaUrl: mapped.mediaUrl,
               startTime,
               endTime,
@@ -2899,7 +2703,13 @@ export default function App() {
                 typeof sub.aiSourceEndSec === "number" && Number.isFinite(sub.aiSourceEndSec)
                   ? sub.aiSourceEndSec
                   : sub.sourceEndSec,
+              ...(sub.aiSourceSegments
+                ? { aiSourceSegments: sub.aiSourceSegments.map((seg) => ({ ...seg })) }
+                : sub.sourceSegments
+                  ? { aiSourceSegments: sub.sourceSegments.map((seg) => ({ ...seg })) }
+                  : {}),
               sceneIndex: mapped.sceneIndex,
+              sceneId: mapped.sceneId,
               mediaUrl: mapped.mediaUrl,
               startTime: nextStart,
               endTime: nextEnd,
@@ -3019,11 +2829,15 @@ export default function App() {
         {
           ...target,
           sceneIndex: mappedFirst.sceneIndex,
+          sceneId: mappedFirst.sceneId,
           mediaUrl: mappedFirst.mediaUrl,
           endTime: splitTime,
           sourceStartSec: Number(mappedFirst.sourceStartSec.toFixed(2)),
           sourceEndSec: Number(mappedFirst.sourceEndSec.toFixed(2)),
           sourceSegments: mappedFirst.sourceSegments,
+          aiSourceStartSec: undefined,
+          aiSourceEndSec: undefined,
+          aiSourceSegments: undefined,
           originalSpokenText: spoken1,
           thaiScript: thaiScript1,
           thaiPhonetic: phonetic1,
@@ -3037,6 +2851,7 @@ export default function App() {
         {
           id: `${target.id}-sp-${Date.now().toString(36).slice(-4)}`,
           sceneIndex: mappedSecond.sceneIndex,
+          sceneId: mappedSecond.sceneId,
           mediaUrl: mappedSecond.mediaUrl,
           startTime: splitTime,
           endTime: target.endTime,
@@ -3097,12 +2912,16 @@ export default function App() {
         {
           ...cur,
           sceneIndex: mapped.sceneIndex,
+          sceneId: mapped.sceneId,
           mediaUrl: mapped.mediaUrl,
           startTime: Number(mergedStart.toFixed(2)),
           endTime: Number(mergedEnd.toFixed(2)),
           sourceStartSec: Number(mapped.sourceStartSec.toFixed(2)),
           sourceEndSec: Number(mapped.sourceEndSec.toFixed(2)),
           sourceSegments: mapped.sourceSegments,
+          aiSourceStartSec: undefined,
+          aiSourceEndSec: undefined,
+          aiSourceSegments: undefined,
           originalSpokenText: [cur.originalSpokenText, nxt.originalSpokenText]
             .map((s) => s.trim())
             .filter(Boolean)
@@ -3541,6 +3360,7 @@ export default function App() {
           {
             ...sub,
             sceneIndex: mapped.sceneIndex,
+            sceneId: mapped.sceneId,
             mediaUrl: mapped.mediaUrl,
             startTime,
             endTime,
@@ -3991,6 +3811,7 @@ export default function App() {
           {
             id: `sub-range-${stamp}-${idx}-${Math.random().toString(36).slice(2, 6)}`,
             sceneIndex: mapped.sceneIndex,
+            sceneId: mapped.sceneId,
             mediaUrl: mapped.mediaUrl,
             startTime: itemStart,
             endTime: itemEnd,
@@ -4065,16 +3886,52 @@ export default function App() {
   };
 
   useEffect(() => {
-    const currentUrl = readyDownload?.blobUrl;
+    for (const fmt of ["mp4", "mp3"] as const) {
+      const nextUrl = exportsByFormat[fmt].result?.blobUrl ?? null;
+      const prevUrl = prevExportUrlsRef.current[fmt];
+      if (prevUrl && prevUrl !== nextUrl) {
+        URL.revokeObjectURL(prevUrl);
+      }
+      prevExportUrlsRef.current[fmt] = nextUrl;
+    }
+  }, [exportsByFormat]);
+
+  useEffect(() => {
     return () => {
-      if (currentUrl) {
-        URL.revokeObjectURL(currentUrl);
+      for (const fmt of ["mp4", "mp3"] as const) {
+        const url = prevExportUrlsRef.current[fmt];
+        if (url) {
+          URL.revokeObjectURL(url);
+          prevExportUrlsRef.current[fmt] = null;
+        }
       }
     };
-  }, [readyDownload]);
+  }, []);
+
+  useEffect(() => {
+    if (!exportMenuOpen) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (exportMenuRef.current && !exportMenuRef.current.contains(e.target as Node)) {
+        setExportMenuOpen(false);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setExportMenuOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [exportMenuOpen]);
 
   const triggerSafeBlobDownload = useCallback((item: ExportedVideoResult) => {
     // Strictly uses the in-memory blob: URL (never navigates to /api/* or triggers auth proxy)
+    const fmt: ExportFormat =
+      item.format ?? (item.fileName.toLowerCase().endsWith(".mp3") ? "mp3" : "mp4");
     const a = document.createElement("a");
     a.href = item.blobUrl;
     a.download = item.fileName;
@@ -4082,27 +3939,34 @@ export default function App() {
     document.body.appendChild(a);
     a.click();
     a.remove();
-    setHasSavedExport(true);
+    setExportsByFormat((prev) => ({
+      ...prev,
+      [fmt]: { ...prev[fmt], hasSaved: true },
+    }));
   }, []);
 
-  const canShareMp4File = useCallback((item: ExportedVideoResult): boolean => {
+  const canShareExportFile = useCallback((item: ExportedVideoResult): boolean => {
     try {
       if (typeof navigator === "undefined" || typeof navigator.share !== "function") {
         return false;
       }
       if (typeof navigator.canShare !== "function") return false;
-      const testFile = new File([item.blob], item.fileName, { type: "video/mp4" });
+      const mimeType =
+        item.mimeType ?? (item.format === "mp3" || item.fileName.toLowerCase().endsWith(".mp3") ? "audio/mpeg" : "video/mp4");
+      const testFile = new File([item.blob], item.fileName, { type: mimeType });
       return navigator.canShare({ files: [testFile] });
     } catch {
       return false;
     }
   }, []);
 
-  const handleShareMp4 = useCallback(async (item: ExportedVideoResult) => {
+  const handleShareExport = useCallback(async (item: ExportedVideoResult) => {
     try {
-      const mp4File = new File([item.blob], item.fileName, { type: "video/mp4" });
+      const mimeType =
+        item.mimeType ?? (item.format === "mp3" || item.fileName.toLowerCase().endsWith(".mp3") ? "audio/mpeg" : "video/mp4");
+      const exportFile = new File([item.blob], item.fileName, { type: mimeType });
       await navigator.share({
-        files: [mp4File],
+        files: [exportFile],
         title: item.fileName,
       });
     } catch (err) {
@@ -4122,11 +3986,13 @@ export default function App() {
     setExportSheetOpen(false);
   }, []);
 
-  const currentExportSignature = useMemo(() => {
-    if (!hasGeneratedProject(project)) return "";
+  const currentExportSignatures = useMemo(() => {
+    if (!hasGeneratedProject(project)) {
+      return { mp4: "", mp3: "" };
+    }
     const effectiveTheme =
       videoEdit.subtitleTheme === "auto" ? (darkMode ? "dark" : "light") : videoEdit.subtitleTheme;
-    return JSON.stringify({
+    const mp4 = JSON.stringify({
       uploadId: project.uploadId ?? "",
       localUrl: project.localUrl ?? "",
       title: project.title,
@@ -4136,79 +4002,149 @@ export default function App() {
       voiceSettings,
       effectiveTheme,
     });
+    const mp3 = JSON.stringify({
+      uploadId: project.uploadId ?? "",
+      localUrl: project.localUrl ?? "",
+      title: project.title,
+      scenes: project.scenes,
+      playbackSpeed: videoEdit.playbackSpeed,
+      voiceSettings,
+    });
+    return { mp4, mp3 };
   }, [project, videoEdit, voiceSettings, darkMode]);
 
+  const activeSheetFormat: ExportFormat = exportingFormat ?? exportFormat;
+  const activeExportEntry = exportsByFormat[activeSheetFormat];
+  const readyDownload = activeExportEntry.result;
+  const exportedSignature = activeExportEntry.signature;
+  const hasSavedExport = activeExportEntry.hasSaved;
+  const exportError = activeExportEntry.error;
   const isExportStale = Boolean(
-    readyDownload && exportedSignature && currentExportSignature && exportedSignature !== currentExportSignature
+    readyDownload &&
+      exportedSignature &&
+      currentExportSignatures[activeSheetFormat] &&
+      exportedSignature !== currentExportSignatures[activeSheetFormat]
+  );
+
+  const isMp4FreshReady = Boolean(
+    exportsByFormat.mp4.result &&
+      exportsByFormat.mp4.signature &&
+      exportsByFormat.mp4.signature === currentExportSignatures.mp4
+  );
+  const isMp3FreshReady = Boolean(
+    exportsByFormat.mp3.result &&
+      exportsByFormat.mp3.signature &&
+      exportsByFormat.mp3.signature === currentExportSignatures.mp3
   );
 
   useEffect(() => {
     if (!hasGeneratedProject(project) && !exportProgress) {
-      setReadyDownload(null);
-      setExportedSignature(null);
-      setHasSavedExport(false);
+      setExportsByFormat({
+        mp4: { result: null, signature: null, hasSaved: false, error: null },
+        mp3: { result: null, signature: null, hasSaved: false, error: null },
+      });
     }
   }, [project, exportProgress]);
 
   const handleDiscardExportResult = useCallback(() => {
     setExportSheetOpen(false);
-    setExportError(null);
-    setHasSavedExport(false);
-    setExportedSignature(null);
-    setReadyDownload(null);
-  }, []);
+    setExportsByFormat((prev) => ({
+      ...prev,
+      [exportFormat]: { result: null, signature: null, hasSaved: false, error: null },
+    }));
+  }, [exportFormat]);
 
-  const startBackgroundExport = async (openSheet = false) => {
+  const startBackgroundExport = async (
+    openSheet = false,
+    targetFormat: ExportFormat = exportFormat
+  ) => {
     if (!hasGeneratedProject(project) || project.scenes.length === 0 || exportProgress) return;
-    const exportSig = currentExportSignature;
+    const exportSig = currentExportSignatures[targetFormat];
+    setExportFormat(targetFormat);
+    setExportingFormat(targetFormat);
     setProcessError(null);
-    setExportError(null);
-    setHasSavedExport(false);
-    setExportedSignature(null);
-    setReadyDownload(null);
+    setExportsByFormat((prev) => ({
+      ...prev,
+      [targetFormat]: { result: null, signature: null, hasSaved: false, error: null },
+    }));
     if (openSheet) {
       setExportSheetOpen(true);
     }
-    setExportProgress({ phase: "preparing", percent: 5, detail: "Preparing export..." });
+    setExportProgress({
+      phase: "preparing",
+      percent: 5,
+      detail: targetFormat === "mp3" ? "Preparing MP3 export..." : "Preparing export...",
+    });
 
     const ctrl = new AbortController();
     exportAbortRef.current = ctrl;
 
     try {
-      const result = await exportProjectToMp4(
-        project,
-        darkMode,
-        voiceSettings,
-        videoEdit,
-        setExportProgress,
-        ctrl.signal
-      );
+      const result =
+        targetFormat === "mp3"
+          ? await exportProjectToMp3(
+              project,
+              voiceSettings,
+              videoEdit,
+              setExportProgress,
+              ctrl.signal
+            )
+          : await exportProjectToMp4(
+              project,
+              darkMode,
+              voiceSettings,
+              videoEdit,
+              setExportProgress,
+              ctrl.signal
+            );
       if (ctrl.signal.aborted) {
         URL.revokeObjectURL(result.blobUrl);
         return;
       }
 
-      // Hold verified in-memory MP4 blob + blobUrl; user explicitly taps Save MP4 once (zero duplicate downloads)
-      setHasSavedExport(false);
-      setExportedSignature(exportSig);
-      setReadyDownload(result);
+      // Hold verified in-memory blob + blobUrl; user explicitly taps Save once (zero duplicate downloads)
+      setExportsByFormat((prev) => ({
+        ...prev,
+        [targetFormat]: {
+          result,
+          signature: exportSig,
+          hasSaved: false,
+          error: null,
+        },
+      }));
     } catch (err) {
       if (ctrl.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) {
         // User intentionally cancelled export
         setExportSheetOpen(false);
         return;
       }
-      setExportError(err instanceof Error ? err.message : "Failed to export MP4.");
+      const fallbackMsg =
+        targetFormat === "mp3" ? "Failed to export MP3 audio." : "Failed to export MP4.";
+      setExportsByFormat((prev) => ({
+        ...prev,
+        [targetFormat]: {
+          ...prev[targetFormat],
+          result: null,
+          signature: null,
+          hasSaved: false,
+          error: err instanceof Error ? err.message : fallbackMsg,
+        },
+      }));
     } finally {
       if (exportAbortRef.current === ctrl) {
         exportAbortRef.current = null;
       }
+      setExportingFormat(null);
       setExportProgress(null);
     }
   };
 
   const handleExportHeaderClick = () => {
+    setExportMenuOpen(false);
     if (exportProgress || exportError) {
+      if (exportingFormat) {
+        setExportFormat(exportingFormat);
+      }
       setExportSheetOpen(true);
       return;
     }
@@ -4216,13 +4152,33 @@ export default function App() {
       setExportSheetOpen(true);
       return;
     }
-    void startBackgroundExport(false);
+    void startBackgroundExport(false, exportFormat);
+  };
+
+  const handlePickExportFormatFromMenu = (fmt: ExportFormat) => {
+    setExportMenuOpen(false);
+    setExportFormat(fmt);
+    if (exportProgress) {
+      setExportSheetOpen(true);
+      return;
+    }
+    const fmtState = exportsByFormat[fmt];
+    const fmtStale = Boolean(
+      fmtState.result &&
+        fmtState.signature &&
+        currentExportSignatures[fmt] &&
+        fmtState.signature !== currentExportSignatures[fmt]
+    );
+    if (fmtState.result && !fmtStale) {
+      setExportSheetOpen(true);
+      return;
+    }
+    void startBackgroundExport(false, fmt);
   };
 
   const canSaveCurrent = Boolean(
     hasGeneratedProject(project) ||
-      ((hasProjectMedia(project) || localMedia) &&
-        (selectedScenes.length > 0 || Boolean(transcriptResult)))
+      ((hasProjectMedia(project) || localMedia) && selectedScenes.length > 0)
   );
 
   const handleSaveProject = useCallback(
@@ -4275,7 +4231,6 @@ export default function App() {
           selectedScenes,
           voiceSettings,
           editSettings: videoEdit,
-          transcriptResult,
         });
 
         setActiveSavedId(record.id);
@@ -4309,7 +4264,6 @@ export default function App() {
       activeSavedId,
       voiceSettings,
       videoEdit,
-      transcriptResult,
     ]
   );
 
@@ -4539,17 +4493,6 @@ export default function App() {
     setSeekNonce((n) => n + 1);
     setProcessError(null);
     setSaveNotice(null);
-    standaloneTranscriptAbortRef.current?.abort();
-    standaloneTranscriptAbortRef.current = null;
-    setIsTranscribingStandalone(false);
-    setTranscriptProgress(null);
-    setTranscriptError(null);
-    const restoredTranscript = record.transcriptResult ?? null;
-    setTranscriptResult(restoredTranscript);
-    if (restoredTranscript) {
-      setTranscriptModelId(restoredTranscript.modelId);
-      setTranscriptLanguage(restoredTranscript.language);
-    }
 
     let localFile: File | undefined;
     let localUrl: string | undefined;
@@ -4627,6 +4570,12 @@ export default function App() {
               withSceneId(
                 {
                   ...sub,
+                  ...(sub.sourceSegments
+                    ? { sourceSegments: sub.sourceSegments.map((seg) => ({ ...seg })) }
+                    : {}),
+                  ...(sub.aiSourceSegments
+                    ? { aiSourceSegments: sub.aiSourceSegments.map((seg) => ({ ...seg })) }
+                    : {}),
                   words: (Array.isArray(sub.words) ? sub.words : []).map((w) => ({ ...w })),
                 },
                 openedScenes
@@ -4635,10 +4584,23 @@ export default function App() {
             speechRegions:
               Array.isArray(record.speechRegions) && record.speechRegions.length > 0
                 ? record.speechRegions.map((sr) => ({ ...sr }))
-                : (Array.isArray(record.subtitles) ? record.subtitles : []).map((sub) => ({
-                    sourceStartSec: sub.sourceStartSec,
-                    sourceEndSec: sub.sourceEndSec,
-                  })),
+                : (Array.isArray(record.subtitles) ? record.subtitles : []).flatMap((sub) =>
+                    Array.isArray(sub.sourceSegments) && sub.sourceSegments.length > 0
+                      ? sub.sourceSegments.map((seg) => ({
+                          sourceStartSec: seg.sourceStartSec,
+                          sourceEndSec: seg.sourceEndSec,
+                          mediaUrl: seg.mediaUrl,
+                          sceneId: seg.sceneId,
+                        }))
+                      : [
+                          {
+                            sourceStartSec: sub.sourceStartSec,
+                            sourceEndSec: sub.sourceEndSec,
+                            mediaUrl: sub.mediaUrl,
+                            sceneId: sub.sceneId,
+                          },
+                        ]
+                  ),
             keyframeUrls: Array.isArray(record.keyframeUrls) ? [...record.keyframeUrls] : [],
           };
         })();
@@ -5000,81 +4962,177 @@ export default function App() {
               {darkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
             </button>
 
-            <div className="flex items-center gap-1.5 shrink-0">
-              <button
-                type="button"
-                onClick={handleExportHeaderClick}
-                disabled={
+            <div ref={exportMenuRef} className="relative flex items-center gap-1.5 shrink-0">
+              {(() => {
+                const exportDisabled =
                   !exportProgress &&
                   !(readyDownload && !isExportStale) &&
                   !exportError &&
-                  (!hasGeneratedProject(project) || project.scenes.length === 0 || isProcessing)
-                }
-                title={
-                  exportProgress
-                    ? "View export progress or cancel"
-                    : readyDownload && !isExportStale
-                      ? "Open exported MP4"
-                      : exportError
-                        ? "View export error"
-                        : isExportStale
-                          ? "Export updated 9:16 MP4"
-                          : "Export 9:16 MP4"
-                }
-                aria-label={
-                  exportProgress
-                    ? `Exporting ${exportProgress.percent} percent, open details`
-                    : readyDownload && !isExportStale
-                      ? "Export ready, open to save or re-export MP4"
-                      : exportError
-                        ? "Export failed, open details"
-                        : isExportStale
-                          ? "Export updated 9:16 MP4"
-                          : "Export 9:16 MP4"
-                }
-                className={`relative overflow-hidden h-8 px-3.5 sm:px-4 rounded-md text-xs font-semibold flex items-center justify-center gap-1.5 sm:gap-2 whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-700/50 dark:focus-visible:ring-teal-400/50 ${
+                  (!hasGeneratedProject(project) || project.scenes.length === 0 || isProcessing);
+                const formatUpper = activeSheetFormat.toUpperCase();
+                const toneClasses =
                   readyDownload && !isExportStale && !exportProgress
                     ? "bg-emerald-600 hover:bg-emerald-700 text-white"
                     : exportError && !exportProgress
                       ? "border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/50 text-red-700 dark:text-red-300 hover:bg-red-100 dark:hover:bg-red-900/60"
-                      : "bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918]"
-                }`}
-              >
-                {exportProgress ? (
-                  <>
-                    <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
-                    <span className="font-mono-tabular">{exportProgress.percent}%</span>
-                    <span
-                      aria-hidden="true"
-                      className="absolute bottom-0 left-0 h-[2px] bg-white/80 dark:bg-[#060918]/70 transition-[width] duration-300"
-                      style={{ width: `${Math.max(6, exportProgress.percent)}%` }}
-                    />
-                  </>
-                ) : readyDownload && !isExportStale ? (
-                  <>
-                    <Check className="w-3.5 h-3.5 shrink-0" />
-                    <span>{hasSavedExport ? "Saved" : "MP4 Ready"}</span>
-                  </>
-                ) : exportError ? (
-                  <>
-                    <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                    <span>Export Failed</span>
-                  </>
-                ) : (
-                  <>
-                    <ArrowUpFromLine className="w-3.5 h-3.5 shrink-0" />
-                    <span>Export MP4</span>
-                  </>
-                )}
-              </button>
+                      : "bg-teal-700 hover:bg-teal-800 text-white dark:bg-teal-400 dark:hover:bg-teal-300 dark:text-[#060918]";
+                const dividerClasses =
+                  readyDownload && !isExportStale && !exportProgress
+                    ? "border-l border-white/25"
+                    : exportError && !exportProgress
+                      ? "border-l border-red-300 dark:border-red-800"
+                      : "border-l border-white/25 dark:border-[#060918]/20";
+
+                return (
+                  <div className="inline-flex items-center">
+                    <button
+                      type="button"
+                      onClick={handleExportHeaderClick}
+                      disabled={exportDisabled}
+                      title={
+                        exportProgress
+                          ? "View export progress or cancel"
+                          : readyDownload && !isExportStale
+                            ? `Open exported ${formatUpper}`
+                            : exportError
+                              ? "View export error"
+                              : isExportStale
+                                ? `Export updated ${formatUpper}`
+                                : activeSheetFormat === "mp3"
+                                  ? "Export MP3 Audio"
+                                  : "Export 9:16 MP4"
+                      }
+                      aria-label={
+                        exportProgress
+                          ? `Exporting ${formatUpper} ${exportProgress.percent} percent, open details`
+                          : readyDownload && !isExportStale
+                            ? `${formatUpper} export ready, open to save or re-export`
+                            : exportError
+                              ? "Export failed, open details"
+                              : activeSheetFormat === "mp3"
+                                ? "Export MP3 Audio"
+                                : "Export 9:16 MP4"
+                      }
+                      className={`relative overflow-hidden h-8 pl-3 pr-2.5 sm:pl-3.5 sm:pr-3 rounded-l-md text-xs font-semibold flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-700/50 dark:focus-visible:ring-teal-400/50 ${toneClasses}`}
+                    >
+                      {exportProgress ? (
+                        <>
+                          <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                          <span className="font-mono-tabular">
+                            {exportProgress.percent}% {formatUpper}
+                          </span>
+                          <span
+                            aria-hidden="true"
+                            className="absolute bottom-0 left-0 h-[2px] bg-white/80 dark:bg-[#060918]/70 transition-[width] duration-300"
+                            style={{ width: `${Math.max(6, exportProgress.percent)}%` }}
+                          />
+                        </>
+                      ) : readyDownload && !isExportStale ? (
+                        <>
+                          <Check className="w-3.5 h-3.5 shrink-0" />
+                          <span>{hasSavedExport ? "Saved" : `${formatUpper} Ready`}</span>
+                        </>
+                      ) : exportError ? (
+                        <>
+                          <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                          <span>Export Failed</span>
+                        </>
+                      ) : (
+                        <>
+                          <ArrowUpFromLine className="w-3.5 h-3.5 shrink-0" />
+                          <span>Export {formatUpper}</span>
+                        </>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setExportMenuOpen((v) => !v)}
+                      disabled={
+                        !hasGeneratedProject(project) || project.scenes.length === 0 || isProcessing
+                      }
+                      aria-haspopup="menu"
+                      aria-expanded={exportMenuOpen}
+                      aria-label="Choose export format (MP4 or MP3)"
+                      title="Choose export format (MP4 or MP3)"
+                      className={`h-8 w-7 rounded-r-md flex items-center justify-center shrink-0 disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-700/50 dark:focus-visible:ring-teal-400/50 ${toneClasses} ${dividerClasses}`}
+                    >
+                      <ChevronDown
+                        className={`w-3.5 h-3.5 transition-transform ${
+                          exportMenuOpen ? "rotate-180" : ""
+                        }`}
+                      />
+                    </button>
+                  </div>
+                );
+              })()}
+
+              {exportMenuOpen && (
+                <div
+                  role="menu"
+                  aria-label="Export format options"
+                  className="absolute right-0 top-full mt-1.5 w-52 rounded-lg border border-[#d2dcf0] dark:border-[#21284c] bg-white dark:bg-[#0d1022] shadow-xl py-1 z-40"
+                >
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => handlePickExportFormatFromMenu("mp4")}
+                    className="w-full px-3 py-2 text-left flex items-center justify-between gap-2 hover:bg-[#f3f5fc] dark:hover:bg-[#141933] transition-colors cursor-pointer"
+                  >
+                    <span className="flex items-center gap-2.5 min-w-0">
+                      <Film className="w-4 h-4 text-teal-700 dark:text-teal-400 shrink-0" />
+                      <span className="min-w-0">
+                        <span className="block text-xs font-semibold text-[#0c1026] dark:text-[#f3f5fc]">
+                          Export MP4
+                        </span>
+                        <span className="block text-[11px] text-[#4d597d] dark:text-[#919ec4]">
+                          9:16 Video &amp; Subtitles
+                        </span>
+                      </span>
+                    </span>
+                    {isMp4FreshReady ? (
+                      <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-300">
+                        Ready
+                      </span>
+                    ) : exportFormat === "mp4" ? (
+                      <Check className="w-3.5 h-3.5 text-teal-700 dark:text-teal-400 shrink-0" />
+                    ) : null}
+                  </button>
+
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => handlePickExportFormatFromMenu("mp3")}
+                    className="w-full px-3 py-2 text-left flex items-center justify-between gap-2 hover:bg-[#f3f5fc] dark:hover:bg-[#141933] transition-colors cursor-pointer"
+                  >
+                    <span className="flex items-center gap-2.5 min-w-0">
+                      <Music className="w-4 h-4 text-teal-700 dark:text-teal-400 shrink-0" />
+                      <span className="min-w-0">
+                        <span className="block text-xs font-semibold text-[#0c1026] dark:text-[#f3f5fc]">
+                          Export MP3
+                        </span>
+                        <span className="block text-[11px] text-[#4d597d] dark:text-[#919ec4]">
+                          Edited Audio Track
+                        </span>
+                      </span>
+                    </span>
+                    {isMp3FreshReady ? (
+                      <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-300">
+                        Ready
+                      </span>
+                    ) : exportFormat === "mp3" ? (
+                      <Check className="w-3.5 h-3.5 text-teal-700 dark:text-teal-400 shrink-0" />
+                    ) : null}
+                  </button>
+                </div>
+              )}
 
               {readyDownload && !isExportStale && !exportProgress && hasGeneratedProject(project) && project.scenes.length > 0 && (
                 <button
                   type="button"
-                  onClick={() => void startBackgroundExport(true)}
+                  onClick={() => void startBackgroundExport(true, activeSheetFormat)}
                   disabled={isProcessing}
-                  title="Re-export 9:16 MP4"
-                  aria-label="Re-export 9:16 MP4"
+                  title={`Re-export ${activeSheetFormat.toUpperCase()}`}
+                  aria-label={`Re-export ${activeSheetFormat.toUpperCase()}`}
                   className="h-8 px-2 sm:px-2.5 rounded-md border border-[#d2dcf0] dark:border-[#21284c] bg-[#f3f5fc] dark:bg-[#141933] hover:bg-[#e7ecf8] dark:hover:bg-[#1a2142] text-xs font-medium text-[#0c1026] dark:text-[#f3f5fc] flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer"
                 >
                   <RefreshCw className="w-3.5 h-3.5 shrink-0" />
@@ -5194,7 +5252,7 @@ export default function App() {
               onUpdateWordGloss={handleUpdateWordGloss}
               onFindReplaceSubtitles={handleFindReplaceSubtitles}
               onAddSubtitle={handleAddSubtitle}
-              onOpenPasteTranscript={() => setShowPasteTranscriptDialog(true)}
+              onOpenGenerateSubtitles={() => setShowGenerateSubtitlesDialog(true)}
               onClearAllSubtitles={handleClearAllSubtitles}
               onDeleteSubtitle={handleDeleteSubtitle}
               onUpdateSubtitleTiming={handleUpdateSubtitleTiming}
@@ -5282,20 +5340,6 @@ export default function App() {
               onApplyPasteTranscriptSync={handleApplyPasteTranscriptSync}
               onPreviewSourceSeek={handlePreviewSourceSeek}
               hideCaptions={!SHOW_CAPTIONS_UI}
-              transcriptModelId={transcriptModelId}
-              transcriptLanguage={transcriptLanguage}
-              transcriptWordTimestamps={transcriptWordTimestamps}
-              isTranscribingStandalone={isTranscribingStandalone}
-              transcriptProgress={transcriptProgress}
-              transcriptError={transcriptError}
-              transcriptResult={transcriptResult}
-              onChangeTranscriptModel={setTranscriptModelId}
-              onChangeTranscriptLanguage={setTranscriptLanguage}
-              onChangeTranscriptWordTimestamps={setTranscriptWordTimestamps}
-              onStartStandaloneTranscript={handleStartStandaloneTranscript}
-              onCancelStandaloneTranscript={handleCancelStandaloneTranscript}
-              onClearTranscriptError={() => setTranscriptError(null)}
-              onUpdateTranscriptSegmentText={handleUpdateTranscriptSegmentText}
             />
           );
 
@@ -5400,7 +5444,7 @@ export default function App() {
                       onUpdateScenes={handleUpdateProjectScenes}
                       onUpdateSubtitleTiming={handleUpdateSubtitleTiming}
                       onAddSubtitle={handleAddSubtitle}
-                      onOpenPasteTranscript={() => setShowPasteTranscriptDialog(true)}
+                      onOpenGenerateSubtitles={() => setShowGenerateSubtitlesDialog(true)}
                       onClearAllSubtitles={handleClearAllSubtitles}
                       onEditSubtitle={(id) => {
                         setSelectedSubtitleId(id);
@@ -5485,29 +5529,50 @@ export default function App() {
 
       <ExportSheet
         open={exportSheetOpen}
+        format={activeSheetFormat}
         progress={exportProgress}
         result={readyDownload}
         hasSaved={hasSavedExport}
         isStale={isExportStale}
         error={exportError}
-        canShare={readyDownload ? canShareMp4File(readyDownload) : false}
+        canShare={readyDownload ? canShareExportFile(readyDownload) : false}
+        hasMp4Ready={isMp4FreshReady}
+        hasMp3Ready={isMp3FreshReady}
+        onSelectFormat={(fmt) => {
+          if (!exportProgress) {
+            setExportFormat(fmt);
+          }
+        }}
         onMinimize={handleMinimizeExportSheet}
         onCancel={handleCancelExport}
         onSave={triggerSafeBlobDownload}
-        onShare={handleShareMp4}
-        onRetry={() => void startBackgroundExport(true)}
+        onShare={handleShareExport}
+        onRetry={() => void startBackgroundExport(true, activeSheetFormat)}
         onDiscardResult={handleDiscardExportResult}
       />
 
-      <PasteStructuredTranscriptDialog
-        isOpen={Boolean(showPasteTranscriptDialog && project)}
-        onClose={() => setShowPasteTranscriptDialog(false)}
-        selectedScenes={selectedScenes}
-        scenes={project?.scenes}
-        totalDurationSec={project?.targetDurationSec || localMedia?.durationSec || 0}
-        sourceDurationSec={localMedia?.durationSec || project?.sourceDurationSec || 0}
+      <GenerateSubtitlesDialog
+        isOpen={Boolean(showGenerateSubtitlesDialog && project)}
+        onClose={() => setShowGenerateSubtitlesDialog(false)}
+        config={subtitleGenConfig}
+        hasExistingSubtitles={(project?.subtitles.length ?? 0) > 0}
         existingSubtitleCount={project?.subtitles.length ?? 0}
-        onApply={handleApplyPastedTranscript}
+        clipCount={selectedScenes.length}
+        totalDurationSec={project?.targetDurationSec || localMedia?.durationSec || 0}
+        canGenerate={Boolean(localMedia?.localFile && selectedScenes.length > 0 && !isProcessing)}
+        missingMediaReason={
+          !localMedia?.localFile
+            ? "Please upload or link a local video file first to generate subtitles with Gemini."
+            : selectedScenes.length === 0
+              ? "Add at least one clip to the timeline first."
+              : null
+        }
+        isGenerating={isProcessing}
+        generationProgress={generationProgress}
+        processError={processError}
+        onChangeConfig={handleChangeSubtitleGenConfig}
+        onStartGenerate={(cfg) => void handleGenerateSubtitles(cfg)}
+        onCancelGenerate={handleCancelGenerateSubtitles}
       />
 
       {shortcutToast && (

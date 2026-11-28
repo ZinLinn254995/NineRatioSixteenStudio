@@ -6,7 +6,6 @@ import {
   Check,
   ChevronDown,
   ChevronUp,
-  ClipboardPaste,
   Eraser,
   Film,
   Flag,
@@ -33,7 +32,7 @@ import type {
   SubtitleItem,
   VideoProject,
 } from "../types";
-import { ensureSceneIds, roundTenth } from "../utils/projectTimeline";
+import { ensureSceneIds, getSceneDurationSec, roundTenth } from "../utils/projectTimeline";
 import { hasGeneratedProject, hasProjectMedia } from "../utils/projectState";
 import {
   projectSpeechRegionsToCutTimeline,
@@ -69,7 +68,7 @@ interface ProjectTimelineEditorProps {
     },
     opts?: { select?: boolean; seekToStart?: boolean }
   ) => void;
-  onOpenPasteTranscript?: () => void;
+  onOpenGenerateSubtitles?: () => void;
   onClearAllSubtitles?: () => void;
   onEditSubtitle?: (id: string) => void;
   onDeleteSubtitle?: (id: string) => void;
@@ -271,7 +270,7 @@ export function ProjectTimelineEditor({
   onUpdateScenes,
   onUpdateSubtitleTiming,
   onAddSubtitle,
-  onOpenPasteTranscript,
+  onOpenGenerateSubtitles,
   onClearAllSubtitles,
   onEditSubtitle,
   onDeleteSubtitle,
@@ -444,7 +443,7 @@ export function ProjectTimelineEditor({
     const list: ClipSegment[] = [];
     let cursor = 0;
     normalizedScenes.forEach((sc, idx) => {
-      const dur = Math.max(0.1, sc.endSec - sc.startSec);
+      const dur = getSceneDurationSec(sc);
       const cutStart = cursor;
       const cutEnd = cursor + dur;
       const sceneId = sc.id || `proj-sc-${idx}`;
@@ -697,7 +696,10 @@ export function ProjectTimelineEditor({
     ? `${activeTimelineProject.localUrl || ""}:${activeTimelineProject.title}`
     : "none";
 
+  const lastImportBatchKeyRef = useRef<string | null>(null);
+
   useEffect(() => {
+    lastImportBatchKeyRef.current = null;
     if (previewSeekTimerRef.current !== null) {
       window.clearTimeout(previewSeekTimerRef.current);
       previewSeekTimerRef.current = null;
@@ -760,17 +762,33 @@ export function ProjectTimelineEditor({
     );
   }, [projectIdentity]);
 
-  // Keep local baselineSubRegions aligned when subtitles are cleared or replaced wholesale (e.g. Paste Transcript)
-  const subFirstId = project?.subtitles[0]?.id ?? "";
-  const subCountKey = project?.subtitles.length ?? 0;
+  // Keep local baselineSubRegions aligned when subtitles are cleared or replaced by a new import batch
+  const importBatchKey = useMemo(() => {
+    const subs = project?.subtitles ?? [];
+    if (subs.length === 0) return "";
+    const tokens = new Set<string>();
+    for (const s of subs) {
+      if (s.id.startsWith("sub-import-")) {
+        const lastDash = s.id.lastIndexOf("-");
+        tokens.add(lastDash > "sub-import-".length ? s.id.slice(lastDash + 1) : s.id);
+      }
+    }
+    return tokens.size > 0 ? Array.from(tokens).sort().join(",") : "";
+  }, [project?.subtitles]);
+
   useEffect(() => {
     if (!hasGeneratedProject(project) || project.subtitles.length === 0) {
+      lastImportBatchKeyRef.current = null;
       if (baselineSubRegions.length > 0) {
         setBaselineSubRegions([]);
       }
       return;
     }
-    if (baselineSubRegions.length === 0 || subFirstId.startsWith("sub-import-")) {
+    const hasNewImportBatch = Boolean(
+      importBatchKey && lastImportBatchKeyRef.current !== importBatchKey
+    );
+    if (baselineSubRegions.length === 0 || hasNewImportBatch) {
+      lastImportBatchKeyRef.current = importBatchKey || null;
       setBaselineSubRegions(
         project.subtitles.flatMap((s) =>
           Array.isArray(s.sourceSegments) && s.sourceSegments.length > 0
@@ -791,7 +809,7 @@ export function ProjectTimelineEditor({
         )
       );
     }
-  }, [baselineSubRegions.length, project, subFirstId, subCountKey]);
+  }, [baselineSubRegions.length, project, importBatchKey]);
 
   // Clear activeSceneId only if the previously selected scene was removed (never auto-select on load)
   useEffect(() => {
@@ -1189,7 +1207,7 @@ export function ProjectTimelineEditor({
       selectSub(null, { scrollList: false });
 
       const newMaxCut = nextScenes.reduce(
-        (acc, sc) => acc + Math.max(0.1, sc.endSec - sc.startSec),
+        (acc, sc) => acc + getSceneDurationSec(sc),
         0
       );
       const nextCut = Math.max(0, Math.min(newMaxCut, selectedVideoSegment.cutStart));
@@ -1538,6 +1556,7 @@ export function ProjectTimelineEditor({
       currentEnd: number;
     }> = [];
     subs.forEach((sub, subIdx) => {
+      const hasAiSegments = Array.isArray(sub.aiSourceSegments) && sub.aiSourceSegments.length > 0;
       const hasAiAnchor =
         typeof sub.aiSourceStartSec === "number" &&
         Number.isFinite(sub.aiSourceStartSec) &&
@@ -1545,7 +1564,7 @@ export function ProjectTimelineEditor({
         Number.isFinite(sub.aiSourceEndSec) &&
         sub.aiSourceEndSec > sub.aiSourceStartSec;
 
-      if (!hasAiAnchor) {
+      if (!hasAiAnchor && !hasAiSegments) {
         list.push({
           key: `ai-guide-${sub.id}-0`,
           subId: sub.id,
@@ -1558,10 +1577,11 @@ export function ProjectTimelineEditor({
         return;
       }
 
-      const origSrcStart = sub.aiSourceStartSec!;
-      const origSrcEnd = sub.aiSourceEndSec!;
+      const origSrcStart = sub.aiSourceStartSec ?? sub.sourceStartSec;
+      const origSrcEnd = sub.aiSourceEndSec ?? sub.sourceEndSec;
 
       const matchesCurrentSource =
+        !hasAiSegments &&
         Math.abs(origSrcStart - sub.sourceStartSec) < 0.005 &&
         Math.abs(origSrcEnd - sub.sourceEndSec) < 0.005;
 
@@ -1578,14 +1598,23 @@ export function ProjectTimelineEditor({
         return;
       }
 
-      const projected = projectSpeechRegionsToCutTimeline(segments, [
-        {
-          sourceStartSec: origSrcStart,
-          sourceEndSec: origSrcEnd,
-          mediaUrl: sub.mediaUrl,
-          sceneId: sub.sceneId,
-        },
-      ]);
+      const guideRegions: SpeechRegion[] = hasAiSegments
+        ? sub.aiSourceSegments!.map((seg) => ({
+            sourceStartSec: seg.sourceStartSec,
+            sourceEndSec: seg.sourceEndSec,
+            mediaUrl: seg.mediaUrl,
+            sceneId: seg.sceneId,
+          }))
+        : [
+            {
+              sourceStartSec: origSrcStart,
+              sourceEndSec: origSrcEnd,
+              mediaUrl: sub.mediaUrl,
+              sceneId: sub.sourceSegments && sub.sourceSegments.length > 1 ? undefined : sub.sceneId,
+            },
+          ];
+
+      const projected = projectSpeechRegionsToCutTimeline(segments, guideRegions);
       projected.forEach((proj, pIdx) => {
         list.push({
           key: `ai-guide-${sub.id}-${pIdx}`,
@@ -2186,7 +2215,7 @@ export function ProjectTimelineEditor({
               onUpdateScenes(nextScenes);
               let movedCutStart = 0;
               for (let i = 0; i < clampedTo; i++) {
-                movedCutStart += Math.max(0.1, nextScenes[i].endSec - nextScenes[i].startSec);
+                movedCutStart += getSceneDurationSec(nextScenes[i]);
               }
               setActiveSceneId(sceneId);
               dispatchSeek(movedCutStart, true);
@@ -2312,7 +2341,7 @@ export function ProjectTimelineEditor({
           );
           onUpdateScenes(nextScenes);
           const newMaxCut = nextScenes.reduce(
-            (acc, sc) => acc + Math.max(0.1, sc.endSec - sc.startSec),
+            (acc, sc) => acc + getSceneDurationSec(sc),
             0
           );
           const stayCut = Math.max(0, Math.min(newMaxCut, stayFrozen ?? cutTimeRef.current));
@@ -4090,21 +4119,21 @@ export function ProjectTimelineEditor({
                 </button>
               )}
 
-              {onOpenPasteTranscript && (
+              {onOpenGenerateSubtitles && (
                 <button
                   type="button"
                   disabled={segments.length === 0}
                   onClick={(e) => {
                     e.currentTarget.blur();
-                    onOpenPasteTranscript();
+                    onOpenGenerateSubtitles();
                   }}
-                  title="Paste formatted transcript to add subtitles"
-                  aria-label="Paste structured transcript to add subtitles"
-                  className="w-[96px] h-11 px-1.5 rounded-xl border border-teal-600/45 dark:border-teal-400/45 bg-white/92 dark:bg-[#0d1126]/92 backdrop-blur-md shadow-[0_4px_14px_rgba(10,16,40,0.12)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.45)] flex flex-col items-center justify-center gap-1 shrink-0 whitespace-nowrap text-teal-700 dark:text-teal-300 hover:bg-teal-50/95 dark:hover:bg-[#0f2433] hover:border-teal-600/70 dark:hover:border-teal-400/70 active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-teal-500"
+                  title="Choose settings and generate translated subtitles with Gemini AI"
+                  aria-label="Generate subtitles with Gemini AI"
+                  className="w-[104px] h-11 px-1.5 rounded-xl border border-teal-600/45 dark:border-teal-400/45 bg-white/92 dark:bg-[#0d1126]/92 backdrop-blur-md shadow-[0_4px_14px_rgba(10,16,40,0.12)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.45)] flex flex-col items-center justify-center gap-1 shrink-0 whitespace-nowrap text-teal-700 dark:text-teal-300 hover:bg-teal-50/95 dark:hover:bg-[#0f2433] hover:border-teal-600/70 dark:hover:border-teal-400/70 active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-teal-500"
                 >
-                  <ClipboardPaste className="w-4 h-4 shrink-0" />
+                  <Sparkles className="w-4 h-4 shrink-0" />
                   <span className="text-[10px] font-semibold leading-none truncate max-w-full">
-                    Paste Transcript
+                    Generate Subtitle
                   </span>
                 </button>
               )}
